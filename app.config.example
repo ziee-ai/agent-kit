@@ -1,9 +1,16 @@
 # agent-kit app.config — EXAMPLE
 #
 # Copy this to `<your-app>/.claude/app.config` and fill in your app's paths.
-# It is a plain KEY=value data file (one key per line, `#` comments). It is
-# READ, never `source`d — a committed config a gate consumes must not be able to
-# run arbitrary shell.
+# It is a plain KEY=value data file (one key per line). It is READ, never
+# `source`d — a committed config a gate consumes must not be able to run
+# arbitrary shell.
+#
+# FORMAT RULES:
+#  - Comments (`#`) must be on their OWN line. An inline `KEY=val # note` is NOT
+#    supported — the `# note` becomes part of the value.
+#  - The value is everything after the first `=`, with leading/trailing
+#    whitespace trimmed (internal spaces are preserved, e.g. a space-separated
+#    list). On a duplicate key the FIRST occurrence wins.
 #
 # CONTRACT: every key is OPTIONAL. A check/gate whose key is UNSET is SKIPPED,
 # never failed — so the shared `preflight.sh` + `merge-gate.mjs` run unchanged

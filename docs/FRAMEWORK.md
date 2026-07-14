@@ -17,13 +17,14 @@ sections, etc.) stay in each app's own `CLAUDE.md`, NOT here.
 @./PERMISSION_GATING.md
 @./TESTING_GUIDE.md
 @./DEVELOPMENT_GUIDE.md
+@./FRONTEND_DEPS.md
 @./DESIGN_SYSTEM.md
 @./CODING_GUIDELINES.md
 
 ## Availability note
 
 At bootstrap time only `DESIGN_SYSTEM.md` and `CODING_GUIDELINES.md` were present
-on the source machine. The other six are **PENDING-sync stubs** — each names what
+on the source machine. The other seven are **PENDING-sync stubs** — each names what
 belongs there. Replacing a stub with its canonical doc is a drop-in: consumers
 import this index, so no consumer edit is needed when the real content lands.
 
@@ -37,3 +38,4 @@ import this index, so no consumer edit is needed when the real content lands.
 | PERMISSION_GATING.md | ⏳ PENDING sync |
 | TESTING_GUIDE.md | ⏳ PENDING sync |
 | DEVELOPMENT_GUIDE.md | ⏳ PENDING sync |
+| FRONTEND_DEPS.md | ⏳ PENDING sync |

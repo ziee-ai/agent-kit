@@ -54,6 +54,15 @@ a submodule's own `CLAUDE.md`/`.claude/` is NOT picked up. So each app:
    `git submodule update --init` + creates the symlinks + installs the pre-push
    hook via `scripts/install-agent-hooks.sh`).
 
+**Fresh clone / Windows caveat.** The `.claude` symlinks are committed, so a
+checkout HAS them — but they DANGLE until the submodule is populated, so
+`just dev-init` (which inits the submodule first) is the FIRST post-clone step;
+even the bootstrap `bash .claude/lifecycle/preflight.sh` is unreachable before
+it. On Windows, default Git checks committed symlinks out as plain TEXT FILES
+unless symlink support is on — enable Developer Mode (or run as admin) and
+`git config core.symlinks true`; `dev-init` detects a non-symlink checkout and
+tells you how to fix it.
+
 ziee is the reference consumer (branch `feat/agent-kit-consume`).
 
 ## De-ziee-ify contract

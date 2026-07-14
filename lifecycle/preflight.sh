@@ -49,15 +49,18 @@ fi
 # (grep, NOT `source`) — a committed config a gate consumes must never be able
 # to execute arbitrary shell.
 CONFIG="$REPO/.claude/app.config"
-# cfg <KEY> — prints the value (everything after the first '='), CR-stripped;
-# empty when the file or key is absent.
+# cfg <KEY> — prints the value (everything after the first '='), CR-stripped and
+# leading/trailing-whitespace-trimmed (to match merge-gate.mjs's .trim(), so the
+# two consumers of the same file agree). Empty when the file or key is absent;
+# on a duplicate key it keeps the FIRST occurrence (grep|head -1), matching the
+# node parser's keep-first rule.
 cfg() {
   [ -f "$CONFIG" ] || return 0
   local line
   line="$(grep -E "^$1=" "$CONFIG" 2>/dev/null | head -1)" || return 0
   [ -n "$line" ] || return 0
   local val="${line#*=}"
-  printf '%s' "$val" | tr -d '\r'
+  printf '%s' "$val" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
 }
 
 FAIL=0
@@ -133,8 +136,20 @@ BDB_HP="$(cfg PREFLIGHT_BUILD_DB_HOSTPORT)"
 BDB_SENTINEL="$(cfg PREFLIGHT_BUILD_DB_SENTINEL)"
 if [ -n "$BDB_ENV" ] || [ -n "$BDB_HP" ]; then
   # indirect-read the env var named by the config (bash 3.2+; the shebang is bash).
+  # SECURITY: the var NAME comes from a committed config file, and bash indirect
+  # expansion ${!name} EVALUATES an array-subscript/command-substitution embedded
+  # in the name (e.g. name='x[$(cmd)]' runs cmd) — which would violate this file's
+  # "READ, never sourced / cannot execute shell" contract. So reject any
+  # PREFLIGHT_BUILD_DB_ENV that is not a plain POSIX identifier before expanding.
   BDB_VAL=1
-  [ -n "$BDB_ENV" ] && BDB_VAL="${!BDB_ENV:-1}"
+  if [ -n "$BDB_ENV" ]; then
+    if printf '%s' "$BDB_ENV" | grep -qE '^[A-Za-z_][A-Za-z0-9_]*$'; then
+      BDB_VAL="${!BDB_ENV:-1}"
+    else
+      warn "PREFLIGHT_BUILD_DB_ENV is not a valid shell identifier ('$BDB_ENV') — ignoring it (a config value is never evaluated as code)" ""
+      BDB_ENV=""
+    fi
+  fi
   # build the "local cluster" match pattern from the configured host:port.
   LOCAL_RE=""
   if [ -n "$BDB_HP" ]; then
@@ -217,8 +232,15 @@ if [ -n "$CFG_DIR_REL" ] && [ -n "$CFG_FILE" ] && [ -n "$CFG_EXAMPLE" ] && [ -n 
     if [ -f "$DEV_EX" ]; then
       SECRET="$(gen_secret)"
       # replace only the exact placeholder VALUE (| delimiter: base64 never contains |).
-      sed "s|\"$PLACEHOLDER\"|\"$SECRET\"|" "$DEV_EX" > "$DEV_CFG"
-      ok "bootstrapped $CFG_DIR_REL/$CFG_FILE from $CFG_EXAMPLE (generated a random jwt.secret; edit for an external DB)"
+      # Guard the write: a sed failure (or an empty result) must NOT be reported as a
+      # successful bootstrap — remove the truncated file and fail loud instead.
+      if sed "s|\"$PLACEHOLDER\"|\"$SECRET\"|" "$DEV_EX" > "$DEV_CFG" && [ -s "$DEV_CFG" ]; then
+        ok "bootstrapped $CFG_DIR_REL/$CFG_FILE from $CFG_EXAMPLE (generated a random jwt.secret; edit for an external DB)"
+      else
+        rm -f "$DEV_CFG"
+        bad "failed to bootstrap $CFG_DIR_REL/$CFG_FILE from $CFG_EXAMPLE (sed error / empty output)" \
+            "author $DEV_CFG manually — the server will not boot without it"
+      fi
     else
       bad "$CFG_DIR_REL/$CFG_FILE missing and no $CFG_EXAMPLE to seed from" \
           "author $DEV_CFG manually — the server will not boot without it"

@@ -448,6 +448,14 @@ echo "CREATE TABLE b();" > "$R/src-app/server/migrations/00000000000009_early.sq
 git -C "$R" add -A && git -C "$R" commit -qm branch-mig
 assert_exit_cmd 0 "merge-gate: NO app.config ⇒ C2 SKIPs (collision not flagged)" -- \
   node "$MG" feat/mig --repo "$R" --base main --no-fetch --skip-heavy
+# strengthen: exit 0 alone can't distinguish SKIP from PASS — assert the C2 line
+# actually reads SKIP in the just-captured output (/tmp/lc-selftest.out).
+if grep -qE "C2.*SKIP" /tmp/lc-selftest.out; then
+  PASS=$((PASS+1)); printf '  \033[32mok  \033[0m %s\n' "merge-gate: NO app.config ⇒ C2 line explicitly reads SKIP (not PASS)"
+else
+  FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "merge-gate: NO app.config — C2 did not report SKIP"
+  sed 's/^/        | /' /tmp/lc-selftest.out
+fi
 
 # C4 stale: main advances after fork; branch is behind; --max-behind 0
 R="$(new_repo)"; CLEANUP+=("$R")

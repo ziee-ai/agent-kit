@@ -99,7 +99,10 @@ function loadAppConfig(root) {
       if (!line || line.startsWith('#')) continue;
       const i = line.indexOf('=');
       if (i === -1) continue;
-      cfg[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+      const k = line.slice(0, i).trim();
+      // keep the FIRST occurrence of a duplicate key (matches preflight.sh's
+      // grep|head -1, so both consumers of this file agree).
+      if (!(k in cfg)) cfg[k] = line.slice(i + 1).trim();
     }
   } catch { /* no app.config → every app-specific gate SKIPs */ }
   return cfg;
@@ -338,8 +341,14 @@ function gateC3() {
   if (!REGEN_CMD || GENERATED.length === 0) { record('C3', 'regen-parity', 'SKIP', 'MERGE_REGEN_CMD/MERGE_GENERATED unset (no regen configured)'); return; }
   const [regenCmd, ...regenArgs] = REGEN_CMD.split(/\s+/);
   const r = spawnSync(regenCmd, regenArgs, { cwd: staging, encoding: 'utf8', stdio: 'pipe', maxBuffer: 256 * 1024 * 1024 });
+  // A missing binary / spawn failure returns status null + undefined stdout — guard
+  // it, else `(r.stdout + r.stderr).split()` throws instead of recording a FAIL.
+  if (r.error || r.status === null) {
+    record('C3', 'regen-parity', 'FAIL', `${REGEN_CMD} could not run: ${r.error ? r.error.message : 'process did not exit normally'} (is "${regenCmd}" installed?)`);
+    return;
+  }
   if (r.status !== 0) {
-    record('C3', 'regen-parity', 'FAIL', `${REGEN_CMD} failed (exit ${r.status}). Tail:\n${(r.stdout + r.stderr).split(/\n/).slice(-12).join('\n')}`);
+    record('C3', 'regen-parity', 'FAIL', `${REGEN_CMD} failed (exit ${r.status}). Tail:\n${((r.stdout || '') + (r.stderr || '')).split(/\n/).slice(-12).join('\n')}`);
     return;
   }
   // After a correct regen against the merged backend, the committed generated
@@ -381,10 +390,15 @@ function gateC1() {
   const args = ['check', '-p', CARGO_PACKAGE, '--tests'];
   if (CARGO_DESKTOP_PACKAGE && DESKTOP_TOUCH_PREFIX && touched(DESKTOP_TOUCH_PREFIX)) args.push('-p', CARGO_DESKTOP_PACKAGE);
   const chk = spawnSync('cargo', args, { cwd, encoding: 'utf8', stdio: 'pipe', maxBuffer: 256 * 1024 * 1024 });
+  // guard a missing/failed-to-spawn cargo (status null + undefined stdout).
+  if (chk.error || chk.status === null) {
+    record('C1', 'clean-build', 'FAIL', `cargo could not run: ${chk.error ? chk.error.message : 'process did not exit normally'} (is cargo installed?)`);
+    return;
+  }
   if (chk.status !== 0) {
     record('C1', 'clean-build', 'FAIL',
       `cargo clean -p ${CARGO_PACKAGE} && cargo ${args.join(' ')} FAILED from a CLEAN merged tree (warm builds mask this). Tail:\n` +
-      (chk.stdout + chk.stderr).split(/\n/).filter((l) => /error/i.test(l)).slice(0, 12).join('\n'));
+      ((chk.stdout || '') + (chk.stderr || '')).split(/\n/).filter((l) => /error/i.test(l)).slice(0, 12).join('\n'));
   } else {
     record('C1', 'clean-build', 'PASS', `cargo check clean from the merged tree${CARGO_DESKTOP_PACKAGE && args.includes(CARGO_DESKTOP_PACKAGE) ? ' (+ desktop crate)' : ''}`);
   }

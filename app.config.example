@@ -1,0 +1,51 @@
+# agent-kit app.config — EXAMPLE
+#
+# Copy this to `<your-app>/.claude/app.config` and fill in your app's paths.
+# It is a plain KEY=value data file (one key per line, `#` comments). It is
+# READ, never `source`d — a committed config a gate consumes must not be able to
+# run arbitrary shell.
+#
+# CONTRACT: every key is OPTIONAL. A check/gate whose key is UNSET is SKIPPED,
+# never failed — so the shared `preflight.sh` + `merge-gate.mjs` run unchanged
+# across every app; each app supplies only the keys that apply to it. With no
+# app.config at all, preflight runs only its generic checks (exit 0) and
+# merge-gate runs only its app-agnostic gates (C4/staging-merge/P2/C5).
+#
+# The values below are ZIEE's — a Rust(+cargo workspace)/React(npm workspaces)
+# monorepo. A different app (e.g. a Python/TS app) sets a different subset.
+
+# ── preflight.sh (Phase-1 environment gate) ───────────────────────────────
+# A build-embedded seed file that makes the build PANIC if absent.
+PREFLIGHT_SEED_FILE=src-app/server/binaries/hub-seed/index.json
+# One-line fix hint printed when the seed is missing.
+PREFLIGHT_SEED_HINT=rm -rf src-app/server/binaries/hub-seed && cargo check -p ziee (refetch), or cp it from another clone
+# A vendored git submodule that must be initialized before the build.
+PREFLIGHT_SUBMODULE=src-app/server/vendor/pgvector
+# npm workspaces (space-separated) that hoist to the repo-root node_modules.
+PREFLIGHT_NODE_WORKSPACES=src-app/ui src-app/desktop/ui
+# Env var name that toggles per-worktree build-DB isolation (=0 disables it).
+PREFLIGHT_BUILD_DB_ENV=ZIEE_BUILD_DB_PERWORKTREE
+# host:port of the local build-DB cluster (used to detect an external override).
+PREFLIGHT_BUILD_DB_HOSTPORT=127.0.0.1:54321
+# (optional) an extra committed DATABASE_URL sentinel treated as "local".
+PREFLIGHT_BUILD_DB_SENTINEL=sqlx-build-sentinel
+# Dev-config auto-seed: dir, the real (gitignored) file, its committed example,
+# and the placeholder secret value the app hard-refuses to boot on.
+PREFLIGHT_CONFIG_DIR=src-app/server/config
+PREFLIGHT_CONFIG_FILE=dev.yaml
+PREFLIGHT_CONFIG_EXAMPLE=dev.example.yaml
+PREFLIGHT_CONFIG_PLACEHOLDER=dev-secret-change-in-production-min-32-chars-long
+
+# ── merge-gate.mjs (merge-time gate) ──────────────────────────────────────
+# Migrations dir → C2 migration-collision + --verify-head duplicate-prefix.
+MERGE_MIGRATIONS_DIR=src-app/server/migrations
+# Cargo package for the C1 clean-build gate (`cargo clean -p <pkg> && cargo check`).
+MERGE_CARGO_PACKAGE=ziee
+# (optional) dir to run cargo from; default probes src-app/ then src-app/server/.
+MERGE_CARGO_DIR=src-app
+# (optional) a second cargo package checked only when the desktop prefix is touched.
+MERGE_CARGO_DESKTOP_PACKAGE=ziee-desktop
+MERGE_DESKTOP_TOUCH_PREFIX=src-app/desktop/tauri/
+# Codegen regen command + its output files → C3 regen-parity (empty-diff check).
+MERGE_REGEN_CMD=just openapi-regen
+MERGE_GENERATED=src-app/ui/openapi/openapi.json src-app/ui/src/api-client/types.ts src-app/desktop/ui/openapi/openapi.json src-app/desktop/ui/src/api-client/types.ts

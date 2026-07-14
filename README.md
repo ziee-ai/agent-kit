@@ -79,5 +79,5 @@ absent). See `app.config.example` for the full key list.
 
 ```bash
 bash lifecycle/selftest.sh            # lifecycle-check phase gates (9 scenarios)
-bash lifecycle/selftest-hardening.sh  # A1-A9 + merge-gate + preflight + de-ziee-ify (37 scenarios)
+bash lifecycle/selftest-hardening.sh  # A1-A9 + merge-gate + preflight + de-ziee-ify (40 scenarios)
 ```

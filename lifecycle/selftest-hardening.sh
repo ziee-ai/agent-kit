@@ -457,6 +457,22 @@ else
   sed 's/^/        | /' /tmp/lc-selftest.out
 fi
 
+# crash-guard regression: a MISSING MERGE_REGEN_CMD binary must record a clean
+# C3 FAIL, not throw a TypeError on undefined stdout. Runs WITHOUT --skip-heavy
+# so C3 actually executes the (nonexistent) regen command.
+R="$(new_repo)"; CLEANUP+=("$R"); mkdir -p "$R/.claude"
+printf 'MERGE_MIGRATIONS_DIR=migrations\nMERGE_REGEN_CMD=ziee-nonexistent-regen-binary-xyz\nMERGE_GENERATED=gen.txt\n' > "$R/.claude/app.config"
+echo hi > "$R/gen.txt"; git -C "$R" add -A && git -C "$R" commit -qm base-c3
+git -C "$R" checkout -q -b feat/c3
+echo change > "$R/f.txt"; git -C "$R" add -A && git -C "$R" commit -qm work-c3
+C3OUT="$(node "$MG" feat/c3 --repo "$R" --base main --no-fetch 2>&1)"
+if printf '%s' "$C3OUT" | grep -qiE "C3.*(could not run|FAIL)" && ! printf '%s' "$C3OUT" | grep -qE "TypeError|is not a function|Cannot read (properties|property)"; then
+  PASS=$((PASS+1)); printf '  \033[32mok  \033[0m %s\n' "merge-gate C3: missing regen binary records a clean FAIL (no crash)"
+else
+  FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "merge-gate C3: missing regen binary — crashed or no clean FAIL"
+  printf '%s\n' "$C3OUT" | sed 's/^/        | /'
+fi
+
 # C4 stale: main advances after fork; branch is behind; --max-behind 0
 R="$(new_repo)"; CLEANUP+=("$R")
 mkdir -p "$R/src-app/server/migrations"
@@ -502,6 +518,18 @@ assert_exit_cmd 1 "preflight: missing hub-seed/node_modules is REFUSED" -- \
 NOCFG="$(new_repo)"; CLEANUP+=("$NOCFG")
 assert_exit_cmd 0 "preflight: NO app.config ⇒ generic-only, exit 0" -- \
   env -u DATABASE_URL -u ZIEE_BUILD_DB_PERWORKTREE bash "$PREFLIGHT" --repo "$NOCFG"
+
+# SECURITY regression: a malicious PREFLIGHT_BUILD_DB_ENV must be rejected before
+# bash ${!name} indirect expansion — a config value must NEVER execute code.
+INJ="$(new_repo)"; CLEANUP+=("$INJ"); mkdir -p "$INJ/.claude"
+INJMARK="$INJ/INJECTION_EXECUTED"
+printf 'PREFLIGHT_BUILD_DB_ENV=x[$(touch %s)]\nPREFLIGHT_BUILD_DB_HOSTPORT=127.0.0.1:5999\n' "$INJMARK" > "$INJ/.claude/app.config"
+env -u DATABASE_URL -u ZIEE_BUILD_DB_PERWORKTREE bash "$PREFLIGHT" --repo "$INJ" >/tmp/lc-selftest.out 2>&1 || true
+if [ -e "$INJMARK" ]; then
+  FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "preflight: malicious PREFLIGHT_BUILD_DB_ENV EXECUTED code (injection)"
+else
+  PASS=$((PASS+1)); printf '  \033[32mok  \033[0m %s\n' "preflight: malicious PREFLIGHT_BUILD_DB_ENV does NOT execute code (injection guard)"
+fi
 
 # ---------------------------------------------------------------------------
 echo "-- Part D: merge-gate --verify-head (the pre-push-to-main hook guard) --"

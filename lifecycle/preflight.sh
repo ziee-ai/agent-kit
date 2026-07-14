@@ -232,13 +232,20 @@ if [ -n "$CFG_DIR_REL" ] && [ -n "$CFG_FILE" ] && [ -n "$CFG_EXAMPLE" ] && [ -n 
     if [ -f "$DEV_EX" ]; then
       SECRET="$(gen_secret)"
       # replace only the exact placeholder VALUE (| delimiter: base64 never contains |).
-      # Guard the write: a sed failure (or an empty result) must NOT be reported as a
-      # successful bootstrap — remove the truncated file and fail loud instead.
-      if sed "s|\"$PLACEHOLDER\"|\"$SECRET\"|" "$DEV_EX" > "$DEV_CFG" && [ -s "$DEV_CFG" ]; then
+      # Guard three ways so a bad seed is NEVER reported as a successful bootstrap:
+      #  (a) the example must actually CONTAIN the configured placeholder (else the
+      #      sed is a no-op and no secret is injected — a mismatched
+      #      PREFLIGHT_CONFIG_PLACEHOLDER),
+      #  (b) the sed must succeed and produce a non-empty file,
+      #  (c) the placeholder must be GONE from the result (the substitution ran).
+      if ! grep -qF "\"$PLACEHOLDER\"" "$DEV_EX"; then
+        bad "$CFG_EXAMPLE does not contain the placeholder \"$PLACEHOLDER\" — cannot inject a jwt.secret (check PREFLIGHT_CONFIG_PLACEHOLDER)" \
+            "set PREFLIGHT_CONFIG_PLACEHOLDER to the exact placeholder value that appears in $CFG_EXAMPLE"
+      elif sed "s|\"$PLACEHOLDER\"|\"$SECRET\"|" "$DEV_EX" > "$DEV_CFG" && [ -s "$DEV_CFG" ] && ! grep -qF "\"$PLACEHOLDER\"" "$DEV_CFG"; then
         ok "bootstrapped $CFG_DIR_REL/$CFG_FILE from $CFG_EXAMPLE (generated a random jwt.secret; edit for an external DB)"
       else
         rm -f "$DEV_CFG"
-        bad "failed to bootstrap $CFG_DIR_REL/$CFG_FILE from $CFG_EXAMPLE (sed error / empty output)" \
+        bad "failed to bootstrap $CFG_DIR_REL/$CFG_FILE from $CFG_EXAMPLE (sed error / placeholder not replaced)" \
             "author $DEV_CFG manually — the server will not boot without it"
       fi
     else

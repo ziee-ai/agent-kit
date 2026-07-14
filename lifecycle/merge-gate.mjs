@@ -357,9 +357,9 @@ function gateC3() {
   const diff = gitTry(staging, 'diff', '--stat', '--', ...GENERATED).out.trim();
   if (diff) {
     record('C3', 'regen-parity', 'FAIL',
-      `committed generated files do NOT match a fresh regen of the merged backend (a regen was dropped — likely desktop/ui):\n${diff}`);
+      `committed generated files do NOT match a fresh regen of the merged backend (a regen was dropped for at least one workspace — for ziee, typically desktop/ui):\n${diff}`);
   } else {
-    record('C3', 'regen-parity', 'PASS', 'both ui/ + desktop/ui/ openapi+types match the merged backend');
+    record('C3', 'regen-parity', 'PASS', `all ${GENERATED.length} generated openapi+types file(s) match the merged backend`);
   }
 }
 

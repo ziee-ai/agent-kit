@@ -56,3 +56,25 @@ MERGE_DESKTOP_TOUCH_PREFIX=src-app/desktop/tauri/
 # Codegen regen command + its output files → C3 regen-parity (empty-diff check).
 MERGE_REGEN_CMD=just openapi-regen
 MERGE_GENERATED=src-app/ui/openapi/openapi.json src-app/ui/src/api-client/types.ts src-app/desktop/ui/openapi/openapi.json src-app/desktop/ui/src/api-client/types.ts
+
+# ── lifecycle-check.mjs (per-phase gate) ──────────────────────────────────
+# lifecycle-check is otherwise app-agnostic; only these three ziee-specific
+# values are read from app.config. EACH KEY DEFAULTS TO ZIEE'S HISTORICAL
+# HARD-CODED VALUE (shown below) — so ziee behaves identically whether it sets
+# the key or omits it, and a differently-laid-out app overrides just what differs.
+#
+# Frontend npm workspaces, as ordered `<path-prefix>:<workspace-label>` pairs
+# (space-separated). A changed/planned file whose path starts with a prefix
+# belongs to that workspace; FIRST match wins, so list the more-specific prefix
+# first. Drives the phase-3 e2e-tier requirement + the phase-8 per-workspace
+# `npm run check (<label>): PASS` gate. An app with ONE frontend sets one pair;
+# a pure-backend app can set an empty/absent value (the FE gates then never fire).
+LIFECYCLE_FRONTEND_WORKSPACES=src-app/desktop/ui/:desktop/ui src-app/ui/:ui
+# openapi.json spec paths (space-separated) forming the live /api route registry
+# that the R2-5 e2e route-mock-staleness gate validates static `page.route('**/api/…')`
+# mocks against. Absent/unbuilt specs ⇒ R2-5 SKIPs (nothing to check against).
+LIFECYCLE_OPENAPI_SPECS=src-app/ui/openapi/openapi.json src-app/desktop/ui/openapi/openapi.json
+# Working-tree path substrings the A2 clean-tree gate ignores (noisy vendored
+# submodules etc.), space-separated. `*.log` scratch files are always ignored
+# on top of this. Default = ziee's vendored pgvector submodule.
+LIFECYCLE_CLEAN_TREE_IGNORE=vendor/pgvector

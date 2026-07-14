@@ -568,5 +568,117 @@ echo "CREATE TABLE b();" > "$R/src-app/server/migrations/00000000000010_b.sql"
 git -C "$R" add -A && git -C "$R" commit -qm dup-mig
 assert_exit_cmd 0 "verify-head: NO app.config ⇒ C2 SKIPs (dup prefix not flagged; C5 still runs)" -- node "$MG" --verify-head --repo "$R"
 
+# ---------------------------------------------------------------------------
+echo "-- Part E: lifecycle-check.mjs de-ziee-ify (a NON-ziee frontend layout) --"
+# ---------------------------------------------------------------------------
+# lifecycle-check's frontend-workspace map + openapi-spec registry defaulted to
+# ziee's `src-app/ui` / `src-app/desktop/ui`. A second app with a different
+# layout (here: a single `webapp/` workspace) must be able to drive both from
+# .claude/app.config — proven BOTH ways: WITHOUT the config the ziee-default
+# paths are absent so the FE gate + R2-5 route gate SKIP (a non-ziee-layout FE
+# touch reads as backend-only); WITH the config they activate on the app's own
+# paths. Each fixture is a complete phase-8 artifact set (mirrors Part A's R2-5).
+
+# helper: write the phases-1..8 artifacts for a webapp-layout feature whose
+# single touched file is $2 (relative), with $3 e2e-mock spec body appended.
+build_webapp_feat() {
+  local R="$1" touched="$2"
+  local D="$R/.lifecycle/foo"; mkdir -p "$D" "$(dirname "$R/$touched")"
+  cat > "$D/PLAN.md" <<EOF
+# PLAN — foo
+## Items
+- **ITEM-1**: Add a webapp surface.
+## Files to touch
+- \`$touched\` — new (ITEM-1).
+## Patterns to follow
+- Mirror an existing webapp surface.
+EOF
+  write_common "$D" "$touched" 6
+  echo "$D"
+}
+
+# --- E1: OPENAPI_SPECS (R2-5 route registry) is app.config-driven ---
+# webapp/openapi.json registers /api/things; the e2e spec mocks a GHOST route.
+R="$(new_repo)"; CLEANUP+=("$R")
+git -C "$R" checkout -q -b feat/webmock
+mkdir -p "$R/webapp/openapi" "$R/webapp/tests/e2e/foo"
+echo '{"paths":{"/api/things":{"get":{}},"/api/things/{id}":{"get":{}}}}' > "$R/webapp/openapi/openapi.json"
+cat > "$R/webapp/tests/e2e/foo/foo.spec.ts" <<'EOF'
+import { test } from '@playwright/test';
+test('foo', async ({ page }) => {
+  await page.route('**/api/ghosts', (r) => r.fulfill({ json: [] }));
+});
+EOF
+D="$(build_webapp_feat "$R" "webapp/tests/e2e/foo/foo.spec.ts")"
+cat > "$D/TESTS.md" <<'EOF'
+# TESTS — foo
+- **TEST-1** (tier: e2e) [covers: ITEM-1] file: `webapp/tests/e2e/foo/foo.spec.ts` — asserts: things list renders.
+EOF
+cat > "$D/TEST_RESULTS.md" <<'EOF'
+# TEST_RESULTS — foo
+- **TEST-1**: PASS
+npm run check (webapp): PASS
+gate:ui (webapp): PASS
+EOF
+git -C "$R" add -A && git -C "$R" commit -qm webmock
+# WITHOUT app.config: ziee-default OPENAPI_SPECS (src-app/…) absent ⇒ R2-5 SKIPs
+# AND webapp/ is not a known FE workspace ⇒ FE npm-check gate SKIPs ⇒ exit 0
+# (the ghost mock is NOT flagged — the ziee paths simply don't exist here).
+lc 0 "lifecycle-check: NO app.config ⇒ webapp-layout FE + R2-5 gates SKIP (ghost mock not flagged)" --phase 8 --repo "$R" --dir "$D" --base main
+# WITH app.config pointing at the webapp layout: R2-5 finds the live registry and
+# REFUSES the ghost mock; the FE workspace gate is satisfied by the check line.
+mkdir -p "$R/.claude"
+printf 'LIFECYCLE_FRONTEND_WORKSPACES=webapp/:webapp\nLIFECYCLE_OPENAPI_SPECS=webapp/openapi/openapi.json\n' > "$R/.claude/app.config"
+git -C "$R" add -A && git -C "$R" commit -qm add-appconfig
+lc 1 "lifecycle-check: app.config LIFECYCLE_OPENAPI_SPECS ⇒ R2-5 REFUSES a ghost /api mock in the webapp layout" --phase 8 --repo "$R" --dir "$D" --base main
+# fix the mock to the live route ⇒ passes (proves it was a real route check, not a blanket fail)
+sed 's#\*\*/api/ghosts#**/api/things#' "$R/webapp/tests/e2e/foo/foo.spec.ts" > "$R/tmp.ts" && mv "$R/tmp.ts" "$R/webapp/tests/e2e/foo/foo.spec.ts"
+git -C "$R" commit -qam fix-webmock
+lc 0 "lifecycle-check: webapp-layout mock of a LIVE /api route passes (app.config-driven registry)" --phase 8 --repo "$R" --dir "$D" --base main
+
+# --- E2: FRONTEND_WORKSPACES map is app.config-driven ---
+# A real FE source touch in the webapp layout, with a TEST_RESULTS that OMITS the
+# per-workspace `npm run check` line.
+R="$(new_repo)"; CLEANUP+=("$R")
+git -C "$R" checkout -q -b feat/webfe
+mkdir -p "$R/webapp/src"
+cat > "$R/webapp/src/FooPage.tsx" <<'EOF'
+export function FooPage() {
+  return (<div><h1>Foo</h1><button>Save</button></div>);
+}
+EOF
+D="$(build_webapp_feat "$R" "webapp/src/FooPage.tsx")"
+cat > "$D/TESTS.md" <<'EOF'
+# TESTS — foo
+- **TEST-1** (tier: unit) [covers: ITEM-1] file: `webapp/src/FooPage.test.tsx` — asserts: renders Save.
+- **TEST-2** (tier: e2e) [covers: ITEM-1] file: `webapp/tests/e2e/foo/foo.spec.ts` — asserts: user clicks Save.
+EOF
+cat > "$D/TEST_RESULTS.md" <<'EOF'
+# TEST_RESULTS — foo
+- **TEST-1**: PASS
+- **TEST-2**: PASS
+EOF
+git -C "$R" add -A && git -C "$R" commit -qm webfe
+# WITHOUT app.config: webapp/ is NOT a recognized FE workspace (ziee default map
+# is src-app/…) ⇒ the touch reads as non-frontend ⇒ no `npm run check` line is
+# required ⇒ exit 0 (the FE gate is app.config-driven, not baked to src-app).
+lc 0 "lifecycle-check: NO app.config ⇒ webapp FE touch not gated (no npm-check line required)" --phase 8 --repo "$R" --dir "$D" --base main
+# WITH the workspace map: webapp/ IS a frontend workspace ⇒ the missing
+# `npm run check (webapp): PASS` line is REFUSED.
+mkdir -p "$R/.claude"
+printf 'LIFECYCLE_FRONTEND_WORKSPACES=webapp/:webapp\n' > "$R/.claude/app.config"
+git -C "$R" add -A && git -C "$R" commit -qm add-appconfig-fe
+lc 1 "lifecycle-check: app.config LIFECYCLE_FRONTEND_WORKSPACES ⇒ missing 'npm run check (webapp)' is REFUSED" --phase 8 --repo "$R" --dir "$D" --base main
+# add the required per-workspace check line ⇒ passes.
+cat > "$D/TEST_RESULTS.md" <<'EOF'
+# TEST_RESULTS — foo
+- **TEST-1**: PASS
+- **TEST-2**: PASS
+npm run check (webapp): PASS
+gate:ui (webapp): PASS
+EOF
+git -C "$R" commit -qam webfe-results-complete
+lc 0 "lifecycle-check: webapp FE workspace satisfied by 'npm run check (webapp): PASS'" --phase 8 --repo "$R" --dir "$D" --base main
+
 echo "== $PASS passed, $FAIL failed =="
 [ "$FAIL" -eq 0 ]

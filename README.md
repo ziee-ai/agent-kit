@@ -67,17 +67,29 @@ ziee is the reference consumer (branch `feat/agent-kit-consume`).
 
 ## De-ziee-ify contract
 
-`preflight.sh` and `merge-gate.mjs` carry NO baked-in ziee paths. Everything
-app-specific (build seed, vendored submodule, node workspaces, build-DB
-isolation, dev-config seed; migrations dir, generated files, regen command,
-cargo package + desktop crate) is read from the consumer's `.claude/app.config`
-and SKIPs when unset. `lifecycle-check.mjs` is already app-agnostic (its
-route-coverage + frontend-workspace checks no-op when the relevant paths are
-absent). See `app.config.example` for the full key list.
+`preflight.sh`, `merge-gate.mjs`, AND `lifecycle-check.mjs` carry NO baked-in
+ziee paths. Everything app-specific is read from the consumer's
+`.claude/app.config`:
+
+- **preflight.sh / merge-gate.mjs** — build seed, vendored submodule, node
+  workspaces, build-DB isolation, dev-config seed; migrations dir, generated
+  files, regen command, cargo package + desktop crate. A key that is UNSET makes
+  its check/gate SKIP.
+- **lifecycle-check.mjs** — the frontend-workspace prefix→label map
+  (`LIFECYCLE_FRONTEND_WORKSPACES`), the openapi-spec route registry the R2-5
+  gate checks against (`LIFECYCLE_OPENAPI_SPECS`), and the A2 clean-tree noise
+  filter (`LIFECYCLE_CLEAN_TREE_IGNORE`). These DEFAULT to ziee's historical
+  hard-coded values, so ziee behaves byte-identically whether it sets them or
+  not, while a differently-laid-out app (e.g. a single `webapp/` workspace)
+  overrides only what differs. An app that configures none of them still runs
+  every app-agnostic phase gate; the FE/route gates simply activate on the
+  app's own paths once configured.
+
+See `app.config.example` for the full key list.
 
 ## Verifying the kit
 
 ```bash
 bash lifecycle/selftest.sh            # lifecycle-check phase gates (9 scenarios)
-bash lifecycle/selftest-hardening.sh  # A1-A10 + merge-gate + preflight + de-ziee-ify (40 scenarios)
+bash lifecycle/selftest-hardening.sh  # A1-A10 + merge-gate + preflight + de-ziee-ify (46 scenarios)
 ```

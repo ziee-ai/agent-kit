@@ -48,6 +48,58 @@ try {
   fail(`not inside a git repository (cwd=${process.cwd()})`);
 }
 
+// ---------------------------------------------------------------------------
+// app.config (the de-ziee-ify seam, shared with preflight.sh + merge-gate.mjs).
+// A plain KEY=value data file at <repo>/.claude/app.config — READ, never sourced
+// (a committed config a gate consumes must not be able to run arbitrary shell).
+// The frontend-workspace map, the openapi-spec paths (R2-5 route registry), and
+// the clean-tree noise filter (A2) are ziee-specific; each key DEFAULTS to
+// ziee's historical hard-coded value, so ziee (whether it sets the key or leaves
+// it unset) behaves byte-identically, while a differently-laid-out app supplies
+// its own. Same parser semantics as merge-gate.mjs (trim, keep-first-on-dup).
+function loadAppConfig(root) {
+  const cfg = {};
+  try {
+    const txt = readFileSync(join(root, '.claude', 'app.config'), 'utf8');
+    for (const raw of txt.split(/\r?\n/)) {
+      const line = raw.trim();
+      if (!line || line.startsWith('#')) continue;
+      const i = line.indexOf('=');
+      if (i === -1) continue;
+      const k = line.slice(0, i).trim();
+      if (!(k in cfg)) cfg[k] = line.slice(i + 1).trim();
+    }
+  } catch { /* no app.config → every key falls back to its ziee default */ }
+  return cfg;
+}
+const APP = loadAppConfig(repo);
+// LIFECYCLE_FRONTEND_WORKSPACES: ordered `<path-prefix>:<workspace-label>` pairs
+// (space-separated). A changed file whose path starts with a prefix belongs to
+// that workspace; FIRST match wins, so list the more-specific prefix first
+// (desktop/ui before ui). Default = ziee's two npm workspaces.
+function parseFeWorkspaces(spec) {
+  return (spec || 'src-app/desktop/ui/:desktop/ui src-app/ui/:ui')
+    .split(/\s+/).filter(Boolean)
+    .map((pair) => {
+      const c = pair.indexOf(':');
+      return c === -1 ? null : { prefix: pair.slice(0, c), label: pair.slice(c + 1) };
+    })
+    .filter((w) => w && w.prefix && w.label);
+}
+const FE_WORKSPACES = parseFeWorkspaces(APP.LIFECYCLE_FRONTEND_WORKSPACES);
+// LIFECYCLE_OPENAPI_SPECS: space-separated openapi.json paths that form the live
+// /api route registry the R2-5 e2e route-mock gate validates against. Default =
+// ziee's ui + desktop/ui specs.
+const OPENAPI_SPECS = (APP.LIFECYCLE_OPENAPI_SPECS
+  || 'src-app/ui/openapi/openapi.json src-app/desktop/ui/openapi/openapi.json')
+  .split(/\s+/).filter(Boolean);
+// LIFECYCLE_CLEAN_TREE_IGNORE: space-separated path substrings whose working-tree
+// status entries the A2 clean-tree gate ignores (noisy vendored submodules etc.).
+// `.log` scratch files are always ignored on top of this. Default = ziee's
+// vendored pgvector submodule.
+const CLEAN_TREE_IGNORE = (APP.LIFECYCLE_CLEAN_TREE_IGNORE || 'vendor/pgvector')
+  .split(/\s+/).filter(Boolean);
+
 let featureDir;
 if (dirArg) {
   featureDir = resolve(dirArg);
@@ -251,17 +303,24 @@ function changedFilePaths() {
 // A mechanically-generated frontend artifact never counts as a real UI touch
 // (belt-and-suspenders alongside DIFF_EXCLUDES; also used to filter PLAN paths).
 const RE_GENERATED_FE = /(?:^|\/)openapi\.json$|(?:^|\/)api-client\/types\.ts$/;
-// Map a set of paths → the frontend npm workspaces they touch.
-// `src-app/ui/**` → "ui"; `src-app/desktop/ui/**` → "desktop/ui".
+// Map a set of paths → the frontend npm workspaces they touch, per the
+// (app.config-driven) FE_WORKSPACES prefix→label map. Default (ziee):
+// `src-app/desktop/ui/**` → "desktop/ui"; `src-app/ui/**` → "ui".
 function frontendWorkspacesOf(paths) {
   const ws = new Set();
   for (const p of paths) {
     if (RE_GENERATED_FE.test(p)) continue;
-    if (/^src-app\/desktop\/ui\//.test(p)) ws.add('desktop/ui');
-    else if (/^src-app\/ui\//.test(p)) ws.add('ui');
+    for (const { prefix, label } of FE_WORKSPACES) {
+      if (p.startsWith(prefix)) { ws.add(label); break; } // first (most-specific) match wins
+    }
   }
   return ws;
 }
+// Regex matching a configured FE-workspace path token in PLAN.md prose (any
+// configured prefix + path chars). Null when no FE workspaces are configured.
+const RE_PLAN_FE_PATH = FE_WORKSPACES.length
+  ? new RegExp('(?:' + FE_WORKSPACES.map((w) => w.prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|') + ')[A-Za-z0-9._\\-/]*', 'g')
+  : null;
 // Frontend workspaces named in PLAN.md's "Files to touch" section — used at
 // phase 3, when the diff may still be empty (implementation not written yet).
 function planFrontendWorkspaces() {
@@ -274,7 +333,7 @@ function planFrontendWorkspaces() {
     const h = /^#{2,6}\s+(.*\S)\s*$/.exec(ln);
     if (h) { inSec = /files\s*to\s*touch|files-to-touch/i.test(h[1]); continue; }
     if (!inSec) continue;
-    for (const m of ln.matchAll(/src-app\/[A-Za-z0-9._\-\/]+/g)) paths.push(m[0]);
+    if (RE_PLAN_FE_PATH) for (const m of ln.matchAll(RE_PLAN_FE_PATH)) paths.push(m[0]);
   }
   return frontendWorkspacesOf(paths);
 }
@@ -346,7 +405,7 @@ function dirtyWorkingTree() {
   return out.split(/\r?\n/).map((s) => s.replace(/\r$/, '')).filter((l) => {
     if (!l.trim()) return false;
     const path = l.slice(3);
-    if (/(^|\/)vendor\/pgvector(\/|$)/.test(path)) return false;   // noisy submodule
+    if (CLEAN_TREE_IGNORE.some((sub) => path.includes(sub))) return false; // noisy submodule(s), app.config-driven
     if (/\.log$/.test(path)) return false;                          // scratch logs
     return true;
   });
@@ -559,10 +618,8 @@ function checkA10Passing(results) {
 // mocks (`${…}`) can't be resolved statically and are skipped.
 function openApiApiPaths() {
   // → array of normalized segment-arrays ({param} → '*') for every /api/* path.
-  const files = [
-    join(repo, 'src-app/ui/openapi/openapi.json'),
-    join(repo, 'src-app/desktop/ui/openapi/openapi.json'),
-  ];
+  // OPENAPI_SPECS is app.config-driven (default = ziee's ui + desktop/ui specs).
+  const files = OPENAPI_SPECS.map((f) => join(repo, f));
   const out = [];
   let anyPresent = false;
   for (const f of files) {
@@ -590,7 +647,7 @@ function mockMatchesARoute(mockSegs, routes) {
 }
 function checkR2_5() {
   const routes = openApiApiPaths();
-  if (!routes) return []; // no openapi.json (non-ziee fixture) → nothing to check
+  if (!routes) return []; // no openapi.json present (LIFECYCLE_OPENAPI_SPECS absent/unbuilt) → nothing to check
   const g = [];
   const RE_ROUTE = /\.route\(\s*[`'"]([^`'"]+)[`'"]/g;
   for (const a of diffAddedLines()) {

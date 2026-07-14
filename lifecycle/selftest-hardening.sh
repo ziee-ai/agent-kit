@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # selftest-hardening.sh — verifies the LIFECYCLE-HARDENING additions:
-#   • lifecycle-check.mjs A1/A2/A3/A4/A5/A7/A8/A9 deterministic gates
+#   • lifecycle-check.mjs A1/A2/A3/A4/A5/A7/A8/A9/A10 deterministic gates
 #   • merge-gate.mjs      C2 (migration collision) + C4 (stale branch) + clean
 #   • preflight.sh        good env passes, missing-setup fails
 #
@@ -142,7 +142,7 @@ EOF
 }
 
 echo "== lifecycle-hardening self-test =="
-echo "-- Part A: lifecycle-check.mjs A1-A9 --"
+echo "-- Part A: lifecycle-check.mjs A1-A10 --"
 
 # --- control: a clean backend feature passes phase 8 (so a FAIL below is the A-check)
 R="$(build_be)"; D="$R/.lifecycle/bar"

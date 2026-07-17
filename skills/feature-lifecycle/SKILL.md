@@ -337,6 +337,32 @@ it (delete it, watch the surface), never inferred from a handler.
 > gap that shipped a split pane going stale on a local delete (FB-23): the
 > cross-device path was wired, the local one wasn't.
 
+**Parallelize with sub-agents when items are independent.** Implementation is the
+one phase you can fan out: spawn sub-agents to implement multiple ITEMs at once
+where they are genuinely independent. Rules:
+
+- **Only parallelize INDEPENDENT items** — ones that touch **disjoint files/modules**
+  and have **no ordering dependency** on each other (item B doesn't need item A's
+  code). Partition the ITEMs into independent groups; items that share a file or
+  depend on another stay sequential (or run in dependency order). A quick way to
+  find the groups: from PLAN.md's *Files to touch*, cluster items by non-overlapping
+  file sets.
+- **Isolate writers.** If two sub-agents would edit the same file, they conflict —
+  either keep those in one agent, or give each its own `isolation: "worktree"` and
+  merge after. When items are cleanly file-disjoint, no isolation is needed.
+- **Give each sub-agent the same discipline** — its ITEM(s), the relevant
+  *Patterns to follow*, and the mandatory per-item walks (UX / infra-integration /
+  entity-lifecycle). It returns exactly what it changed (files + a summary).
+- **The PARENT owns the fan-in, NOT the sub-agents:** regenerate the derived files
+  ONCE after all agents finish (openapi/types.ts/testids/state-matrix — never
+  per-agent, they'd clobber each other), then run the **drift loop over the combined
+  result** yourself, and own all of Phases 6–8. Parallelism speeds the *writing*;
+  it does not parallelize or skip the audit, drift-convergence, or gates.
+- Don't force it — for a small or tightly-coupled feature, sequential is simpler and
+  parallel fan-out isn't worth the coordination. Use it when there's real
+  independent breadth (e.g. N backend modules, or backend + several disjoint UI
+  surfaces).
+
 Implement all items (only `cargo check` / `tsc` mid-flight; don't run the full
 suites yet — [[feedback_finish_all_before_testing]]). Then audit
 **implementation vs plan** and write `DRIFT-1.md`. For each divergence:

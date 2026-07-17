@@ -384,7 +384,28 @@ NOT hand them your reasoning. Use ≥10 angles from the proven roster:
 
 `correctness · security · error-handling · concurrency · perms/authz ·
 api-contract · state-management · a11y · patterns-conformance · tests-quality ·
-perf · i18n/copy`
+perf · i18n/copy · modularity · extensibility · maintainability · api-friendliness`
+
+**Code-quality angles** (weigh heavily for framework/SDK/shared code — these are
+the qualities a reusable platform lives or dies on):
+- **modularity** — is the change a self-contained unit with a narrow, explicit
+  boundary, or does it reach across modules and couple things that should be
+  independent? A new capability should plug into a seam (module/registry/trait),
+  not thread state through unrelated code. Flag hidden cross-module coupling,
+  god-objects, and a domain-specific crate leaking into a generic one.
+- **extensibility** — can the next feature / the next app extend this WITHOUT
+  editing it? Prefer an open seam (a trait, a registered provider, a slot) over a
+  closed `match`/enum/if-chain that every addition must edit. Flag a closed switch
+  where a new case will force a central edit (the `SyncEntity`-closed-enum class).
+- **maintainability** — will someone six months out understand and safely change
+  this? Flag magic numbers without a named constant/rationale, duplicated logic
+  that should be one function, a public surface with no doc-comment on WHY,
+  and anything that can only be understood by reading the whole call graph.
+- **api-friendliness** — is the API (REST endpoint, function signature, store
+  action, MCP tool) obvious and hard to misuse? Good defaults, names that say what
+  they do, errors that tell the caller how to fix them, no required-arg soup, no
+  "call these three things in the right order or it breaks." Distinct from
+  api-contract (which checks the contract is CORRECT); this checks it's ERGONOMIC.
 
 **UI surfaces additionally require these angles** (harvested from human review —
 each traces to real rework that shipped despite a green gate):

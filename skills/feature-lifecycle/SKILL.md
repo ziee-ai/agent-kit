@@ -442,6 +442,15 @@ where they are genuinely independent. Rules:
   independent breadth (e.g. N backend modules, or backend + several disjoint UI
   surfaces).
 
+**Implementers read the sources that govern their file.** When delegating
+implementation, a sub-agent that touches a file governed by a cited design/research
+doc — one named in `## Design source`, `## Required reading`, or a per-ITEM `read:`
+pointer — MUST be handed that doc as REQUIRED reading in its brief, and must follow
+it. The design/research is additionally enforced by the Phase-3 `[acceptance]`
+tests, but the doc carries the correct APPROACH plus the gotchas the one-line
+invariants only summarize; a green test is not a substitute for having read it. An
+implementer delegated WITHOUT its governing doc is a process error.
+
 Implement all items (only `cargo check` / `tsc` mid-flight; don't run the full
 suites yet — [[feedback_finish_all_before_testing]]). Then audit
 **implementation vs plan** and write `DRIFT-1.md`. For each divergence:

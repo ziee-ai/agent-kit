@@ -178,6 +178,18 @@ const RE_TEST_TIER = /tier\s*:\s*(unit|integration|e2e)\b/i;
 const RE_TEST_COVERS = /covers\s*:\s*([^\]]+)\]/i;
 const RE_TEST_FILE = /file\s*:\s*[`"]?([^`"\n]+?)[`"]?\s*(?:—|--|-|asserts)/i;
 const RE_TEST_ASSERTS = /asserts\s*:\s*(.+?)\s*$/i;
+// Design-invariant binding: PLAN.md `## Invariants` lists non-negotiables lifted
+// verbatim from the named design; each must be pinned by an executable acceptance
+// test. This is the sufficient anchor a phase gate alone can't be — it stops a
+// plan silently reframing the design and still reaching 9/9 (the
+// declarative-canvas-plots failure). See FB-15..20 in the skill.
+// PLAN INV line:  - **INV-1**: <non-negotiable lifted verbatim from the design>
+const RE_INV = /^-\s*\*\*(INV-[A-Za-z0-9._-]+)\*\*\s*:\s*(.+?)\s*$/;
+// TEST acceptance/invariant tags:  [acceptance]  and  [invariant: INV-1, INV-2]
+const RE_TEST_ACCEPTANCE = /\[\s*acceptance\s*\]/i;
+const RE_TEST_INVARIANT = /\[\s*invariant\s*:\s*([^\]]+)\]/i;
+// DESIGN_FIDELITY line:  - **INV-1** — fidelity: UPHELD|AT-RISK|DROPPED — <how>
+const RE_FIDELITY = /^-\s*\*\*(INV-[A-Za-z0-9._-]+)\*\*.*?fidelity\s*:\s*(UPHELD|AT-RISK|DROPPED)\b(.*)$/i;
 // A10 restricted-user tag: a `[negative-perm]` marker on a `tier: e2e` test line
 // flags it as the RESTRICTED-USER spec (logs in as a user LACKING the perm and
 // asserts the feature UI is ABSENT — not merely 403-on-use).
@@ -214,9 +226,34 @@ function parseTests() {
     const file = (RE_TEST_FILE.exec(ln) || [])[1];
     const asserts = (RE_TEST_ASSERTS.exec(ln) || [])[1];
     const negPerm = RE_TEST_NEGPERM.test(ln);
-    tests.push({ id: idm[1], tier, covers, file: file && file.trim(), asserts: asserts && asserts.trim(), negPerm, line: ln });
+    const acceptance = RE_TEST_ACCEPTANCE.test(ln);
+    const invRaw = (RE_TEST_INVARIANT.exec(ln) || [])[1] || '';
+    const invariants = invRaw.split(/[,\s]+/).map((s) => s.trim()).filter((s) => /^INV-/.test(s));
+    tests.push({ id: idm[1], tier, covers, file: file && file.trim(), asserts: asserts && asserts.trim(), negPerm, acceptance, invariants, line: ln });
   }
   return tests;
+}
+// PLAN.md `## Invariants` → Map(INV-N → text). Empty map when PLAN.md is absent.
+function parseInvariants() {
+  const t = read('PLAN.md');
+  if (t == null) return new Map();
+  const inv = new Map();
+  for (const ln of t.split(/\r?\n/)) {
+    const m = RE_INV.exec(ln);
+    if (m && m[2].trim()) inv.set(m[1], m[2].trim());
+  }
+  return inv;
+}
+// DESIGN_FIDELITY.md → Map(INV-N → UPHELD|AT-RISK|DROPPED). null when file absent.
+function parseFidelity() {
+  const t = read('DESIGN_FIDELITY.md');
+  if (t == null) return null;
+  const verdicts = new Map();
+  for (const ln of t.split(/\r?\n/)) {
+    const m = RE_FIDELITY.exec(ln);
+    if (m) verdicts.set(m[1], m[2].toUpperCase());
+  }
+  return verdicts;
 }
 // FB-7: PLAN items explicitly marked [DESCOPED] (cut from this round's build).
 function parseDescopedPlanItems() {
@@ -683,6 +720,15 @@ function phase1() {
   if (!hasSection(t, 'patterns to follow', 'patterns-to-follow', 'pattern')) g.push('PLAN.md: missing a "Patterns to follow" section');
   const items = parsePlanItems();
   if (!items || items.size === 0) g.push('PLAN.md: no `- **ITEM-N**: description` lines parsed');
+  // Design-derivation gate: the plan must be anchored to a NAMED upstream design
+  // and lift its non-negotiables verbatim as invariants. Without this a plan can
+  // reframe the design into bespoke work and still pass every structural gate
+  // (declarative-canvas-plots). The invariants are pinned to acceptance tests at
+  // phase 3 and to fidelity verdicts at phase 2.
+  if (!hasSection(t, 'design source')) g.push('PLAN.md: missing a "## Design source" section — name the upstream design doc + section(s) this plan realizes (≥1 line). A plan not derived from a named design can silently reframe its intent.');
+  if (!hasSection(t, 'invariants')) g.push('PLAN.md: missing an "## Invariants" section — lift the design\'s non-negotiables verbatim as `- **INV-N**: <invariant>` lines.');
+  const invs = parseInvariants();
+  if (!invs || invs.size === 0) g.push('PLAN.md: the "## Invariants" section has no `- **INV-N**: <non-negotiable lifted verbatim from the design>` lines — enumerate ≥1 invariant; each becomes a fidelity verdict (phase 2) and an executable acceptance test (phase 3).');
   return { present: true, gaps: g };
 }
 
@@ -703,6 +749,23 @@ function phase2() {
   for (const id of items.keys()) {
     if (!verdicts.has(id)) g.push(`PLAN_AUDIT.md: ${id} has no verdict line (- **${id}** — verdict: PASS|CONCERN|BLOCKED — ...)`);
     else if (verdicts.get(id) === 'BLOCKED') g.push(`PLAN_AUDIT.md: ${id} verdict is BLOCKED — resolve before proceeding`);
+  }
+  // Design-fidelity gate: DESIGN_FIDELITY.md records how the plan upholds EACH
+  // design invariant. A missing verdict, or any DROPPED verdict, fails phase 2 — a
+  // plan that drops a design invariant is reframing (not realizing) the design,
+  // which is exactly how declarative-canvas-plots reached a false 9/9.
+  const invs = parseInvariants();
+  const fidelity = parseFidelity();
+  if (fidelity == null) {
+    g.push('DESIGN_FIDELITY.md missing — record a fidelity verdict per PLAN invariant: `- **INV-N** — fidelity: UPHELD | AT-RISK | DROPPED — <how the plan upholds it>`.');
+  } else {
+    for (const id of invs.keys()) {
+      if (!fidelity.has(id)) g.push(`DESIGN_FIDELITY.md: ${id} has no fidelity line (- **${id}** — fidelity: UPHELD|AT-RISK|DROPPED — <how the plan upholds it>)`);
+      else if (fidelity.get(id) === 'DROPPED') g.push(`DESIGN_FIDELITY.md: ${id} fidelity is DROPPED — a plan may not drop a design invariant. Re-scope the plan to uphold it (or renegotiate the invariant with the owner and amend the design + PLAN "## Invariants").`);
+    }
+    for (const id of fidelity.keys()) {
+      if (!invs.has(id)) g.push(`DESIGN_FIDELITY.md: ${id} has a fidelity verdict but is not an INV-N in PLAN.md's "## Invariants".`);
+    }
   }
   return { present: true, gaps: g };
 }
@@ -746,6 +809,26 @@ function phase3() {
   const fe = new Set([...planFrontendWorkspaces(), ...diffFrontendWorkspaces()]);
   if (fe.size > 0 && !tests.some((t) => t.tier === 'e2e')) {
     g.push(`TESTS.md: frontend workspace(s) {${[...fe].join(', ')}} are touched but no "(tier: e2e)" test is enumerated — UI work requires ≥1 e2e-tier test; an all-unit plan is refused.`);
+  }
+  // Design-invariant acceptance gate: every PLAN invariant must be pinned by ≥1
+  // [acceptance] test tagged [invariant: INV-N]. The phase gates are necessary-
+  // not-sufficient; the invariant↔acceptance-test binding is the SUFFICIENT anchor
+  // that stops a plan silently reframing the design (declarative-canvas-plots).
+  const invs = parseInvariants();
+  const invCovered = new Set();
+  for (const t of tests) {
+    if (t.acceptance && t.invariants.length === 0)
+      g.push(`TESTS.md: ${t.id} is tagged [acceptance] but names no [invariant: INV-N] — an acceptance test must pin a specific design invariant.`);
+    if (!t.acceptance && t.invariants.length > 0)
+      g.push(`TESTS.md: ${t.id} carries [invariant: ${t.invariants.join(', ')}] but is not tagged [acceptance] — the invariant proof must be an [acceptance] test.`);
+    for (const iv of t.invariants) {
+      if (!invs.has(iv)) g.push(`TESTS.md: ${t.id} names unknown ${iv} (not an INV-N in PLAN.md's "## Invariants").`);
+      else if (t.acceptance) invCovered.add(iv);
+    }
+  }
+  for (const id of invs.keys()) {
+    if (!invCovered.has(id))
+      g.push(`TESTS.md: ${id} has no covering [acceptance] test — every design invariant must be an executable acceptance test. Add e.g. "- **TEST-N** (tier: e2e) [acceptance] [invariant: ${id}] file: \`...\` — asserts: <the invariant holds>".`);
   }
   for (const x of checkA5()) g.push(x); // A5 shrink-guard
   for (const x of checkA10Enumeration()) g.push(x); // A10 restricted-user e2e must be enumerated
@@ -863,6 +946,13 @@ function phase8() {
     if (m) results.set(m[1], m[2].toUpperCase());
   }
   for (const x of checkA10Passing(results)) g.push(x); // A10: restricted-user e2e must PASS
+  // Every [acceptance] test (a design-invariant proof) must PASS — not merely be
+  // enumerated. Named explicitly so a dropped/soft invariant proof is unmissable
+  // (redundant with the all-tests-PASS loop, but with a design-fidelity message).
+  for (const at of tests.filter((t) => t.acceptance)) {
+    const r = results.get(at.id);
+    if (r !== 'PASS') g.push(`TEST_RESULTS.md: acceptance test ${at.id} (design invariant ${at.invariants.join(', ') || '?'}) is ${r || 'missing'}, not PASS — a design invariant is unproven; run it and record PASS.`);
+  }
   for (const test of tests) {
     const r = results.get(test.id);
     if (!r) g.push(`TEST_RESULTS.md: ${test.id} (from TESTS.md) has no result line`);

@@ -34,6 +34,18 @@ mkdir -p /data/pbya/ziee/tmp/<slug>-wt/.lifecycle/<feature>
 > The validator is **deterministic** — it enforces *structure and completeness*,
 > not judgment. Passing it is necessary, not sufficient; the phases below carry
 > the judgment. Never write filler to satisfy the parser.
+>
+> **The phase gates are necessary-not-sufficient; the `## Invariants` + their
+> `[acceptance]` tests are the SUFFICIENT anchor.** A green 9/9 proves the process
+> ran — it does NOT prove the shipped feature still means what the design meant.
+> That gap is real: `declarative-canvas-plots` reframed its design's "UI is data,
+> not code / no processor UI in the workbench" invariant into bespoke widgets and
+> the gates certified it 9/9. The defense is: derive the plan from a NAMED design
+> (phase 1 `## Design source`), lift its non-negotiables VERBATIM as invariants
+> (phase 1 `## Invariants`), verify the plan upholds each (phase 2
+> `DESIGN_FIDELITY.md`), and pin each to an executable `[acceptance]` test that
+> would FAIL if the invariant were violated (phase 3 / phase 8). Everything else
+> is process; the invariants are the promise.
 
 ---
 
@@ -41,6 +53,20 @@ mkdir -p /data/pbya/ziee/tmp/<slug>-wt/.lifecycle/<feature>
 
 Match these line formats precisely or the gate will not pass.
 
+- **Design source** (`PLAN.md`, `## Design source` section) — ≥1 line naming the
+  upstream design doc + the section(s) this plan realizes (e.g. "Realizes
+  `docs/design/foo.md` §10/§11"). The plan is DERIVED from a design; it does not
+  invent intent.
+- **Invariant** (`PLAN.md`, `## Invariants` section) —
+  `- **INV-1**: <non-negotiable lifted VERBATIM from the design>`
+  ≥1 required. Each INV is a design promise the plan may not silently reframe; it
+  is pinned to a fidelity verdict (phase 2) and an executable acceptance test
+  (phase 3). Lift the design's words — do not paraphrase them into your plan's
+  framing (that paraphrase is exactly where intent gets dropped).
+- **Design-fidelity verdict** (`DESIGN_FIDELITY.md`) —
+  `- **INV-1** — fidelity: UPHELD | AT-RISK | DROPPED — <how the plan upholds it>`
+  One line per INV. **A missing verdict OR any `DROPPED` fails phase 2** — a plan
+  that drops a design invariant is reframing, not realizing, the design.
 - **Plan item** — `- **ITEM-3**: <description>`
 - **Descoped plan item** — `- **ITEM-30**: [DESCOPED] <what is being cut this round>`
   A `[DESCOPED]` item is EXEMPT from needing a covering test, but ONLY if
@@ -54,6 +80,15 @@ Match these line formats precisely or the gate will not pass.
 - **Test** — `- **TEST-2** (tier: integration) [covers: ITEM-1, ITEM-3] file: \`path/to/test.rs\` — asserts: <what it proves>`
   (tier ∈ `unit | integration | e2e`). **UI work must enumerate ≥1 `tier: e2e`
   test** — the gate refuses an all-unit plan for a frontend-touching diff.
+- **Acceptance test** (design-invariant proof) —
+  `- **TEST-1** (tier: e2e) [acceptance] [invariant: INV-1] [covers: ITEM-4] file: \`...\` — asserts: a new-processor fixture renders+runs with ZERO src-app changes`.
+  REQUIRED — **every `INV-N` must be pinned by ≥1 `[acceptance]` test tagged
+  `[invariant: INV-N]`** (phase 3), and every `[acceptance]` test must PASS
+  (phase 8). An `[acceptance]` test with no `[invariant: …]`, or an `[invariant:]`
+  tag not on an `[acceptance]` test, fails the gate. This is the executable
+  anchor: a green phase-gate is necessary but NOT sufficient; the invariant ↔
+  acceptance-test binding is what makes "the design's intent still holds"
+  machine-checkable.
 - **Restricted-user e2e** (`[negative-perm]` tag) — `- **TEST-7** (tier: e2e) [negative-perm] [covers: ITEM-3] file: \`.../foo.spec.ts\` — asserts: a user LACKING foo::use sees NO Foo UI (nav entry, page, composer, buttons all absent)`.
   REQUIRED whenever the diff introduces a user-facing permission
   (`X::use`/`X::read`/`X::manage` defined in a `modules/*/permissions.rs` or
@@ -94,8 +129,22 @@ bash .claude/lifecycle/preflight.sh --repo <worktree-root>
 (This is the same gate on Linux, macOS, and Windows git-bash — it avoids
 GNU-only tool flags and guards Unix-only tools.)
 
-Write `.lifecycle/<feature>/PLAN.md` with three required sections:
+Write `.lifecycle/<feature>/PLAN.md` with these required sections:
 
+- `## Design source` — name the upstream design doc + the exact section(s) this
+  plan realizes (≥1 line). **The plan is DERIVED from a named design; it does not
+  invent its own intent.** A plan with no design source can silently reframe the
+  design into bespoke work and still pass every structural gate — this is the
+  `declarative-canvas-plots` failure (the §10 "UI-is-data-not-code" design was
+  reframed into bespoke widgets and the gates certified it 9/9). If there is
+  genuinely no prior design doc, WRITE one first (research/design pass) and name
+  it — never plan against thin air.
+- `## Invariants` — lift the design's **non-negotiables VERBATIM** as
+  `- **INV-N**: <invariant>` lines (≥1). These are the promises the plan may not
+  drop or paraphrase-away. Each INV is checked two ways downstream: a fidelity
+  verdict in phase 2 (`DESIGN_FIDELITY.md`) and an executable `[acceptance]` test
+  in phase 3. Lift the design's WORDS — a paraphrase into your plan's framing is
+  exactly where intent leaks out (FB-15/FB-16).
 - `## Items` — every unit of work as `- **ITEM-N**: <desc>`. IDs are the spine of
   the whole lifecycle: audits, tests, drift, and results all reference them.
 - `## Files to touch` — the concrete files you expect to add/edit.
@@ -204,6 +253,24 @@ module? Do migration numbers collide with `ls migrations/`? Does a type change
 require `just openapi-regen` in BOTH ui and desktop? Any `BLOCKED` verdict fails
 the gate — resolve it (amend the plan) first.
 
+**Design-fidelity gate — `DESIGN_FIDELITY.md` (REQUIRED).** Also write, alongside
+the plan audit, one fidelity verdict per invariant:
+
+```
+- **INV-1** — fidelity: UPHELD — the plan interprets the declared spec as data at
+  load; adding a processor needs zero src-app edits (ITEM-4 registers via the seam)
+- **INV-2** — fidelity: AT-RISK — ITEM-9 introduces a bespoke widget; narrow it to
+  the declared-control vocabulary before phase 5
+```
+
+`fidelity ∈ UPHELD | AT-RISK | DROPPED`. **The gate fails phase 2 if any INV lacks
+a fidelity line, OR any verdict is `DROPPED`.** A `DROPPED` invariant means the plan
+has reframed the design — you may NOT proceed by dropping it. Re-scope the plan to
+uphold it; or, if the invariant itself is genuinely wrong, renegotiate it with the
+owner and amend BOTH the design doc and PLAN's `## Invariants` (never delete an
+inconvenient invariant to make the gate pass). `AT-RISK` is allowed to pass phase 2
+but is a standing debt the phase-6 audit and the acceptance test must resolve.
+
 Gate: `--phase 2`.
 
 ## Phase 3 — TESTS.md
@@ -211,6 +278,17 @@ Gate: `--phase 2`.
 Enumerate **every** test up front. The gate enforces a bipartite mapping:
 **every ITEM is covered by ≥1 TEST**, and every TEST names a valid ITEM, a tier,
 a target file, and what it asserts.
+
+**Design-invariant acceptance gate (MANDATORY).** On top of item coverage, **every
+`INV-N` from PLAN's `## Invariants` must be pinned by ≥1 `[acceptance]` test tagged
+`[invariant: INV-N]`**, and that test must assert the invariant DIRECTLY — the
+design's promise, not merely whatever the code does. A test written against the
+implementation cannot fail on "implementation ≠ design"; it is a tautology (FB-16).
+So an acceptance test for "a new processor renders+runs with ZERO src-app changes"
+must add a NEW-processor fixture and drive it end-to-end — not assert that the one
+processor you happened to build works. The gate fails phase 3 if any `INV-N` has no
+covering `[acceptance]` test, if an `[acceptance]` test names no invariant, or if an
+`[invariant:]` tag sits on a non-`[acceptance]` line.
 
 **Plan-coverage gate (FB-7) — no silent scope-dropping.** Every PLAN ITEM must be
 either (a) covered by an enumerated TEST (implemented), or (b) explicitly
@@ -261,8 +339,9 @@ the FRONTEND half of the authz proof — paired with the backend deny test
 > a floor, not a ceiling. Under-covering here is exactly how live2/live3/live4
 > shipped ungated surfaces past a green 8/8 lifecycle.
 
-Gate: `--phase 3` (fails loudly if any ITEM is unmapped, a UI diff has no e2e
-test, or a new permission has no restricted-user `[negative-perm]` e2e).
+Gate: `--phase 3` (fails loudly if any ITEM is unmapped, any `INV-N` has no
+`[acceptance]` test, a UI diff has no e2e test, or a new permission has no
+restricted-user `[negative-perm]` e2e).
 
 ## Phase 4 — DECISIONS.md
 
@@ -375,6 +454,16 @@ suites yet — [[feedback_finish_all_before_testing]]). Then audit
 End each round with `**Unresolved drifts:** <N>`. Repeat (`DRIFT-2.md`, …) until a
 round records **0** unresolved drifts.
 
+**DRIFT is authored DURING phase 5, never backfilled (FB-18).** The drift file's
+whole job is catching implementation-vs-plan/design divergence AS each item lands
+— so write it live, item by item, while the code is fresh. A `DRIFT-*.md`
+reconstructed later at phase 9 just to satisfy the gate is a false artifact: the
+one mechanism designed to catch drift never ran when it could have. The gate cannot
+tell a live drift file from a backfilled one (its git history would; the gate does
+not inspect that today) — so this is a **binding discipline**, not a machine check.
+Reconcile every item against BOTH the plan AND the named design's invariants here;
+a divergence from an invariant is a `plan-wins` re-implement, never a quiet accept.
+
 Gate: `--phase 5` (checks the final round is 0).
 
 ## Phase 6 — Blind multi-angle audit
@@ -384,7 +473,19 @@ NOT hand them your reasoning. Use ≥10 angles from the proven roster:
 
 `correctness · security · error-handling · concurrency · perms/authz ·
 api-contract · state-management · a11y · patterns-conformance · tests-quality ·
-perf · i18n/copy · modularity · extensibility · maintainability · api-friendliness`
+perf · i18n/copy · modularity · extensibility · maintainability · api-friendliness ·
+design-conformance`
+
+**`design-conformance` is a REQUIRED angle (FB-19), and it — plus any explicit
+conformance pass — audits against the DESIGN + its `## Invariants`, NOT against
+PLAN.md.** PLAN.md is downstream of the design and can itself have reframed the
+intent; auditing the code against a reframed plan certifies the reframing. So the
+design-conformance reviewer reads the named design doc and each `INV-N`, then for
+every hunk/behavior asks "does this uphold the invariant it implements?" — a
+different question from "is this code correct?" (which is why the phase-6 audit that
+ran a correctness/security lens missed the conformance divergences). Flag any
+behavior that satisfies the plan but violates a design invariant, and any INV whose
+`[acceptance]` test is hollow (passes without actually exercising the invariant).
 
 **Code-quality angles** (weigh heavily for framework/SDK/shared code — these are
 the qualities a reusable platform lives or dies on):
@@ -457,6 +558,14 @@ each traces to real rework that shipped despite a green gate):
   `[DESCOPED]` disposition is a finding (this is the human-judgment complement to
   the deterministic FB-7 gate — the gate catches missing dispositions; the audit
   catches an item "covered" on paper but absent in code).
+- **wired-and-behaving (FB-17)** — for EVERY deliverable, verify it is actually
+  INVOKED on the real runtime path: grep for a production caller AND drive the live
+  path. "Exists and is unit-tested" is NOT "used" — a unit test of a helper proves
+  the helper works, never that anything calls it. Dead-but-tested code
+  (a validator never called, a declared block never read, an enforcement never
+  reached) is an unfinished feature, not a done one (§15), and it is the same
+  false-pass family as the original custom-regex incident. Flag any invariant whose
+  mechanism is present + tested but not on the runtime path.
 - **test-reality / paper-9/9 (do this every round)** — FB-7 only checks a TEST
   *line* exists; a hollow test that passes trivially still satisfies it, so a
   feature can be "covered on paper" yet never built. For EACH TEST, OPEN the spec
@@ -572,6 +681,10 @@ so budget for them — they are not optional polish:
 - **A3** no diff-added `#[ignore]`/`.skip`/`.only`; **A4** no cosmetic/always-true
   assertion (`assert!(true)`, `expect(x).toBe(x)`).
 - **A5** TESTS.md may not shrink — a previously-enumerated TEST-ID cannot vanish.
+- **Acceptance** every `[acceptance]` test (a design-invariant proof) must be
+  recorded PASS in `TEST_RESULTS.md` — a design invariant left unproven fails
+  phase 8. This is stricter than "all TESTs pass": it names the invariant proofs
+  explicitly so a soft/dropped acceptance leg is unmissable.
 - **A7** a UI diff must record a boot/runtime canary line
   (`gate:ui (<ws>): PASS`) — a green e2e can still ship a non-booting app or a
   root ErrorBoundary crash on an un-exercised path. **A6:** the gallery +
@@ -636,6 +749,14 @@ This gate is **PENDING** (informational, does not block the build) while the fil
 is absent — a feature can be 8/8 and still awaiting human review. It reaches
 **9/9 (truly merge-ready)** only once the file exists and every item is resolved.
 The merge does not happen until the orchestrator has read this ledger.
+
+**The owner signs off against the ACCEPTANCE TESTS, not "all green."** When you
+present the feature for review, show the owner each `INV-N` and the `[acceptance]`
+test that proves it (and demonstrate the invariant live) — not a "9/9 passed"
+summary. "All gates green" is the process certifying itself; the invariants are
+what the owner actually cares about. Before this hand-off the orchestrator has
+already done the D3 whole-feature behavior-vs-design reconciliation, so the sign-off
+is against demonstrated invariants, never against a gate tally.
 
 Gate: `--phase 9` (fails on any `[status: open]`; pending while the file is absent).
 
@@ -753,6 +874,28 @@ or wasted many sessions.
   `evaluatePermission` filter once reached desktop prod. Codegen'd files
   (`openapi.json`/`api-client/types.ts`) are regenerated for both by
   `just openapi-regen`; the hand-written surfaces are the risk.
+
+- **D1 — a green gate is never a stand-in for "conforms to the design" (FB-15).**
+  A PLAN-CONFORMANCE / design-conformance pass is a STANDARD closing step of the
+  lifecycle, not an ask-only extra: for each ITEM and each `INV-N`, read the intent
+  and verify the shipped BEHAVIOR matches it (by running it, not reading the code).
+  "All gates green" is necessary, not sufficient — the conformance lens is the
+  missing sufficient check. `declarative-canvas-plots` shipped a green 9/9 with
+  forced metrics, a never-called validator, an unenforced `area:center`, and an
+  orphaned config block — none caught until the owner asked for a conformance audit.
+- **D2 — a test must assert the DESIGN's promise, not the code's behavior (FB-16).**
+  A test written against the implementation is a tautology: it cannot fail on
+  "implementation ≠ design." When enumerating tests (phase 3), tie each
+  `[acceptance]` test to its `INV-N`'s STATED promise; in review, flag any test
+  whose assertion would still pass if that promise were violated. If flipping the
+  invariant off wouldn't turn the test red, the test proves nothing about the
+  invariant.
+- **D3 — the orchestrator owns a whole-feature behavior-vs-design reconciliation
+  (FB-20).** Per-slice "my slice is green" reports and per-diff blind audits verify
+  LAYERS; they do not sum to whole-feature conformance. Before claiming "matches the
+  design," the orchestrator itself holds the ENTIRE shipped behavior against every
+  `INV-N` (and every ITEM) — running the feature, not trusting delegated green
+  reports. Never state "conforms to the design" on the strength of gate-green alone.
 
 **Cross-platform reality.** This infra runs on Linux, macOS, and Windows.
 `lifecycle-check.mjs`, `merge-gate.mjs` are pure Node (portable); `preflight.sh`,

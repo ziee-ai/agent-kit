@@ -157,6 +157,25 @@ lc 1 "A1: two .lifecycle dirs is REFUSED even with explicit --dir" --all --repo 
 git -C "$R" rm -rq .lifecycle/stray && git -C "$R" commit -qm rm-stray
 lc 0 "A1: one .lifecycle dir is accepted (control)" --all --repo "$R" --dir "$D" --base main
 
+# --- A1 (regression): feature dirs INHERITED from the base must NOT trip A1.
+# A branch cut from a long-lived integration branch carries every previously
+# landed feature's committed artifacts. Counting those made A1 unsatisfiable and
+# its only "remedy" was deleting other features' audit trails — the exact
+# destructive act the lifecycle exists to prevent. A1 counts what the BRANCH adds.
+R="$(build_be)"; D="$R/.lifecycle/bar"
+git -C "$R" checkout -q main
+mkdir -p "$R/.lifecycle/previously-landed"
+echo "# a landed feature's artifacts, already on the integration base" > "$R/.lifecycle/previously-landed/PLAN.md"
+git -C "$R" add -A && git -C "$R" commit -qm landed-feature
+git -C "$R" checkout -q feat/bar
+git -C "$R" merge -q --no-edit main
+lc 0 "A1: feature dirs INHERITED from the base do not trip A1" --all --repo "$R" --dir "$D" --base main
+# ...but a stray the BRANCH adds is still caught, even alongside inherited ones.
+mkdir -p "$R/.lifecycle/stray"
+echo "# a second feature added by THIS branch" > "$R/.lifecycle/stray/PLAN.md"
+git -C "$R" add -A && git -C "$R" commit -qm branch-stray
+lc 1 "A1: a branch-added stray is still REFUSED alongside inherited dirs" --all --repo "$R" --dir "$D" --base main
+
 # --- A2: an uncommitted (dirty) working tree at phase 8 -> FAIL
 R="$(build_be)"; D="$R/.lifecycle/bar"
 echo "// stray uncommitted edit" >> "$R/src-app/server/src/modules/bar/repository.rs"

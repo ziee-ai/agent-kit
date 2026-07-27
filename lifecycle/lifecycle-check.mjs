@@ -493,13 +493,58 @@ const COVERAGE_MIN_ANGLES = 3;
 // A1: reject >1 .lifecycle feature dir even under an explicit --dir (a second
 // feature dir sneaks onto the branch → the pre-push `--all` gate validates the
 // wrong one → silent push-doom).
+//
+// Counted against `baseRef`, NOT the on-disk listing. A branch cut from a
+// long-lived integration branch INHERITS every previously-landed feature's
+// committed artifacts, so an on-disk count made A1 unsatisfiable there — and its
+// only "remedy" was deleting other features' audit trails to go green, which is
+// precisely the destructive act the lifecycle exists to prevent. What A1 means is
+// "this BRANCH introduces exactly one feature", so that is what it now measures.
+//
+// Uncommitted-but-present dirs still count: a dir added on disk would ship on the
+// next commit, and A1 is a pre-push guard.
 function checkA1() {
   const root = join(repo, '.lifecycle');
   if (!existsSync(root)) return [];
   let subs = [];
   try { subs = readdirSync(root).filter((d) => { try { return statSync(join(root, d)).isDirectory(); } catch { return false; } }); }
   catch { return []; }
-  if (subs.length > 1) return [`A1: .lifecycle/ has ${subs.length} feature dirs (${subs.join(', ')}) — a branch may carry exactly ONE. Remove the stray(s) before pushing.`];
+  if (subs.length <= 1) return [];
+
+  const firstSeg = (p) => {
+    const parts = p.split('/').filter(Boolean);
+    const i = parts.indexOf('.lifecycle');
+    return i >= 0 ? parts[i + 1] : null;
+  };
+
+  // Feature dirs this branch ADDS relative to the base.
+  let added = null;
+  for (const range of [[`${baseRef}...HEAD`], [baseRef]]) {
+    try {
+      const out = git(repo, 'diff', '--diff-filter=A', '--name-only', ...range, '--', '.lifecycle');
+      added = new Set(out.split('\n').map((l) => firstSeg(l.trim())).filter(Boolean));
+      break;
+    } catch { /* try the next form */ }
+  }
+  // Base unresolvable (shallow clone, missing ref) → fall back to the strict
+  // on-disk rule rather than silently passing.
+  if (added == null) {
+    return [`A1: .lifecycle/ has ${subs.length} feature dirs (${subs.join(', ')}) and the base ref '${baseRef}' could not be resolved to tell which this branch adds — a branch may carry exactly ONE. Pass --base, or remove the stray(s).`];
+  }
+  // Plus anything present but untracked — it would ship on the next commit.
+  try {
+    const st = git(repo, 'status', '--porcelain', '--untracked-files=all', '--', '.lifecycle');
+    for (const line of st.split('\n')) {
+      const t = line.trim();
+      if (!t.startsWith('??')) continue;
+      const seg = firstSeg(t.replace(/^\?\?\s*/, ''));
+      if (seg) added.add(seg);
+    }
+  } catch { /* status is advisory here */ }
+
+  if (added.size > 1) {
+    return [`A1: this branch adds ${added.size} .lifecycle feature dirs (${[...added].sort().join(', ')}) relative to ${baseRef} — a branch may carry exactly ONE. Remove the stray(s) before pushing.`];
+  }
   return [];
 }
 

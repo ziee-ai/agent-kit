@@ -69,6 +69,11 @@ EOF
   local D="$R/.lifecycle/bar"
   cat > "$D/PLAN.md" <<'EOF'
 # PLAN — bar
+## Design source
+- `docs/design/bar.md` §1 "Bar listing" — this plan realizes the read path
+  described there; the write path is out of scope for this round.
+## Invariants
+- **INV-1**: `list_bar` returns every bar row — the listing is never silently truncated.
 ## Items
 - **ITEM-1**: Add list_bar to the bar repository.
 ## Files to touch
@@ -79,7 +84,7 @@ EOF
   write_common "$D" "src-app/server/src/modules/bar/repository.rs" 3
   cat > "$D/TESTS.md" <<'EOF'
 # TESTS — bar
-- **TEST-1** (tier: unit) [covers: ITEM-1] file: `src-app/server/src/modules/bar/repository.rs` — asserts: list_bar returns two rows.
+- **TEST-1** (tier: unit) [acceptance] [invariant: INV-1] [covers: ITEM-1] file: `src-app/server/src/modules/bar/repository.rs` — asserts: list_bar returns both seeded rows, not a truncated prefix.
 EOF
   cat > "$D/TEST_RESULTS.md" <<'EOF'
 # TEST_RESULTS — bar
@@ -113,6 +118,11 @@ EOF
   local D="$R/.lifecycle/foo"
   cat > "$D/PLAN.md" <<'EOF'
 # PLAN — foo
+## Design source
+- `docs/design/foo.md` §4 "Foo access control" — this plan realizes the gated
+  Foo surface described there.
+## Invariants
+- **INV-1**: Foo is reachable only with `foo::use` — the backend refuses a caller that lacks it.
 ## Items
 - **ITEM-1**: Define the foo::use permission (backend).
 - **ITEM-2**: Add the FooPage UI, gated by foo::use.
@@ -123,10 +133,21 @@ EOF
 - Mirror an existing permissions.rs and a settings page.
 EOF
   write_common "$D" "src-app/server/src/modules/foo/permissions.rs" 5
+  # write_common's PLAN_AUDIT verdicts cover ITEM-1; this plan has a second item.
+  printf -- '- **ITEM-2** — verdict: PASS — mirrors an existing gated settings page; additive only.\n' >> "$D/PLAN_AUDIT.md"
+  # write_common's LEDGER + AUDIT_COVERAGE cover the ONE source file it is told
+  # about; this fixture touches a second (the UI page), so extend both. Without
+  # this the fixture is only phase-3/8-valid, and phase 6 would report the
+  # FooPage.tsx hunk as reviewed by 0 angles.
+  for a in correctness a11y patterns-conformance; do
+    printf '{"angle":"%s","file":"src-app/ui/src/modules/foo/FooPage.tsx","line":1,"severity":"info","finding":"none","status":"rejected"}\n' \
+      "$a" >> "$D/LEDGER.jsonl"
+  done
+  printf 'src-app/ui/src/modules/foo/FooPage.tsx\t1\t3\tcorrectness,a11y,patterns-conformance\n' >> "$D/AUDIT_COVERAGE.tsv"
   cat > "$D/TESTS.md" <<'EOF'
 # TESTS — foo
 - **TEST-1** (tier: unit) [covers: ITEM-1] file: `src-app/server/src/modules/foo/permissions.rs` — asserts: PERMISSION is foo::use.
-- **TEST-2** (tier: integration) [covers: ITEM-1] file: `src-app/server/tests/foo/foo.rs` — asserts: a user lacking foo::use gets 403 forbidden.
+- **TEST-2** (tier: integration) [acceptance] [invariant: INV-1] [covers: ITEM-1] file: `src-app/server/tests/foo/foo.rs` — asserts: a user lacking foo::use gets 403 forbidden.
 - **TEST-3** (tier: e2e) [covers: ITEM-2] file: `src-app/ui/tests/e2e/foo/foo.spec.ts` — asserts: a permitted user opens Foo and clicks Save.
 EOF
   cat > "$D/TEST_RESULTS.md" <<'EOF'
@@ -162,6 +183,14 @@ lc 0 "A1: one .lifecycle dir is accepted (control)" --all --repo "$R" --dir "$D"
 # landed feature's committed artifacts. Counting those made A1 unsatisfiable and
 # its only "remedy" was deleting other features' audit trails — the exact
 # destructive act the lifecycle exists to prevent. A1 counts what the BRANCH adds.
+#
+# The two cases below prove OPPOSITE directions and are both required:
+#   • the first DISCRIMINATES the fix — it FAILS against the old on-disk rule
+#     (which refuses any >1 dir, inherited or not);
+#   • the second is the NO-OVER-CORRECTION control — the old rule also refuses
+#     here, so it cannot discriminate the fix; what it catches is the fix
+#     swinging too far and letting a branch-added stray through (it FAILS if A1
+#     is disabled or the diff-vs-base count stops reporting).
 R="$(build_be)"; D="$R/.lifecycle/bar"
 git -C "$R" checkout -q main
 mkdir -p "$R/.lifecycle/previously-landed"
@@ -195,16 +224,18 @@ lc 1 "A4: a cosmetic assert!(true) is REFUSED" --phase 8 --repo "$R" --dir "$D" 
 
 # --- A5: TESTS.md that dropped a previously-committed test -> phase 3 FAIL
 R="$(build_be)"; D="$R/.lifecycle/bar"
-# earlier commit had TEST-1 + TEST-2; now shrink to TEST-1
+# earlier commit had TEST-1 + TEST-2; now shrink to TEST-1.
+# Both revisions keep TEST-1's [acceptance]/[invariant: INV-1] markers so the
+# ONLY gap phase 3 can report on the shrunk revision is A5 — the gate under test.
 cat > "$D/TESTS.md" <<'EOF'
 # TESTS — bar
-- **TEST-1** (tier: unit) [covers: ITEM-1] file: `src-app/server/src/modules/bar/repository.rs` — asserts: one.
+- **TEST-1** (tier: unit) [acceptance] [invariant: INV-1] [covers: ITEM-1] file: `src-app/server/src/modules/bar/repository.rs` — asserts: one.
 - **TEST-2** (tier: integration) [covers: ITEM-1] file: `src-app/server/tests/bar/bar.rs` — asserts: two.
 EOF
 git -C "$R" commit -qam tests-two
 cat > "$D/TESTS.md" <<'EOF'
 # TESTS — bar
-- **TEST-1** (tier: unit) [covers: ITEM-1] file: `src-app/server/src/modules/bar/repository.rs` — asserts: one.
+- **TEST-1** (tier: unit) [acceptance] [invariant: INV-1] [covers: ITEM-1] file: `src-app/server/src/modules/bar/repository.rs` — asserts: one.
 EOF
 git -C "$R" commit -qam tests-shrunk
 lc 1 "A5: TESTS.md shrink (dropped TEST-2) is REFUSED" --phase 3 --repo "$R" --dir "$D" --base main
@@ -214,6 +245,11 @@ R="$(build_be)"; D="$R/.lifecycle/bar"
 # (1) an extra PLAN item with no covering TEST and no descope -> bipartite FAIL
 cat > "$D/PLAN.md" <<'EOF'
 # PLAN — bar
+## Design source
+- `docs/design/bar.md` §1 "Bar listing" — this plan realizes the read path
+  described there; the write path is out of scope for this round.
+## Invariants
+- **INV-1**: `list_bar` returns every bar row — the listing is never silently truncated.
 ## Items
 - **ITEM-1**: Add list_bar to the bar repository.
 - **ITEM-2**: A planned sub-feature.
@@ -227,6 +263,11 @@ lc 1 "FB-7: an uncovered PLAN item is REFUSED (phase 3)" --phase 3 --repo "$R" -
 # (2) mark ITEM-2 [DESCOPED] but with NO recorded approval -> still FAIL
 cat > "$D/PLAN.md" <<'EOF'
 # PLAN — bar
+## Design source
+- `docs/design/bar.md` §1 "Bar listing" — this plan realizes the read path
+  described there; the write path is out of scope for this round.
+## Invariants
+- **INV-1**: `list_bar` returns every bar row — the listing is never silently truncated.
 ## Items
 - **ITEM-1**: Add list_bar to the bar repository.
 - **ITEM-2**: [DESCOPED] cut from this round.
@@ -324,6 +365,11 @@ EOF
 D="$R/.lifecycle/foo"
 cat > "$D/PLAN.md" <<'EOF'
 # PLAN — foo
+## Design source
+- `docs/design/foo.md` §4 "Foo access control" — this plan realizes the default
+  grant described there.
+## Invariants
+- **INV-1**: The default Users group holds `foo::use` after migration.
 ## Items
 - **ITEM-1**: Grant foo::use to the default Users group (migration).
 ## Files to touch
@@ -334,7 +380,7 @@ EOF
 write_common "$D" "src-app/server/migrations/00000000000011_grant_foo.sql" 2
 cat > "$D/TESTS.md" <<'EOF'
 # TESTS — foo
-- **TEST-1** (tier: integration) [covers: ITEM-1] file: `src-app/server/tests/foo/foo.rs` — asserts: the Users group gains foo::use.
+- **TEST-1** (tier: integration) [acceptance] [invariant: INV-1] [covers: ITEM-1] file: `src-app/server/tests/foo/foo.rs` — asserts: the Users group gains foo::use.
 EOF
 cat > "$D/TEST_RESULTS.md" <<'EOF'
 # TEST_RESULTS — foo
@@ -363,6 +409,11 @@ EOF
 D="$R/.lifecycle/foo"
 cat > "$D/PLAN.md" <<'EOF'
 # PLAN — foo
+## Design source
+- `docs/design/foo.md` §2 "Foo surface" — this plan realizes the single-action
+  Foo page described there.
+## Invariants
+- **INV-1**: The Foo surface exposes exactly one Save affordance.
 ## Items
 - **ITEM-1**: Add a FooPage component.
 ## Files to touch
@@ -373,7 +424,7 @@ EOF
 write_common "$D" "src-app/ui/src/modules/foo/FooPage.tsx" 3
 cat > "$D/TESTS.md" <<'EOF'
 # TESTS — foo
-- **TEST-1** (tier: unit) [covers: ITEM-1] file: `src-app/ui/src/modules/foo/FooPage.test.tsx` — asserts: renders Save.
+- **TEST-1** (tier: unit) [acceptance] [invariant: INV-1] [covers: ITEM-1] file: `src-app/ui/src/modules/foo/FooPage.test.tsx` — asserts: renders exactly one Save button.
 - **TEST-2** (tier: e2e) [covers: ITEM-1] file: `src-app/ui/tests/e2e/foo/foo.spec.ts` — asserts: user clicks Save.
 EOF
 cat > "$D/TEST_RESULTS.md" <<'EOF'
@@ -403,6 +454,11 @@ EOF
 D="$R/.lifecycle/foo"
 cat > "$D/PLAN.md" <<'EOF'
 # PLAN — foo
+## Design source
+- `docs/design/foo.md` §3 "Things flow" — this plan realizes the e2e coverage
+  of the things list described there.
+## Invariants
+- **INV-1**: The things list is rendered from the live `/api/things` route, never a fabricated one.
 ## Items
 - **ITEM-1**: Add an e2e spec for the things flow.
 ## Files to touch
@@ -413,7 +469,7 @@ EOF
 write_common "$D" "src-app/ui/tests/e2e/foo/foo.spec.ts" 5
 cat > "$D/TESTS.md" <<'EOF'
 # TESTS — foo
-- **TEST-1** (tier: e2e) [covers: ITEM-1] file: `src-app/ui/tests/e2e/foo/foo.spec.ts` — asserts: things list renders.
+- **TEST-1** (tier: e2e) [acceptance] [invariant: INV-1] [covers: ITEM-1] file: `src-app/ui/tests/e2e/foo/foo.spec.ts` — asserts: things list renders from /api/things.
 EOF
 cat > "$D/TEST_RESULTS.md" <<'EOF'
 # TEST_RESULTS — foo
@@ -668,6 +724,11 @@ build_webapp_feat() {
   local D="$R/.lifecycle/foo"; mkdir -p "$D" "$(dirname "$R/$touched")"
   cat > "$D/PLAN.md" <<EOF
 # PLAN — foo
+## Design source
+- \`docs/design/foo.md\` §1 "Webapp surface" — this plan realizes the surface
+  described there.
+## Invariants
+- **INV-1**: The webapp surface is driven only by routes the app actually serves.
 ## Items
 - **ITEM-1**: Add a webapp surface.
 ## Files to touch
@@ -694,7 +755,7 @@ EOF
 D="$(build_webapp_feat "$R" "webapp/tests/e2e/foo/foo.spec.ts")"
 cat > "$D/TESTS.md" <<'EOF'
 # TESTS — foo
-- **TEST-1** (tier: e2e) [covers: ITEM-1] file: `webapp/tests/e2e/foo/foo.spec.ts` — asserts: things list renders.
+- **TEST-1** (tier: e2e) [acceptance] [invariant: INV-1] [covers: ITEM-1] file: `webapp/tests/e2e/foo/foo.spec.ts` — asserts: things list renders from a served route.
 EOF
 cat > "$D/TEST_RESULTS.md" <<'EOF'
 # TEST_RESULTS — foo
@@ -733,7 +794,7 @@ D="$(build_webapp_feat "$R" "webapp/src/FooPage.tsx")"
 cat > "$D/TESTS.md" <<'EOF'
 # TESTS — foo
 - **TEST-1** (tier: unit) [covers: ITEM-1] file: `webapp/src/FooPage.test.tsx` — asserts: renders Save.
-- **TEST-2** (tier: e2e) [covers: ITEM-1] file: `webapp/tests/e2e/foo/foo.spec.ts` — asserts: user clicks Save.
+- **TEST-2** (tier: e2e) [acceptance] [invariant: INV-1] [covers: ITEM-1] file: `webapp/tests/e2e/foo/foo.spec.ts` — asserts: user clicks Save against a served route.
 EOF
 cat > "$D/TEST_RESULTS.md" <<'EOF'
 # TEST_RESULTS — foo

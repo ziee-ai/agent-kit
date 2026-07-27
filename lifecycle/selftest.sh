@@ -49,6 +49,11 @@ echo '{"openapi":"3.0.0"}' > "$FE/src-app/ui/openapi/openapi.json"
 FD="$FE/.lifecycle/foo"
 cat > "$FD/PLAN.md" <<'EOF'
 # PLAN — foo
+## Design source
+- `docs/design/foo.md` §2 "Foo surface" — this plan realizes the single-action
+  Foo page described there; no other section of that design is in scope.
+## Invariants
+- **INV-1**: The Foo surface exposes exactly one Save affordance.
 ## Items
 - **ITEM-1**: Add a FooPage component to the ui workspace.
 ## Files to touch
@@ -60,9 +65,11 @@ EOF
 write_common "$FD" "src-app/ui/src/modules/foo/FooPage.tsx" 8
 
 # --- variant A: all-unit test plan (NO e2e) -> phase 3 must FAIL
+# TEST-1 already carries the [acceptance] proof of INV-1, so the ONLY gap phase 3
+# can report here is the missing e2e tier — the gate under test.
 cat > "$FD/TESTS.md" <<'EOF'
 # TESTS — foo
-- **TEST-1** (tier: unit) [covers: ITEM-1] file: `src-app/ui/src/modules/foo/FooPage.test.tsx` — asserts: FooPage renders a Save button.
+- **TEST-1** (tier: unit) [acceptance] [invariant: INV-1] [covers: ITEM-1] file: `src-app/ui/src/modules/foo/FooPage.test.tsx` — asserts: FooPage renders exactly one Save button.
 EOF
 git -C "$FE" add -A && git -C "$FE" commit -qm feat
 assert_exit 1 "FE phase 3: all-unit plan for UI work is REFUSED" -- --phase 3 --repo "$FE" --dir "$FD" --base main
@@ -70,7 +77,7 @@ assert_exit 1 "FE phase 3: all-unit plan for UI work is REFUSED" -- --phase 3 --
 # --- variant B: plan now enumerates an e2e-tier test -> phase 3 OK
 cat > "$FD/TESTS.md" <<'EOF'
 # TESTS — foo
-- **TEST-1** (tier: unit) [covers: ITEM-1] file: `src-app/ui/src/modules/foo/FooPage.test.tsx` — asserts: FooPage renders a Save button.
+- **TEST-1** (tier: unit) [acceptance] [invariant: INV-1] [covers: ITEM-1] file: `src-app/ui/src/modules/foo/FooPage.test.tsx` — asserts: FooPage renders exactly one Save button.
 - **TEST-2** (tier: e2e) [covers: ITEM-1] file: `src-app/ui/tests/e2e/foo/foo.spec.ts` — asserts: user opens Foo page and clicks Save.
 EOF
 git -C "$FE" add -A && git -C "$FE" commit -qm tests-e2e
@@ -126,6 +133,11 @@ echo 'export type Bar = { id: string };' > "$BE/src-app/ui/src/api-client/types.
 BD="$BE/.lifecycle/bar"
 cat > "$BD/PLAN.md" <<'EOF'
 # PLAN — bar
+## Design source
+- `docs/design/bar.md` §1 "Bar listing" — this plan realizes the read path
+  described there; the write path is out of scope for this round.
+## Invariants
+- **INV-1**: `list_bar` returns every bar row — the listing is never silently truncated.
 ## Items
 - **ITEM-1**: Add list_bar to the bar repository.
 ## Files to touch
@@ -137,7 +149,7 @@ EOF
 write_common "$BD" "src-app/server/src/modules/bar/repository.rs" 3
 cat > "$BD/TESTS.md" <<'EOF'
 # TESTS — bar
-- **TEST-1** (tier: unit) [covers: ITEM-1] file: `src-app/server/src/modules/bar/repository.rs` — asserts: list_bar returns two rows.
+- **TEST-1** (tier: unit) [acceptance] [invariant: INV-1] [covers: ITEM-1] file: `src-app/server/src/modules/bar/repository.rs` — asserts: list_bar returns both seeded rows, not a truncated prefix.
 EOF
 cat > "$BD/TEST_RESULTS.md" <<'EOF'
 # TEST_RESULTS — bar

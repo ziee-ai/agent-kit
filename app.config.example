@@ -56,6 +56,25 @@ MERGE_DESKTOP_TOUCH_PREFIX=src-app/desktop/tauri/
 # Codegen regen command + its output files → C3 regen-parity (empty-diff check).
 MERGE_REGEN_CMD=just openapi-regen
 MERGE_GENERATED=src-app/ui/openapi/openapi.json src-app/ui/src/api-client/types.ts src-app/desktop/ui/openapi/openapi.json src-app/desktop/ui/src/api-client/types.ts
+# STAGING PROVISIONING. `git worktree add` materializes the TRACKED tree ONLY, so
+# the staging tree the heavy gates build from is missing two things the real
+# working tree has — and C1/C3 then fail SPURIOUSLY (a provisioning gap, NOT a
+# check failure):
+#  1. submodule working trees are EMPTY (a crate sourced from a submodule ⇒
+#     `failed to read <submodule>/…/Cargo.toml`). merge-gate therefore runs
+#     `git submodule update --init --recursive` in staging whenever the merged
+#     tree has a .gitmodules. Set to 0 to opt out (default: 1, no key needed).
+#MERGE_STAGING_SUBMODULES=1
+#  2. GITIGNORED per-machine files (e.g. a dev config the codegen needs ⇒ regen
+#     dies with `no config file found`) are absent by definition. Declare them
+#     here — space-separated repo-relative paths, files or dirs — and merge-gate
+#     copies each from the LIVE repo into staging. Nothing app-specific is baked
+#     into the shared gate; an absent declared path is WARNED about and the run
+#     continues, so the gate needing it still fails for its real reason. Only
+#     UNTRACKED paths are copied — a TRACKED path is refused (the merged tree
+#     already holds the authoritative version; overwriting it could mask a
+#     genuine C1/C3 failure).
+MERGE_STAGING_COPY_FILES=src-app/server/config/dev.yaml
 
 # ── lifecycle-check.mjs (per-phase gate) ──────────────────────────────────
 # lifecycle-check is otherwise app-agnostic; only these three ziee-specific

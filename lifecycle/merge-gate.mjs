@@ -28,8 +28,8 @@
 // child_process.
 
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync, readdirSync, readFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { existsSync, mkdtempSync, mkdirSync, cpSync, rmSync, readdirSync, readFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 
 // ---------------------------------------------------------------------------
@@ -114,6 +114,9 @@ const CARGO_DESKTOP_PACKAGE = APP.MERGE_CARGO_DESKTOP_PACKAGE || null; // C1 (op
 const DESKTOP_TOUCH_PREFIX = APP.MERGE_DESKTOP_TOUCH_PREFIX || null;   // C1 (optional)
 const REGEN_CMD = APP.MERGE_REGEN_CMD || null;                 // C3
 const GENERATED = (APP.MERGE_GENERATED || '').split(/\s+/).filter(Boolean); // C3
+// staging PROVISIONING (see provisionStaging below)
+const STAGING_SUBMODULES = (APP.MERGE_STAGING_SUBMODULES || '1').trim() !== '0';
+const STAGING_COPY_FILES = (APP.MERGE_STAGING_COPY_FILES || '').split(/\s+/).filter(Boolean);
 
 // ---------------------------------------------------------------------------
 // --verify-head — the fast subset safe to run in a pre-push hook on a push to
@@ -282,6 +285,72 @@ function makeStaging() {
   stagingCreated = true;
 }
 
+// ---------------------------------------------------------------------------
+// staging PROVISIONING — `git worktree add` materializes the TRACKED tree only:
+//   (a) submodule working trees are left EMPTY (only the gitlink dir exists), so
+//       any crate/package sourced from a submodule is missing → C1 dies with
+//       `failed to read <submodule>/.../Cargo.toml` and C3's regen dies with it;
+//   (b) gitignored per-machine config (a dev.yaml the codegen needs) is absent
+//       by definition → C3's regen dies with `no config file found`.
+// Both are PROVISIONING gaps, not check failures: the gate reports a red C1/C3
+// for a condition that does not exist on the branch. Fix both here, generically:
+//   • submodules — `git submodule update --init --recursive` whenever the merged
+//     tree HAS a .gitmodules (opt out per app with MERGE_STAGING_SUBMODULES=0);
+//   • gitignored-but-required files — each app DECLARES its own repo-relative
+//     paths in MERGE_STAGING_COPY_FILES (space-separated) and they are copied
+//     from the live repo into staging. NOTHING app-specific is baked in here;
+//     an app that declares none copies none.
+// Run AFTER the merge so submodules check out the MERGED gitlink, not base's.
+// Fail-SOFT but LOUD: a missing/failed item prints a warning and continues, so
+// the gate that needed it fails for its REAL reason — never silently skipped.
+// ---------------------------------------------------------------------------
+function stagingNote(msg) { process.stdout.write(`  · staging: ${msg}\n`); }
+function stagingWarn(msg) { process.stdout.write(`  ! staging: ${msg}\n`); }
+
+function provisionStaging() {
+  // (a) submodules
+  if (existsSync(join(staging, '.gitmodules'))) {
+    if (!STAGING_SUBMODULES) {
+      stagingNote('submodule checkout SKIPPED (MERGE_STAGING_SUBMODULES=0)');
+    } else {
+      const s = gitTry(staging, 'submodule', 'update', '--init', '--recursive');
+      if (s.ok) stagingNote('submodules checked out (git submodule update --init --recursive)');
+      else stagingWarn('`git submodule update --init --recursive` FAILED — any gate needing submodule sources (C1/C3) will fail for THAT reason:\n'
+        + s.out.trim().split(/\n/).slice(-6).map((l) => `      ${l}`).join('\n'));
+    }
+  }
+  // (b) app-declared gitignored-but-required files
+  for (const rel of STAGING_COPY_FILES) {
+    if (rel.startsWith('/') || rel.split(/[\\/]/).includes('..')) {
+      stagingWarn(`MERGE_STAGING_COPY_FILES entry "${rel}" is not a safe repo-relative path — NOT copied`);
+      continue;
+    }
+    // Only UNTRACKED (gitignored, per-machine) files belong here. A TRACKED path
+    // already has its authoritative MERGED content in staging; copying the live
+    // working-tree version over it would substitute unreviewed content and could
+    // MASK a real C1/C3 failure. Refuse, loudly.
+    if (gitTry(staging, 'ls-files', '--error-unmatch', '--', rel).ok) {
+      stagingWarn(`MERGE_STAGING_COPY_FILES: "${rel}" is TRACKED by git — NOT copied. `
+        + 'The merged tree already holds the authoritative version; declare only gitignored per-machine files here.');
+      continue;
+    }
+    const src = join(repo, rel);
+    const dst = join(staging, rel);
+    if (!existsSync(src)) {
+      stagingWarn(`MERGE_STAGING_COPY_FILES: "${rel}" is ABSENT from ${repo} — NOT copied. `
+        + 'A gate needing it will fail for that reason; create it in the repo (e.g. via preflight) and re-run.');
+      continue;
+    }
+    try {
+      mkdirSync(dirname(dst), { recursive: true });
+      cpSync(src, dst, { recursive: true });
+      stagingNote(`copied gitignored "${rel}" into staging`);
+    } catch (e) {
+      stagingWarn(`could not copy "${rel}" into staging: ${e.message}`);
+    }
+  }
+}
+
 function gateMergeAndP2C5() {
   makeStaging();
   const m = gitTry(staging, 'merge', '--no-ff', '--no-edit', branch);
@@ -299,6 +368,10 @@ function gateMergeAndP2C5() {
     return;
   }
   record('MERGE', 'staging-merge', 'PASS', 'clean 3-way merge');
+
+  // The merged tree is final → provision it (submodules + app-declared
+  // gitignored config) BEFORE any gate reads from it.
+  provisionStaging();
 
   // --- P2 merge-completeness: every file the branch added/modified (vs fork)
   // must be present in the merged tree. A clean 3-way merge guarantees this,
@@ -418,7 +491,14 @@ try {
   else { record('C3', 'regen-parity', 'SKIP', 'merge did not complete'); record('C1', 'clean-build', 'SKIP', 'merge did not complete'); }
 } finally {
   if (stagingCreated && !KEEP_STAGING) {
-    gitTry(repo, 'worktree', 'remove', '--force', staging);
+    const rm = gitTry(repo, 'worktree', 'remove', '--force', staging);
+    // A worktree with POPULATED submodules (which provisionStaging creates) can
+    // refuse `worktree remove`; we created this dir, so force-clean it and prune
+    // the now-dangling registration rather than leaking a multi-GB staging tree.
+    if (!rm.ok) {
+      try { rmSync(staging, { recursive: true, force: true }); } catch {}
+      gitTry(repo, 'worktree', 'prune');
+    }
     try { if (existsSync(staging) && readdirSync(staging).length === 0) rmSync(staging, { recursive: true, force: true }); } catch {}
   }
 }

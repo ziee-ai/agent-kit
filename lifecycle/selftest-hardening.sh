@@ -486,6 +486,69 @@ echo "y" > "$R/y.txt"; git -C "$R" add -A && git -C "$R" commit -qm main-advance
 assert_exit_cmd 1 "merge-gate C4: a branch behind main (--max-behind 0) is REFUSED" -- \
   node "$MG" feat/stale --repo "$R" --base main --no-fetch --skip-heavy --max-behind 0
 
+# staging PROVISIONING: `git worktree add` gives the TRACKED tree only, so a
+# submodule's working tree is EMPTY and a gitignored per-machine config is absent
+# → C1/C3 fail SPURIOUSLY. Prove the gate provisions both. The regen command here
+# IS the assertion: it exits non-zero unless BOTH the submodule content and the
+# declared gitignored file are present in the staging tree.
+R="$(new_repo)"; CLEANUP+=("$R"); mkdir -p "$R/.claude" "$R/cfg"
+S="$(new_repo)"; CLEANUP+=("$S")
+echo "submodule-source" > "$S/marker.txt"
+git -C "$S" add -A && git -C "$S" commit -qm sub-content
+git -C "$R" config protocol.file.allow always
+git -C "$R" -c protocol.file.allow=always submodule add -q "$S" sub >/dev/null 2>&1
+cat > "$R/assert-staging.sh" <<'EOF'
+#!/usr/bin/env bash
+# stands in for `just openapi-regen`: the codegen needs BOTH the submodule
+# sources and the gitignored dev config.
+test -f sub/marker.txt || { echo "failed to read sub/marker.txt"; exit 1; }
+test -f cfg/dev.yaml   || { echo "no config file found"; exit 1; }
+exit 0
+EOF
+chmod +x "$R/assert-staging.sh"
+# gen.txt is declared too, but it is TRACKED — it must be REFUSED (the merged
+# tree is authoritative; copying the live version could mask a real failure).
+printf 'MERGE_REGEN_CMD=./assert-staging.sh\nMERGE_GENERATED=gen.txt\nMERGE_STAGING_COPY_FILES=cfg/dev.yaml gen.txt\n' > "$R/.claude/app.config"
+echo "generated" > "$R/gen.txt"
+printf 'cfg/dev.yaml\n' > "$R/.gitignore"
+git -C "$R" add -A && git -C "$R" commit -qm base-provision
+echo "secret: per-machine" > "$R/cfg/dev.yaml"   # gitignored ⇒ never in a worktree
+git -C "$R" checkout -q -b feat/provision
+echo work > "$R/w.txt"; git -C "$R" add -A && git -C "$R" commit -qm work-provision
+# GIT_ALLOW_PROTOCOL=file is a FIXTURE-only need: git refuses `file://` submodule
+# clones (CVE-2022-39253) and honors the relaxation only from the command line /
+# this env var, never from repo config. Real consumers use https/ssh submodules.
+export GIT_ALLOW_PROTOCOL=file
+assert_exit_cmd 0 "merge-gate: staging is provisioned (submodules + declared gitignored config) ⇒ C3 PASSes" -- \
+  node "$MG" feat/provision --repo "$R" --base main --no-fetch
+if grep -qE "staging: submodules checked out" /tmp/lc-selftest.out \
+   && grep -qE 'staging: copied gitignored "cfg/dev.yaml"' /tmp/lc-selftest.out; then
+  PASS=$((PASS+1)); printf '  \033[32mok  \033[0m %s\n' "merge-gate: staging provisioning is reported on stdout (submodules + copy)"
+else
+  FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "merge-gate: staging provisioning was not reported"
+  sed 's/^/        | /' /tmp/lc-selftest.out
+fi
+if grep -qE 'staging: MERGE_STAGING_COPY_FILES: "gen.txt" is TRACKED by git — NOT copied' /tmp/lc-selftest.out; then
+  PASS=$((PASS+1)); printf '  \033[32mok  \033[0m %s\n' "merge-gate: a TRACKED declared copy path is REFUSED (merged tree stays authoritative)"
+else
+  FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "merge-gate: a TRACKED declared copy path was not refused"
+  sed 's/^/        | /' /tmp/lc-selftest.out
+fi
+
+# fail-SOFT but LOUD: a DECLARED copy file that is absent from the repo must warn
+# clearly and let the gate fail for its REAL reason — never be silently skipped.
+rm -f "$R/cfg/dev.yaml"
+MISSOUT="$(node "$MG" feat/provision --repo "$R" --base main --no-fetch 2>&1 || true)"
+if printf '%s' "$MISSOUT" | grep -qE 'staging: MERGE_STAGING_COPY_FILES: "cfg/dev.yaml" is ABSENT' \
+   && printf '%s' "$MISSOUT" | grep -qE "C3.*FAIL" \
+   && printf '%s' "$MISSOUT" | grep -qE "no config file found"; then
+  PASS=$((PASS+1)); printf '  \033[32mok  \033[0m %s\n' "merge-gate: an ABSENT declared copy file warns loudly and the gate still FAILs honestly"
+else
+  FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "merge-gate: absent declared copy file — no warning or no honest FAIL"
+  printf '%s\n' "$MISSOUT" | sed 's/^/        | /'
+fi
+unset GIT_ALLOW_PROTOCOL
+
 # ---------------------------------------------------------------------------
 echo "-- Part C: preflight.sh (env gate) --"
 # ---------------------------------------------------------------------------

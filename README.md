@@ -73,8 +73,10 @@ ziee paths. Everything app-specific is read from the consumer's
 
 - **preflight.sh / merge-gate.mjs** — build seed, vendored submodule, node
   workspaces, build-DB isolation, dev-config seed; migrations dir, generated
-  files, regen command, cargo package + desktop crate. A key that is UNSET makes
-  its check/gate SKIP.
+  files, regen command, cargo package + desktop crate, and the staging
+  provisioning list (`MERGE_STAGING_COPY_FILES` — the gitignored per-machine
+  files a `git worktree add` cannot materialize; submodules are checked out
+  automatically). A key that is UNSET makes its check/gate SKIP.
 - **lifecycle-check.mjs** — the frontend-workspace prefix→label map
   (`LIFECYCLE_FRONTEND_WORKSPACES`), the openapi-spec route registry the R2-5
   gate checks against (`LIFECYCLE_OPENAPI_SPECS`), and the A2 clean-tree noise

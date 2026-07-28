@@ -619,11 +619,37 @@ Record each round in `FIX_ROUND-<n>.md` ending with `**New confirmed findings:**
 <N>`. Repeat until a full blind round yields **0** new confirmed findings. (Reject
 false positives explicitly in the ledger; a dismissed finding is not a fix.)
 
+**Re-running tests inside the loop — scope to the ROUND's diff, never the whole
+feature.** A fix round changes a handful of files; it does not invalidate the
+rest of the suite. Re-run ONLY the tests that cover the files **that round**
+touched, plus a typecheck. Do **NOT** re-run the full suite, and do **NOT**
+re-run the feature's whole enumerated test set, after every round.
+
+Nothing requires it: the phase-8 gate has **no staleness rule** — no timestamp
+check, nothing that voids a prior observed PASS when unrelated code changes. The
+habit is pure cost. Measured on one branch: ~17 rounds × a 32-minute serial
+real-LLM Playwright run of the whole family, which became the dominant cost of
+the entire branch while surfacing almost nothing new per round.
+
+- Scoped run goes red → widen from there until you've bounded the blast radius.
+- The full enumerated set runs **exactly once**, in phase 8 — that run is what
+  `TEST_RESULTS.md` records.
+- Same rule for the audit rounds themselves: audit the round's diff, not the
+  whole tree again.
+- Exempt: an experiment whose evidence IS the run (e.g. a two-worktree `gate:ui`
+  concurrency proof, a mutation battery proving a guard goes RED).
+
+This does not relax the standard — every enumerated test still needs a real
+observed PASS before READY. It cuts wasted wall-clock, not evidence.
+
 Gate: `--phase 7` (checks the final round is 0).
 
 ## Phase 8 — Gated test run (conditional on the touched areas)
 
-ONLY NOW run tests, scoped to what you built ([[feedback_test_scope]]). **Which
+ONLY NOW run tests, scoped to what you built ([[feedback_test_scope]]). This is
+the **single** full run of the enumerated set — phase 7 iterations run scoped
+subsets, and their results stand; a prior PASS is not voided by a later
+unrelated change. **Which
 gates apply is computed from `git diff main...HEAD`** (generated
 `openapi.json`/`api-client/types.ts` excluded, so they never make a backend diff
 look like UI work). A diff that touches both back- and front-end runs BOTH

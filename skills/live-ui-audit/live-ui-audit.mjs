@@ -84,6 +84,33 @@ const HEADED = flag('headed')
 const GATE = flag('gate')
 const FLEET = flag('fleet')
 const PERSONA_ARG = arg('persona', 'normal')
+// How long a loading indicator must SURVIVE, with the app declaring no
+// in-flight work, before it counts as stuck. See the stuck-loading pass.
+const STUCK_DWELL_MS = Number(arg('stuck-dwell-ms', '4000')) || 4000
+
+// ── BUILD CAVEATS ───────────────────────────────────────────────────────────
+// Performance-shaped findings (waterfall / excess / oversized) describe the
+// BUILD that was served, not the app in the abstract. The 24/7 rig, for
+// example, builds with `VITE_STORE_PREFETCH=off VITE_CLOSURE_PREFETCH=off`
+// (`rebuild-rig.sh`), i.e. a deliberately COLD build with the shipped idle-warm
+// stripped — a request the warm build would have already made looks like a
+// serialized cold fetch here. Reporting that silently, as if it described the
+// shipped app, is the kind of finding that wastes an engineer's afternoon.
+// Any such caveat is (a) auto-detected from the served bundle where the app
+// exposes it, and (b) declarable with `--build-note=` (repeatable), and is then
+// stamped onto every perf-shaped finding AND onto the report header.
+const CLI_BUILD_NOTES = process.argv
+  .filter(a => a.startsWith('--build-note='))
+  .map(a => a.slice('--build-note='.length))
+  .filter(Boolean)
+const BUILD_NOTES = [...CLI_BUILD_NOTES]
+// Categories whose reading depends on how the bundle was built.
+const PERF_SUBCATS = new Set(['waterfall', 'excess', 'oversized', 'duplicate', 'n+1'])
+// Short, STABLE marker on the finding's own signal line (the full text lives in
+// the record's `buildNotes` and in the report header) — long enough that nobody
+// acts on the number without seeing the caveat, short enough that it does not
+// push the actual signal out of a truncated render.
+const BUILD_CAVEAT_MARK = ' [⚠ build caveat applies — see `buildNotes`]'
 
 const VIEWPORT_LABEL = { 390: 'mobile', 768: 'tablet', 1280: 'desktop' }
 const SEV_RANK = { HIGH: 3, MEDIUM: 2, LOW: 1 }
@@ -768,7 +795,32 @@ const templatize = urlPath =>
 const SHELL_DOMAINS = new Set([
   'auth', 'sync', 'onboarding', 'config', 'app', 'me', 'profile', 'permissions',
   'hardware', 'notifications', 'theme', 'server-update', // global update banner is app-shell, not page-specific
+  // `conversations` is app-shell, NOT chat-page-specific: the persistent left
+  // sidebar renders on EVERY authenticated surface (SettingsLayoutView →
+  // AppLayout → LeftSidebar) and its recent-conversations widget legitimately
+  // needs the resource there. Treating it as chat-only made every settings
+  // cell report an `irrelevant` fetch for a list the shell is required to show.
+  'conversations',
 ])
+
+// Request IDENTITY for the duplicate / excess detectors. A pathname alone is
+// NOT an identity: `?page=1` and `?page=2` are different resources, and a
+// DESIGNED infinite-scroll pager fires several of them inside one step. Keying
+// dedup on the pathname alone reported every pager as a duplicate/excess storm.
+// Query params are order-insensitive on the wire, so normalize by sorting.
+const requestKey = (urlPath, search) => {
+  if (!search || search === '?') return urlPath
+  try {
+    const pairs = [...new URLSearchParams(search).entries()].sort(
+      (a, b) => a[0].localeCompare(b[0]) || String(a[1]).localeCompare(String(b[1])),
+    )
+    return pairs.length
+      ? `${urlPath}?${pairs.map(([k, v]) => `${k}=${v}`).join('&')}`
+      : urlPath
+  } catch {
+    return urlPath + search
+  }
+}
 // Per-flow relevance: the first /api path segment(s) whose PURPOSE relates to
 // the flow's page job. A GET to a heavy list endpoint outside this set (and
 // outside SHELL_DOMAINS) is flagged `irrelevant` — grounded in path→purpose.
@@ -870,9 +922,12 @@ function analyzeNetwork(log, flowId, openapi, pushRaw) {
       }
     }
 
-    // 2. duplicates: same method+path fired ≥2× within one step
+    // 2. duplicates: the SAME RESOURCE fired ≥2× within one step. Identity is
+    //    method + path + normalized query (`requestKey`) — see its comment:
+    //    keying on the pathname alone made an infinite-scroll pager's
+    //    `?page=1..4` look like one endpoint hit four times.
     const dupKey = {}
-    for (const r of rs) (dupKey[`${r.method} ${r.path}`] ??= []).push(r)
+    for (const r of rs) (dupKey[`${r.method} ${r.key || r.path}`] ??= []).push(r)
     for (const [k, group] of Object.entries(dupKey)) {
       if (group.length >= 2) {
         pushRaw({
@@ -906,16 +961,47 @@ function analyzeNetwork(log, flowId, openapi, pushRaw) {
       }
     }
 
-    // 4. waterfall: longest run of sequential non-overlapping /api requests
+    // 4. waterfall: the longest run of /api requests where each one could not
+    //    have been ISSUED until the previous one RETURNED.
+    //
+    //    The previous test allowed 20 ms of NEGATIVE slack
+    //    (`tStart >= tEnd - 20`), so any two requests overlapping by up to
+    //    20 ms counted as "sequential" — and any request SHORTER than the slack
+    //    always did. That is how four `void`-fired, genuinely parallel calls
+    //    reported as a 7-deep dependent waterfall (the single largest MEDIUM
+    //    bucket in the campaign). Causality is not "they did not overlap"; it
+    //    needs three measured conditions:
+    //      (a) STRICT non-overlap — B started at or after A ended (no slack);
+    //      (b) the gap A.end → B.start is short enough to be A's continuation
+    //          (one JS turn + render), not two unrelated spaced-out events;
+    //      (c) A ran long enough that "waited for A" is distinguishable from
+    //          "issued in the same tick" at our timing resolution.
+    //    Plus (d) the whole chain must cost enough serial time to be worth
+    //    reporting at all.
+    //    Timings come from Playwright's `request.timing()` (real network
+    //    timing) where available — wall-clock stamps taken inside async event
+    //    handlers are inflated by the handler's own await latency, which
+    //    manufactures apparent non-overlap. Links are only chained when BOTH
+    //    ends carry real timing (`r.timed`).
+    const WF_MAX_GAP_MS = 150
+    const WF_MIN_DUR_MS = 25
+    const WF_MIN_SERIAL_MS = 300
     const ordered = rs
-      .filter(r => r.tStart != null && r.tEnd != null)
+      .filter(r => r.tStart != null && r.tEnd != null && r.timed)
       .sort((a, b) => a.tStart - b.tStart)
+    const dependent = (a, b) => {
+      const gap = b.tStart - a.tEnd
+      if (gap < 0) return false // (a) they overlapped ⇒ b did not wait for a
+      if (gap > WF_MAX_GAP_MS) return false // (b) not a continuation
+      if (a.tEnd - a.tStart < WF_MIN_DUR_MS) return false // (c) below resolution
+      return true
+    }
     let run = 1
     let maxRun = 1
     let runStart = 0
     let bestStart = 0
     for (let i = 1; i < ordered.length; i++) {
-      if (ordered[i].tStart >= ordered[i - 1].tEnd - 20) {
+      if (dependent(ordered[i - 1], ordered[i])) {
         run++
         if (run > maxRun) {
           maxRun = run
@@ -928,15 +1014,22 @@ function analyzeNetwork(log, flowId, openapi, pushRaw) {
     }
     if (maxRun >= 4) {
       const chain = ordered.slice(bestStart, bestStart + maxRun)
-      const totalMs = chain[chain.length - 1].tEnd - chain[0].tStart
-      pushRaw({
-        step,
-        category: 'network',
-        subcategory: 'waterfall',
-        severity: 'MEDIUM',
-        selector: null,
-        detail: `waterfall: ${maxRun} sequential dependent /api requests (${totalMs}ms serial) that could be parallelized — ${chain.slice(0, 4).map(c => c.path).join(' → ')}`,
-      })
+      const totalMs = Math.round(chain[chain.length - 1].tEnd - chain[0].tStart)
+      const gaps = chain
+        .slice(1)
+        .map((c, i) => Math.round(c.tStart - chain[i].tEnd))
+      if (totalMs >= WF_MIN_SERIAL_MS) {
+        // (d) satisfied — report, and carry the causality EVIDENCE so the
+        // reader can check the call rather than trust the label.
+        pushRaw({
+          step,
+          category: 'network',
+          subcategory: 'waterfall',
+          severity: 'MEDIUM',
+          selector: null,
+          detail: `waterfall: ${maxRun} strictly serialized /api requests (${totalMs}ms serial, inter-request gaps ${gaps.join('/')}ms, each ≥${WF_MIN_DUR_MS}ms) that could be parallelized — ${chain.slice(0, 4).map(c => c.key || c.path).join(' → ')}`,
+        })
+      }
     }
 
     // 5. oversized payloads (evidence: measured bytes)
@@ -980,9 +1073,12 @@ function analyzeNetwork(log, flowId, openapi, pushRaw) {
   // per navigation — so a per-cell threshold flags every shell endpoint on every
   // multi-page flow (the dominant FP once sweep flows were added). The true
   // render-storm signal is one STEP (one page) firing the same endpoint ≥4×.
+  // Identity is method + path + normalized query, for the same reason the
+  // duplicate detector uses it: four pages of one paginated list are four
+  // resources, not one endpoint hit four times.
   const cellKey = {}
   for (const r of api)
-    (cellKey[`${r.method} ${r.path}`] ??= []).push(r)
+    (cellKey[`${r.method} ${r.key || r.path}`] ??= []).push(r)
   for (const [k, all] of Object.entries(cellKey)) {
     const perStep = {}
     for (const r of all) (perStep[r.step] ??= []).push(r)
@@ -1011,10 +1107,168 @@ function inPageAudit() {
   const vw = window.innerWidth
   const vh = window.innerHeight
 
+  // ── CLIPPING MODEL ───────────────────────────────────────────────────────
+  // `getBoundingClientRect()` returns an element's LAYOUT box, which is not
+  // what the user can see or reach. Two mechanisms move the two apart, and
+  // ignoring both was this detector's single largest false-positive source:
+  //
+  //  (1) SELF-CLIP — `clip` / `clip-path` can collapse a box to nothing while
+  //      leaving a 1×1 layout rect behind. That is exactly Tailwind's
+  //      `sr-only` (`width:1px;height:1px;clip:rect(0,0,0,0)`), so the keyboard
+  //      skip link — a REQUIRED a11y affordance — was reported as a
+  //      `zero-size-control` defect in every cell.
+  //
+  //  (2) ANCESTOR OVERFLOW — any ancestor whose `overflow` is not `visible`
+  //      clips its descendants to its padding box. A list row scrolled past
+  //      the bottom of its scroll container keeps a layout rect down there,
+  //      which is why rows "collided" with a pinned footer button that is
+  //      drawn beneath the clip.
+  //
+  // The distinction that matters is REACHABILITY, not painted-right-now:
+  //   * clipped away by a USER-SCROLLABLE ancestor → merely scrolled out of
+  //     view; the user scrolls and reaches it. Not a defect — but its layout
+  //     rect must not be used for geometry either.
+  //   * clipped away by a NON-scrollable clipper (`overflow: hidden|clip`, or
+  //     an `auto`/`scroll` box with no scroll range) → genuinely unreachable.
+  //     That IS a defect and is still reported.
+  // `clipState()` measures both and reports the numbers; each detector decides.
+  const CLIPS = /hidden|clip|auto|scroll|overlay/
+  const SCROLLS = /auto|scroll|overlay/
+  const num = v => {
+    const n = parseFloat(v)
+    return Number.isFinite(n) ? n : 0
+  }
+  // Does this element's own `clip`/`clip-path` collapse it to zero area?
+  const zeroAreaSelfClip = cs => {
+    const clip = cs.clip
+    if (clip && clip !== 'auto') {
+      // `clip: rect(top, right, bottom, left)` — computed with px units.
+      const m = clip.match(/-?[\d.]+px/g)
+      if (m && m.length === 4) {
+        const [t, r, b, l] = m.map(num)
+        if (r - l < 1 || b - t < 1) return true
+      }
+    }
+    const cp = cs.clipPath
+    if (cp && cp !== 'none') {
+      const ins = cp.match(/^inset\(([^)]*)\)/)
+      if (ins) {
+        const pct = ins[1]
+          .trim()
+          .split(/\s+/)
+          .filter(p => p.endsWith('%'))
+          .map(num)
+        // inset(50%) — the canonical "visually hide but keep focusable" form.
+        if (pct.length === 1 && pct[0] >= 50) return true
+        if (pct.length === 2 && (pct[0] >= 50 || pct[1] >= 50)) return true
+        if (pct.length >= 3) {
+          const [t, r, b, l = r] = pct
+          if (t + b >= 100 || r + l >= 100) return true
+        }
+      }
+      if (/^(circle|ellipse)\(\s*0(px|%)/.test(cp)) return true
+    }
+    return false
+  }
+  const rectOf = r => ({
+    left: r.left, top: r.top, right: r.right, bottom: r.bottom,
+    width: Math.max(0, r.right - r.left), height: Math.max(0, r.bottom - r.top),
+  })
+  const intersect = (a, b) =>
+    rectOf({
+      left: Math.max(a.left, b.left), top: Math.max(a.top, b.top),
+      right: Math.min(a.right, b.right), bottom: Math.min(a.bottom, b.bottom),
+    })
+  // The padding box an ancestor clips overflowing descendants to. clientLeft /
+  // clientWidth already exclude borders and any scrollbar gutter.
+  const clipBoxOf = el => {
+    const r = el.getBoundingClientRect()
+    if (!el.clientWidth && !el.clientHeight)
+      return { left: r.left, top: r.top, right: r.right, bottom: r.bottom }
+    const l = r.left + el.clientLeft
+    const t = r.top + el.clientTop
+    return { left: l, top: t, right: l + el.clientWidth, bottom: t + el.clientHeight }
+  }
+  const clipCache = new WeakMap()
+  const clipState = el => {
+    const hit = clipCache.get(el)
+    if (hit) return hit
+    const cs = getComputedStyle(el)
+    const full = rectOf(el.getBoundingClientRect())
+    const fullArea = full.width * full.height
+    let rect = { ...full }
+    let selfClipped = false
+    let hardClipper = null
+    let scrolledOut = false
+    if (zeroAreaSelfClip(cs)) {
+      selfClipped = true
+      rect = { left: full.left, top: full.top, right: full.left, bottom: full.top, width: 0, height: 0 }
+    }
+    // A `position: fixed` element escapes ancestor overflow UNLESS the ancestor
+    // establishes a containing block for it (transform / filter / perspective /
+    // contain / will-change).
+    const isFixed = cs.position === 'fixed'
+    let node = el.parentElement
+    while (node && node.nodeType === 1 && node !== document.documentElement) {
+      const acs = getComputedStyle(node)
+      const ox = acs.overflowX
+      const oy = acs.overflowY
+      if (CLIPS.test(ox) || CLIPS.test(oy)) {
+        const containingBlock =
+          acs.transform !== 'none' ||
+          acs.filter !== 'none' ||
+          acs.perspective !== 'none' ||
+          /paint|layout|strict|content/.test(acs.contain || '') ||
+          /transform|perspective|filter/.test(acs.willChange || '')
+        if (!isFixed || containingBlock) {
+          const box = clipBoxOf(node)
+          const before = { ...rect }
+          rect = intersect(rect, {
+            left: CLIPS.test(ox) ? box.left : -1e7,
+            right: CLIPS.test(ox) ? box.right : 1e7,
+            top: CLIPS.test(oy) ? box.top : -1e7,
+            bottom: CLIPS.test(oy) ? box.bottom : 1e7,
+          })
+          const cutX = rect.width < before.width - 0.5
+          const cutY = rect.height < before.height - 0.5
+          if (cutX || cutY) {
+            // Can the USER recover what this ancestor cut, by scrolling it?
+            const canScrollX = SCROLLS.test(ox) && node.scrollWidth > node.clientWidth + 1
+            const canScrollY = SCROLLS.test(oy) && node.scrollHeight > node.clientHeight + 1
+            if ((!cutX || canScrollX) && (!cutY || canScrollY)) scrolledOut = true
+            else if (!hardClipper) hardClipper = node
+          }
+        }
+      }
+      node = node.parentElement
+    }
+    const out = {
+      full,
+      fullArea,
+      rect,
+      visibleArea: rect.width * rect.height,
+      // fraction of the layout box that survives every clip on the chain
+      visibleFrac: fullArea > 0 ? (rect.width * rect.height) / fullArea : 0,
+      selfClipped,
+      scrolledOut,
+      // a clipper the user CANNOT scroll took area away ⇒ genuinely unreachable
+      hardClipped: !!hardClipper,
+      hardClipper,
+    }
+    clipCache.set(el, out)
+    return out
+  }
+
+  // `visible` answers "is this element RENDERED at all" — CSS visibility plus
+  // self-clip. It deliberately does NOT consider ancestor-scroll position or
+  // viewport bounds: a paragraph below the fold still has a real color and a
+  // real padding, so the contrast / palette / spacing passes must keep seeing
+  // it. Geometry passes use `clipState()` instead, which is scroll-aware.
   const visible = el => {
     const cs = getComputedStyle(el)
     if (cs.visibility === 'hidden' || cs.display === 'none' || cs.opacity === '0')
       return false
+    if (zeroAreaSelfClip(cs)) return false
     const r = el.getBoundingClientRect()
     return r.width >= 1 && r.height >= 1
   }
@@ -1042,6 +1296,79 @@ function inPageAudit() {
     const tid = el.getAttribute?.('data-testid')
     if (tid) return `[data-testid="${tid}"]`
     return domPath(el).slice(-80)
+  }
+
+  // Accessible-name computation (also used by the a11y-name and collision
+  // passes). Defined here because `anchorFor` — which every finding carries —
+  // depends on it.
+  const accName = el => {
+    const aria = el.getAttribute('aria-label')
+    if (aria && aria.trim()) return aria.trim()
+    const lb = el.getAttribute('aria-labelledby')
+    if (lb) {
+      const t = lb
+        .split(/\s+/)
+        .map(id => document.getElementById(id)?.textContent?.trim() || '')
+        .join(' ')
+        .trim()
+      if (t) return t
+    }
+    const title = el.getAttribute('title')
+    if (title && title.trim()) return title.trim()
+    if (el.tagName === 'INPUT') {
+      const ph = el.getAttribute('placeholder')
+      if (ph && ph.trim()) return ph.trim()
+      if (el.id) {
+        const lbl = document.querySelector(`label[for="${CSS.escape(el.id)}"]`)
+        if (lbl?.textContent?.trim()) return lbl.textContent.trim()
+      }
+    }
+    const wrap = el.closest('label')
+    if (wrap?.textContent?.trim()) return wrap.textContent.trim()
+    const text = el.textContent?.trim()
+    if (text) return text
+    const img = el.querySelector('img[alt]')
+    if (img?.getAttribute('alt')?.trim()) return img.getAttribute('alt').trim()
+    return ''
+  }
+
+  // ── STABLE SECONDARY KEY (attribution) ───────────────────────────────────
+  // The audited target is built `--mode production`, and that build strips
+  // literal `data-test*` attributes — so `selectorFor` degrades to a raw
+  // `nth-of-type` DOM path for most elements. Such a path names no element a
+  // human can find, and it changes whenever any sibling is added, so findings
+  // are neither attributable nor stable across builds.
+  // `anchorFor` emits the key a person would actually use: the element's tag +
+  // role + accessible name, inside the nearest identifiable landmark. It is
+  // carried ALONGSIDE the selector (never instead of it) on every in-page
+  // finding.
+  const LANDMARK_TAGS = ['main', 'nav', 'aside', 'header', 'footer', 'form', 'dialog']
+  const LANDMARK_ROLES = [
+    'main', 'navigation', 'dialog', 'complementary', 'banner', 'contentinfo',
+    'region', 'menu', 'listbox', 'tablist', 'toolbar', 'search',
+  ]
+  const landmarkOf = el => {
+    let node = el.parentElement
+    while (node && node.nodeType === 1 && node !== document.body) {
+      const tid = node.getAttribute('data-testid')
+      if (tid) return `[data-testid="${tid}"]`
+      if (node.id) return `#${node.id}`
+      const role = node.getAttribute('role')
+      const tag = node.tagName.toLowerCase()
+      if (LANDMARK_TAGS.includes(tag) || (role && LANDMARK_ROLES.includes(role))) {
+        const lbl = (node.getAttribute('aria-label') || '').trim()
+        return `${tag}${role ? `[role=${role}]` : ''}${lbl ? `[aria-label="${lbl.slice(0, 40)}"]` : ''}`
+      }
+      node = node.parentElement
+    }
+    return 'body'
+  }
+  const anchorFor = el => {
+    if (!el || el.nodeType !== 1) return null
+    const tag = el.tagName.toLowerCase()
+    const role = el.getAttribute?.('role')
+    const name = (accName(el) || '').replace(/\s+/g, ' ').trim().slice(0, 60)
+    return `${tag}${role ? `[role=${role}]` : ''}${name ? ` "${name}"` : ''} @ ${landmarkOf(el)}`
   }
 
   // ---- color helpers (ported from runtime-health.mjs) ---------------------
@@ -1163,46 +1490,35 @@ function inPageAudit() {
       const key = `${cs.color}|${JSON.stringify(bg)}|${threshold}`
       if (seenContrast.has(key)) continue
       seenContrast.add(key)
+      // `effectiveBg` is an ancestor-only ALPHA COMPOSITE: it is blind to
+      // background-image/gradients, to z-stacked overlays and scrims, and to
+      // ancestor `opacity` — so an element captured MID-TRANSITION is measured
+      // at full opacity against the wrong backdrop, which is the likeliest
+      // reading of a contrast HIGH that fires once and never again. We do not
+      // suppress on that basis (a permanently-dimmed element really does have
+      // reduced contrast), but the record now SAYS which confounders were
+      // present, so it can be triaged instead of re-litigated.
+      const confounders = []
+      for (let n = el; n && n.nodeType === 1; n = n.parentElement) {
+        const ncs = getComputedStyle(n)
+        const op = parseFloat(ncs.opacity)
+        if (op > 0 && op < 1) confounders.push(`ancestor opacity ${op} on <${n.tagName.toLowerCase()}>`)
+        if (ncs.backgroundImage && ncs.backgroundImage !== 'none')
+          confounders.push(`background-image on <${n.tagName.toLowerCase()}> (not modeled by the composite)`)
+        if (confounders.length >= 2) break
+      }
       findings.push({
         category: 'contrast',
         severity: 'HIGH',
         selector: selectorFor(el),
-        detail: `contrast ${cr.toFixed(2)}:1 < WCAG AA ${threshold}:1 (${large ? 'large' : 'normal'} text, ${size}px) — fg ${cs.color} on bg rgb(${Math.round(bg.r)},${Math.round(bg.g)},${Math.round(bg.b)})`,
+        anchor: anchorFor(el),
+        detail: `contrast ${cr.toFixed(2)}:1 < WCAG AA ${threshold}:1 (${large ? 'large' : 'normal'} text, ${size}px) — fg ${cs.color} on bg rgb(${Math.round(bg.r)},${Math.round(bg.g)},${Math.round(bg.b)})${confounders.length ? ` — MEASUREMENT CONFOUNDERS PRESENT: ${confounders.join('; ')}` : ''}`,
       })
     }
   }
 
   // ---- 2. interactive missing accessible name -----------------------------
-  const accName = el => {
-    const aria = el.getAttribute('aria-label')
-    if (aria && aria.trim()) return aria.trim()
-    const lb = el.getAttribute('aria-labelledby')
-    if (lb) {
-      const t = lb
-        .split(/\s+/)
-        .map(id => document.getElementById(id)?.textContent?.trim() || '')
-        .join(' ')
-        .trim()
-      if (t) return t
-    }
-    const title = el.getAttribute('title')
-    if (title && title.trim()) return title.trim()
-    if (el.tagName === 'INPUT') {
-      const ph = el.getAttribute('placeholder')
-      if (ph && ph.trim()) return ph.trim()
-      if (el.id) {
-        const lbl = document.querySelector(`label[for="${CSS.escape(el.id)}"]`)
-        if (lbl?.textContent?.trim()) return lbl.textContent.trim()
-      }
-    }
-    const wrap = el.closest('label')
-    if (wrap?.textContent?.trim()) return wrap.textContent.trim()
-    const text = el.textContent?.trim()
-    if (text) return text
-    const img = el.querySelector('img[alt]')
-    if (img?.getAttribute('alt')?.trim()) return img.getAttribute('alt').trim()
-    return ''
-  }
+  // (`accName` is defined near the top — `anchorFor` depends on it.)
   const INTERACTIVE =
     'button, a[href], input:not([type="hidden"]), select, textarea, [role="button"], [role="link"], [role="checkbox"], [role="switch"], [role="tab"], [role="menuitem"], [role="radio"]'
   const interactives = Array.from(document.querySelectorAll(INTERACTIVE)).filter(
@@ -1258,11 +1574,34 @@ function inPageAudit() {
     }
   }
 
-  // ---- 5. zero-size + off-viewport (clipped) interactive controls ---------
+  // ---- 5. zero-size + unreachable (clipped) interactive controls ----------
+  // NOTE `interactives` is already filtered by `visible()`, which now rejects
+  // self-clipped (`sr-only`) elements — so the keyboard skip link, a 1×1 box
+  // with `clip: rect(0,0,0,0)`, no longer reports as a zero-size control.
+  //
+  // "Collapsed" states are not clipping defects: an element inside a closed
+  // disclosure / inert subtree is deliberately not reachable right now.
+  const inCollapsedSubtree = el =>
+    !!el.closest('[inert],[hidden],[aria-hidden="true"],[data-state="closed"],[aria-expanded="false"] + *')
+  // Can the user scroll HORIZONTALLY anywhere on the chain to bring an element
+  // that pokes past a viewport edge into view?
+  const canScrollXChain = el => {
+    let node = el.parentElement
+    while (node && node.nodeType === 1) {
+      const cs = getComputedStyle(node)
+      if (SCROLLS.test(cs.overflowX) && node.scrollWidth > node.clientWidth + 1) return true
+      node = node.parentElement
+    }
+    return (
+      document.scrollingElement &&
+      document.scrollingElement.scrollWidth > document.scrollingElement.clientWidth + 1
+    )
+  }
   const seenGeom = new Set()
   for (const el of interactives) {
     const r = el.getBoundingClientRect()
     const sel = selectorFor(el)
+    const anch = anchorFor(el)
     // zero/near-zero clickable
     if ((r.width < 2 || r.height < 2) && !seenGeom.has('z' + sel)) {
       seenGeom.add('z' + sel)
@@ -1270,21 +1609,53 @@ function inPageAudit() {
         category: 'zero-size-control',
         severity: 'MEDIUM',
         selector: sel,
+        anchor: anch,
         detail: `interactive control has near-zero size ${Math.round(r.width)}×${Math.round(r.height)}px`,
       })
       continue
     }
-    // horizontally clipped: extends past left/right viewport edge (a control
-    // the user cannot fully reach at this width). Ignore vertical (legit scroll).
+    const cst = clipState(el)
+    // (a) HARD CLIP — a clipper the user cannot scroll removed the control
+    //     entirely. This is the genuinely-unreachable case: the control exists,
+    //     is laid out, is not `display:none`, and no amount of scrolling will
+    //     bring it back. Scrolled-out-of-a-scrollable-container is explicitly
+    //     NOT this (see `clipState`) and is not reported.
+    if (
+      cst.hardClipped &&
+      cst.visibleArea < 1 &&
+      !cst.selfClipped &&
+      !inCollapsedSubtree(el) &&
+      !seenGeom.has('h' + sel)
+    ) {
+      seenGeom.add('h' + sel)
+      findings.push({
+        category: 'clipped-control',
+        severity: 'MEDIUM',
+        selector: sel,
+        anchor: anch,
+        detail: `interactive control is fully clipped away and UNREACHABLE: its ${Math.round(r.width)}×${Math.round(r.height)}px box is cut to 0 by a non-scrollable overflow ancestor (${selectorFor(cst.hardClipper)}, overflow ${getComputedStyle(cst.hardClipper).overflowX}/${getComputedStyle(cst.hardClipper).overflowY}, scroll range ${cst.hardClipper.scrollWidth - cst.hardClipper.clientWidth}×${cst.hardClipper.scrollHeight - cst.hardClipper.clientHeight}px) — scrolling cannot reveal it`,
+      })
+      continue
+    }
+    // (b) VIEWPORT EDGE — the control pokes past the left/right viewport edge.
+    //     Only a defect when nothing on the chain scrolls horizontally to
+    //     reveal it; otherwise it is an ordinary horizontal scroller.
     const clippedRight = r.right > vw + 2 && r.left < vw
     const clippedLeft = r.left < -2 && r.right > 0
-    if ((clippedRight || clippedLeft) && r.width < vw && !seenGeom.has('c' + sel)) {
+    if (
+      (clippedRight || clippedLeft) &&
+      r.width < vw &&
+      cst.visibleArea > 0 &&
+      !canScrollXChain(el) &&
+      !seenGeom.has('c' + sel)
+    ) {
       seenGeom.add('c' + sel)
       findings.push({
         category: 'clipped-control',
         severity: 'MEDIUM',
         selector: sel,
-        detail: `interactive control clipped by viewport edge (rect left=${Math.round(r.left)} right=${Math.round(r.right)}, viewport width ${vw})`,
+        anchor: anch,
+        detail: `interactive control clipped by viewport edge with no horizontal scroll to reveal it (rect left=${Math.round(r.left)} right=${Math.round(r.right)}, viewport width ${vw})`,
       })
     }
   }
@@ -1302,9 +1673,19 @@ function inPageAudit() {
       '[role="menu"],[role="listbox"],[role="dialog"],[role="tooltip"],[data-radix-popper-content-wrapper],[data-floating-ui-portal]',
     ) || el.getAttribute('aria-haspopup') != null
   const inView = r => r.top >= -2 && r.left >= -2 && r.right <= vw + 2 && r.bottom <= vh + 2
+  // CRITICAL: collide the PAINTED boxes, not the layout boxes. A row scrolled
+  // past the bottom of its scroll container keeps a layout rect down there,
+  // which is exactly how sidebar conversation rows and settings-nav rows
+  // "overlapped" pinned footer buttons drawn beneath the clip — 71 LOW findings
+  // per cycle, every one of them visually refuted by the screenshots.
+  // `clipState().rect` is the box after every ancestor clip, so a scrolled-out
+  // element has zero area and drops out here.
   const boxes = interactives
     .filter(el => !el.querySelector(INTERACTIVE) && !inLayer(el))
-    .map(el => ({ el, r: el.getBoundingClientRect(), name: accName(el) }))
+    .map(el => {
+      const cst = clipState(el)
+      return { el, r: cst.rect, name: accName(el) }
+    })
     .filter(b => b.r.width >= 8 && b.r.height >= 8 && inView(b.r))
   const centerIn = (r, x, y) => x >= r.left && x <= r.right && y >= r.top && y <= r.bottom
   const cols = []
@@ -1338,14 +1719,24 @@ function inPageAudit() {
       category: 'control-collision',
       severity: 'LOW',
       selector: selectorFor(a.el),
-      detail: `two distinct interactive controls overlap ${Math.round(frac * 100)}% in-viewport — ${selectorFor(a.el)} ("${a.name || '?'}") ⨯ ${selectorFor(b.el)} ("${b.name || '?'}")`,
+      anchor: anchorFor(a.el),
+      detail: `two distinct interactive controls overlap ${Math.round(frac * 100)}% of their PAINTED (post-clip) boxes in-viewport — ${anchorFor(a.el)} ⨯ ${anchorFor(b.el)} [${selectorFor(a.el)} ⨯ ${selectorFor(b.el)}]`,
     })
   }
 
   // ---- 7. saturated hardcoded-color / theme-drift escapes -----------------
+  // `data-allow-custom-color` is the repo's OWN sanctioned opt-out for
+  // genuinely-dynamic color (the accent-preset swatch picker paints each
+  // preset's real color; `applyAccent` means only the ACTIVE one resolves to
+  // `--primary`, so the other eight can never match a shipped token by
+  // construction). `sdk/packages/config/src/lint/hardcoded-colors.mjs:31`
+  // honours the same marker and exits 0 on this tree — a runtime detector that
+  // contradicts the repo's own committed linter is wrong, not stricter.
+  // Checked with `closest()` so a marked container covers the element it paints.
   const seenPalette = new Set()
   for (const el of document.querySelectorAll('body *')) {
     if (!visible(el)) continue
+    if (el.closest('[data-allow-custom-color]')) continue
     const cs = getComputedStyle(el)
     for (const [prop, raw] of [
       ['background', cs.backgroundColor],
@@ -1363,35 +1754,49 @@ function inPageAudit() {
         category: 'palette-drift',
         severity: 'LOW',
         selector: selectorFor(el),
-        detail: `saturated ${prop} color ${raw} not resolvable to any DESIGN_SYSTEM token (possible hardcoded color / theme-drift)`,
+        anchor: anchorFor(el),
+        detail: `saturated ${prop} color ${raw} not resolvable to any DESIGN_SYSTEM token and not marked \`data-allow-custom-color\` (possible hardcoded color / theme-drift)`,
       })
     }
   }
 
   // ---- 8. off-grid spacing (aggregate, LOW; 2px half-step tolerated) ------
-  const offGrid = new Set()
+  // Aggregated into ONE finding so a page-wide token slip isn't reported
+  // hundreds of times — but it used to discard WHICH element was off-grid,
+  // leaving the record unactionable ("selector: body, 5px"). Carry one example
+  // element (selector + anchor + the property) per distinct value.
+  const offGrid = new Map() // px value -> {prop, selector, anchor}
   for (const el of document.querySelectorAll('body *')) {
     if (!visible(el)) continue
     const cs = getComputedStyle(el)
-    for (const v of [
-      cs.paddingTop, cs.paddingRight, cs.paddingBottom, cs.paddingLeft,
-      cs.marginTop, cs.marginRight, cs.marginBottom, cs.marginLeft,
-      cs.rowGap, cs.columnGap,
+    for (const [prop, v] of [
+      ['padding-top', cs.paddingTop], ['padding-right', cs.paddingRight],
+      ['padding-bottom', cs.paddingBottom], ['padding-left', cs.paddingLeft],
+      ['margin-top', cs.marginTop], ['margin-right', cs.marginRight],
+      ['margin-bottom', cs.marginBottom], ['margin-left', cs.marginLeft],
+      ['row-gap', cs.rowGap], ['column-gap', cs.columnGap],
     ]) {
       const px = Math.abs(parseFloat(v))
       if (!px || Number.isNaN(px)) continue
       if (px < 2) continue // sub-2px values are hairlines/borders, not spacing
       // tolerate 2px half-steps: flag only values not near a multiple of 2px
-      if (px % 2 > 0.5 && 2 - (px % 2) > 0.5) offGrid.add(Math.round(px * 10) / 10)
+      if (px % 2 > 0.5 && 2 - (px % 2) > 0.5) {
+        const key = Math.round(px * 10) / 10
+        if (!offGrid.has(key))
+          offGrid.set(key, { prop, selector: selectorFor(el), anchor: anchorFor(el) })
+      }
     }
   }
   if (offGrid.size) {
-    const list = [...offGrid].sort((a, b) => a - b).slice(0, 12)
+    const list = [...offGrid.entries()].sort((a, b) => a[0] - b[0]).slice(0, 8)
     findings.push({
       category: 'spacing-grid',
       severity: 'LOW',
-      selector: 'body',
-      detail: `${offGrid.size} distinct off-grid spacing value(s) (2px half-step tolerated): ${list.map(v => v + 'px').join(', ')}`,
+      selector: list[0][1].selector,
+      anchor: list[0][1].anchor,
+      detail: `${offGrid.size} distinct off-grid spacing value(s) (2px half-step tolerated): ${list
+        .map(([v, ex]) => `${v}px on ${ex.prop} of ${ex.anchor}`)
+        .join('; ')}`,
     })
   }
 
@@ -1427,25 +1832,94 @@ function inPageAudit() {
     }
   }
 
-  // ---- 10. stuck loading indicators ---------------------------------------
-  const spinners = Array.from(
-    document.querySelectorAll(
-      '[role="progressbar"], .animate-spin, [aria-busy="true"], [data-testid*="spin"], [data-testid*="loading"], [data-testid*="skeleton"]',
-    ),
-  ).filter(visible)
-  if (spinners.length) {
-    findings.push({
-      category: 'stuck-loading',
-      severity: 'MEDIUM',
-      selector: selectorFor(spinners[0]),
-      detail: `${spinners.length} loading indicator(s) still present after settle window`,
-    })
-  }
+  // ---- 10. loading indicators — OBSERVED, not judged here -----------------
+  // A spinner on screen is NOT a defect: it means work is in flight. "Stuck"
+  // means the work never finishes, and a single snapshot cannot tell the two
+  // apart — the old check flagged every in-flight LLM stream (the settle window
+  // simply expired mid-generation). Two things make it testable, and BOTH live
+  // in the driver, not here:
+  //   (a) the app's OWN busy discriminator — MessageList publishes
+  //       `data-busy="streaming"` while a generation is in flight and
+  //       `data-busy="loading"` while history loads. When the app declares it
+  //       is busy, a live spinner is CORRECT.
+  //   (b) PERSISTENCE — re-probe after a dwell. Only a spinner that survives
+  //       the dwell, with the app no longer declaring itself busy, is stuck.
+  // This pass therefore emits NO stuck-loading finding at all — the driver
+  // calls `probeLoading` (below) twice, before and after a dwell, and decides.
 
   return {
     findings,
     contrast,
     meta: { vw, vh, scrollWidth: sw, dark: document.documentElement.classList.contains('dark') },
+  }
+}
+
+// Predicate form of `probeLoading` for `page.waitForFunction`: "the surface has
+// settled" = no visible loading indicator left, OR the app has started
+// declaring in-flight work (`[data-busy]`), which is a legitimate busy state
+// rather than a stuck one. Returns as soon as either holds, so a healthy
+// surface costs ~nothing and only a genuinely stuck one pays the full dwell.
+function probeIsSettled() {
+  const SPINNER =
+    '[role="progressbar"], .animate-spin, [aria-busy="true"], [data-testid*="spin"], [data-testid*="loading"], [data-testid*="skeleton"]'
+  if (document.querySelector('[data-busy]:not([data-busy=""])')) return true
+  return !Array.from(document.querySelectorAll(SPINNER)).some(el => {
+    const cs = getComputedStyle(el)
+    if (cs.visibility === 'hidden' || cs.display === 'none' || cs.opacity === '0') return false
+    const r = el.getBoundingClientRect()
+    return r.width >= 1 && r.height >= 1
+  })
+}
+
+// The loading probe. Self-contained (closes over NOTHING in module scope) so it
+// can be passed straight to `page.evaluate`, and used for BOTH the initial
+// observation and the post-dwell re-probe — one definition, so the two
+// observations are guaranteed comparable.
+function probeLoading() {
+  const visible = el => {
+    const cs = getComputedStyle(el)
+    if (cs.visibility === 'hidden' || cs.display === 'none' || cs.opacity === '0') return false
+    const r = el.getBoundingClientRect()
+    return r.width >= 1 && r.height >= 1
+  }
+  const sel = el => {
+    const tid = el.getAttribute?.('data-testid')
+    if (tid) return `[data-testid="${tid}"]`
+    const parts = []
+    let node = el
+    while (node && node.nodeType === 1 && parts.length < 8) {
+      let seg = node.tagName.toLowerCase()
+      if (node.id) {
+        parts.unshift(`${seg}#${node.id}`)
+        break
+      }
+      const p = node.parentElement
+      if (p) {
+        const sibs = Array.from(p.children).filter(c => c.tagName === node.tagName)
+        if (sibs.length > 1) seg += `:nth-of-type(${sibs.indexOf(node) + 1})`
+      }
+      parts.unshift(seg)
+      node = node.parentElement
+    }
+    return parts.join('>').slice(-80)
+  }
+  const anchor = el => {
+    const name = (el.getAttribute('aria-label') || el.textContent || '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 40)
+    return `${el.tagName.toLowerCase()}${name ? ` "${name}"` : ''}`
+  }
+  const SPINNER =
+    '[role="progressbar"], .animate-spin, [aria-busy="true"], [data-testid*="spin"], [data-testid*="loading"], [data-testid*="skeleton"]'
+  const spinners = Array.from(document.querySelectorAll(SPINNER)).filter(visible)
+  const busyEl = document.querySelector('[data-busy]:not([data-busy=""])')
+  return {
+    count: spinners.length,
+    keys: spinners.slice(0, 12).map(e => anchor(e) || sel(e)),
+    selector: spinners.length ? sel(spinners[0]) : null,
+    anchor: spinners.length ? anchor(spinners[0]) : null,
+    appBusy: busyEl ? busyEl.getAttribute('data-busy') : null,
   }
 }
 
@@ -1832,6 +2306,47 @@ async function main() {
   const browser = await chromium.launch({ headless: !HEADED })
   const contrastByCell = {} // `${flow}|${step}|${vw}` -> { light:{}, dark:{} }
 
+  // ── build-caveat probe (see BUILD_NOTES) ─────────────────────────────────
+  // Perf-shaped findings describe the BUILD that was served. The app's idle
+  // prefetch leaves an OBSERVABLE trace — `idleClosurePrefetch` injects
+  // `<link rel="prefetch">` elements once authenticated — so its absence after
+  // an authenticated idle is direct evidence the served build was compiled with
+  // prefetch stripped (`VITE_CLOSURE_PREFETCH=off` / `VITE_STORE_PREFETCH=off`,
+  // which is exactly how the 24/7 rig target is built). Detect it once, then
+  // stamp it on every perf-shaped finding instead of reporting a deliberately
+  // cold build as if it were the shipped one.
+  try {
+    const probeCtx = await browser.newContext({ viewport: { width: 1280, height: 900 } })
+    await probeCtx.addInitScript(
+      ({ token }) => {
+        try {
+          localStorage.setItem('auth-storage', JSON.stringify({ state: { token }, version: 0 }))
+        } catch {}
+      },
+      { token: access_token },
+    )
+    const probePage = await probeCtx.newPage()
+    await probePage.goto(`${BASE}/`, { waitUntil: 'domcontentloaded' })
+    await probePage.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {})
+    await probePage.waitForTimeout(3000) // idle callbacks fire after network-idle
+    // ONLY `rel=prefetch`: those are injected AT RUNTIME by the app's idle
+    // closure-prefetch. `rel=modulepreload` is emitted statically by the
+    // bundler for the entry graph regardless of the flags, so counting it would
+    // mask the signal (measured on the rig: prefetch=0, modulepreload=217).
+    const prefetchLinks = await probePage
+      .evaluate(() => document.querySelectorAll('link[rel="prefetch"]').length)
+      .catch(() => -1)
+    if (prefetchLinks === 0)
+      BUILD_NOTES.push(
+        'the served build injected NO runtime <link rel=prefetch> after an authenticated network-idle — its idle prefetch appears compiled out (VITE_CLOSURE_PREFETCH/VITE_STORE_PREFETCH=off), i.e. this is a deliberately COLD build; a request the shipped warm build would already have made reads here as a serialized cold fetch, so treat perf-shaped findings as upper bounds',
+      )
+    await probeCtx.close()
+  } catch {
+    /* probe is advisory — never fail the audit on it */
+  }
+  if (BUILD_NOTES.length)
+    console.log(`  build caveats: ${BUILD_NOTES.length}\n    - ${BUILD_NOTES.join('\n    - ')}`)
+
   // Persona/flow selection
   let flowIds = JTBD.filter(f => FLOWS[f])
   if (!FLEET && PERSONA_ARG !== 'all')
@@ -1915,6 +2430,32 @@ async function main() {
             return null
           }
         }
+        // Resource identity INCLUDING the query — `?page=1` and `?page=2` are
+        // different resources (see `requestKey`).
+        const parseKey = url => {
+          try {
+            const u = new URL(url)
+            return requestKey(u.pathname, u.search)
+          } catch {
+            return null
+          }
+        }
+        // REAL network timing. `Date.now()` captured inside these async handlers
+        // is stamped when the HANDLER ran (after `await req.response()`), not
+        // when the request finished — an inflation that manufactures apparent
+        // non-overlap and fabricated the waterfall findings. Playwright's
+        // `request.timing()` reports the browser's own network timeline;
+        // `timed` marks rows the waterfall detector may chain.
+        const timingOf = req => {
+          try {
+            const t = req.timing()
+            if (t && t.startTime > 0 && t.responseEnd >= 0)
+              return { tStart: t.startTime, tEnd: t.startTime + t.responseEnd, timed: true }
+          } catch {
+            /* timing unavailable (failed/aborted request) */
+          }
+          return null
+        }
         page.on('request', req => reqStart.set(req, { t: Date.now(), step: currentStep }))
         page.on('requestfailed', req => {
           const url = req.url()
@@ -1923,11 +2464,13 @@ async function main() {
           if (p && p.startsWith('/api/')) {
             // /api failures are handled by the network analyzer (subcategory
             // failure) — record into the log rather than double-reporting.
+            const tm = timingOf(req)
             netLog.push({
-              url, path: p, method: req.method(),
+              url, path: p, key: parseKey(url) || p, method: req.method(),
               status: null, failure: req.failure()?.errorText || 'failed',
-              ms: started ? Date.now() - started.t : null,
-              tStart: started?.t, tEnd: Date.now(),
+              ms: tm ? Math.round(tm.tEnd - tm.tStart) : started ? Date.now() - started.t : null,
+              tStart: tm ? tm.tStart : started?.t, tEnd: tm ? tm.tEnd : Date.now(),
+              timed: !!tm,
               bytes: 0, type: req.resourceType(), step: started?.step || currentStep,
             })
             return
@@ -1965,11 +2508,13 @@ async function main() {
           } catch {
             /* response gone */
           }
+          const tm = timingOf(req)
           netLog.push({
-            url, path: p, method: req.method(),
+            url, path: p, key: parseKey(url) || p, method: req.method(),
             status, failure: null,
-            ms: started ? Date.now() - started.t : null,
-            tStart: started?.t, tEnd: Date.now(),
+            ms: tm ? Math.round(tm.tEnd - tm.tStart) : started ? Date.now() - started.t : null,
+            tStart: tm ? tm.tStart : started?.t, tEnd: tm ? tm.tEnd : Date.now(),
+            timed: !!tm,
             bytes, type: req.resourceType(), step: started?.step || currentStep,
           })
         })
@@ -2022,6 +2567,46 @@ async function main() {
               const key = `${flowId}|${step.name}|${vw}`
               contrastByCell[key] ??= {}
               contrastByCell[key][theme] = audit.contrast
+            }
+
+            // ── stuck-loading: OBSERVE → DWELL → RE-OBSERVE ────────────────
+            // A spinner is only "stuck" if it survives a dwell AND the app is
+            // not declaring itself busy. `waitForFunction` returns the instant
+            // it settles, so a healthy surface pays ~nothing; only a genuinely
+            // stuck one pays the full dwell.
+            const before = await page.evaluate(probeLoading).catch(() => null)
+            if (before?.count) {
+              if (before.appBusy) {
+                // The app itself says work is in flight (data-busy="streaming"
+                // is an LLM generation, "loading" is a history fetch). A live
+                // spinner is the CORRECT rendering of that state.
+              } else {
+                const settled = await page
+                  .waitForFunction(
+                    probeIsSettled,
+                    null,
+                    { timeout: STUCK_DWELL_MS, polling: 250 },
+                  )
+                  .then(() => true)
+                  .catch(() => false)
+                if (!settled) {
+                  const after = await page.evaluate(probeLoading).catch(() => null)
+                  // Only the SAME indicators surviving the dwell count — a
+                  // different surface starting to load mid-dwell is not "stuck".
+                  const still = (after?.keys || []).filter(k => before.keys.includes(k))
+                  if (after && !after.appBusy && still.length) {
+                    push({
+                      step: step.name,
+                      category: 'stuck-loading',
+                      severity: 'MEDIUM',
+                      selector: after.selector,
+                      anchor: after.anchor,
+                      detail: `${still.length} loading indicator(s) still present ${STUCK_DWELL_MS}ms after the settle window, with the app declaring no in-flight work (no [data-busy]): ${still.slice(0, 3).join(', ')}`,
+                      screenshot: shotRel,
+                    })
+                  }
+                }
+              }
             }
           }
         } catch (e) {
@@ -2190,6 +2775,30 @@ function writeReport(rawAll) {
     surfaceSev[surf][f.severity]++
   }
 
+  // ── record shape ─────────────────────────────────────────────────────────
+  // Downstream readers (the 24/7 loop's fingerprint + renderer) key on the
+  // finding's SURFACE, its dimension and its signal. Those were only ever
+  // available under the internal `_`-prefixed names, so a reader spelling them
+  // without the underscore silently got empty strings — which collapses a
+  // fingerprint to `severity|category|subcategory` and renders the surface as a
+  // bare `?`. Publish BOTH spellings (and a `message` alias for `detail`, plus
+  // an explicit `signal` = the normalized dedup signature) so the record is
+  // self-describing regardless of which name a consumer reaches for.
+  for (const f of deduped) {
+    f.surface = f._surface
+    f.dimension = f._dim
+    f.message = f.detail
+    f.signal = `${f.category}${f.subcategory ? `/${f.subcategory}` : ''}|${f.surface}|${f.anchor || f.selector || ''}`
+    if (f.anchor === undefined) f.anchor = null
+    // Perf-shaped findings describe the BUILD that was served — carry the
+    // caveat with the record rather than reporting a cold build silently.
+    if (BUILD_NOTES.length && (PERF_SUBCATS.has(f.subcategory) || f.category === 'stuck-loading')) {
+      f.buildNotes = [...BUILD_NOTES]
+      if (!String(f.detail).includes('build caveat')) f.detail = `${f.detail}${BUILD_CAVEAT_MARK}`
+      f.message = f.detail
+    }
+  }
+
   fs.writeFileSync(
     path.join(OUT, 'findings.jsonl'),
     deduped.map(f => JSON.stringify(f)).join('\n') + (deduped.length ? '\n' : ''),
@@ -2203,6 +2812,11 @@ function writeReport(rawAll) {
   md.push(
     'Evidence-based, objective signals only. Deduped across viewports×themes (each row lists the cells it appeared in). No subjective UX commentary.\n',
   )
+  if (BUILD_NOTES.length) {
+    md.push('> **Build caveats — read before acting on any performance finding.**\n>')
+    for (const n of BUILD_NOTES) md.push(`> - ${n}`)
+    md.push('')
+  }
   md.push('## Totals\n')
   md.push('| Severity | Count (deduped) |')
   md.push('|---|---|')
@@ -2320,7 +2934,8 @@ function writeReport(rawAll) {
         )
         md.push(`- **JTBD:** ${f.jtbd || f.flow} (persona: ${f.persona || 'normal'})`)
         md.push(`- **Signal:** ${f.detail}`)
-        if (f.selector) md.push(`- **Element:** \`${f.selector}\``)
+        if (f.anchor) md.push(`- **Element (stable):** ${f.anchor}`)
+        if (f.selector) md.push(`- **Element (selector):** \`${f.selector}\``)
         md.push(`- **Cells (viewport/theme):** ${f.cells.join(', ')}`)
         if (f.screenshot) md.push(`- **Screenshot:** \`${f.screenshot}\``)
         md.push(
@@ -2381,12 +2996,30 @@ function mergeShards(dirs) {
   writeReport(raw)
 }
 
+// ── entrypoint / test seam --------------------------------------------------
+// The detectors are only trustworthy if you can point them at a KNOWN-BAD and a
+// KNOWN-GOOD fixture and watch them fire and not-fire. That requires importing
+// them without launching a browser and driving a live app — hence the explicit
+// entry guard plus the named exports below. (`node live-ui-audit.mjs …` behaves
+// exactly as before; `import(...)` gets the pure detectors.)
+export { inPageAudit, analyzeNetwork, probeLoading, probeIsSettled, requestKey, SHELL_DOMAINS }
+
+const IS_ENTRY = (() => {
+  try {
+    return !!process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url
+  } catch {
+    return true
+  }
+})()
+
 const MERGE = arg('merge', '')
-if (MERGE) {
-  mergeShards(MERGE.split(',').filter(Boolean))
-} else {
-  main().catch(e => {
-    console.error(e)
-    process.exit(2)
-  })
+if (IS_ENTRY) {
+  if (MERGE) {
+    mergeShards(MERGE.split(',').filter(Boolean))
+  } else {
+    main().catch(e => {
+      console.error(e)
+      process.exit(2)
+    })
+  }
 }

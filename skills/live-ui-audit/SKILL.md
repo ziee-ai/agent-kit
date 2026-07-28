@@ -51,7 +51,31 @@ node .../live-ui-audit.mjs --url=<URL> --fleet --out=<dir>
 Flags: `--url` `--user` `--password` `--viewports=390,768,1280`
 `--themes=light,dark` `--jtbd=<ids>` `--persona=normal|adversarial|all`
 `--fleet` `--out=<dir>` `--probe-deadends` `--headed` `--gate` (exit non-zero on
-any HIGH).
+any HIGH) `--merge=<dirs>`.
+
+### Broad sweeps: shard, then merge
+
+A whole-app sweep is many flows × 6 cells and runs ~an hour serially. Split the
+flow set into disjoint **shards**, run them in parallel (keep it modest — 4 is
+plenty; the app is usually a shared instance), then consolidate:
+
+```bash
+S="node .../live-ui-audit.mjs --url=<URL> --user=admin --password=<pw> \
+   --viewports=390,768,1280 --themes=light,dark --persona=all"
+$S --jtbd=home,compose-send,adversarial-compose,chat-existing,conversations-list --out=$O/shard1-chat &
+$S --jtbd=projects,knowledge-base,files,scheduled-tasks,hub,notifications        --out=$O/shard2-features &
+$S --jtbd=settings-user,settings-admin-core                                      --out=$O/shard3-settings-a &
+$S --jtbd=settings-admin-llm,settings-admin-tools                                --out=$O/shard4-settings-b &
+wait
+$S --jtbd=permission --out=$O/shard5-permission   # RBAC pass — run once, not per shard
+
+# One consolidated, re-deduped, ranked inventory over all shards
+node .../live-ui-audit.mjs --merge=$O/shard1-chat,$O/shard2-features,... --out=$O
+```
+
+`--merge` re-expands each shard's deduped rows back to per-cell findings,
+re-dedups globally, and rewrites the full report into `--out` (screenshot paths
+are rewritten shard-relative, so keep the shard dirs next to the merged report).
 
 **Playwright resolution:** the script imports `@playwright/test`, falling back to
 the ziee repo-root `node_modules` (or `PLAYWRIGHT_DIR=<path>`). Chromium must be
@@ -114,8 +138,28 @@ battery audits the surface after each step. Built-in flows:
 | `home` | Open the app, land on new-chat home | normal |
 | `compose-send` | Type a question and send it to the assistant | normal |
 | `adversarial-compose` | Break the composer: empty submit, ~32k-char paste, rapid double-submit | **adversarial** |
-| `browse-settings` | Configure account / app settings | normal |
+| `browse-settings` | Configure account / app settings (short form) | normal |
+| `chat-existing` | Re-open a conversation, its right panel, per-message actions | normal |
+| `conversations-list` | Find a past conversation | normal |
+| `projects` | Browse projects → open one → its files tab | normal |
+| `knowledge-base` | Browse knowledge bases → open one | normal |
+| `files` | Open an uploaded file | normal |
+| `scheduled-tasks` | Browse scheduled tasks | normal |
+| `hub` | Browse the 6 hub catalog tabs | normal |
+| `notifications` | Review notifications + background runs | normal |
+| `settings-user` | Configure the 12 user-scoped settings pages | normal |
+| `settings-admin-core` | Administer users / auth / deployment (8 pages) | normal |
+| `settings-admin-llm` | Administer providers, runtime, retrieval (6 pages) | normal |
+| `settings-admin-tools` | Administer built-in + external tools (9 pages) | normal |
 | `permission` | RBAC access-matrix audit as diverse personas | (multi) |
+
+Most surfaces need nothing but "navigate there and audit what renders", so the
+`nav()` / `sweep()` helpers build such flows declaratively — adding a surface is
+one `['surface-slug', '/route']` line. **The step name IS the surface slug**, and
+the report groups per-surface by it, so name steps after the screen they open.
+Detail routes (`/chat/:id`, `/projects/:id`, …) take their ids from `ctx`, which
+`resolveFixtures()` reads from the live API at start-up — never hardcode an id,
+and let a missing fixture make the step a graceful no-op rather than a finding.
 
 The **adversarial "break-it" persona** feeds empty/huge/weird inputs, rapid nav,
 and double-submits — exactly the inputs that surface un-guarded states. Add a
@@ -178,6 +222,21 @@ relevance set lists each flow's real page dependencies (e.g. the chat composer
 legitimately loads models/providers/voice/summarization) so only genuinely
 off-page fetches flag. When adding a flow, tune its relevant-domain set from a
 first run before trusting the `irrelevant` column.
+
+The synthetic **`(load)` step is the driver's own bootstrap** — every flow lands
+on `/` first so the shell is authenticated before the flow navigates away. Its
+requests therefore belong to the HOME page, so relevance judges `(load)` against
+the home domain set, not the target surface's. (Without that, every nav-driven
+sweep flow reports the entire chat home as `irrelevant` — the dominant FP once
+sweep flows were added.)
+
+**Prove whether a saturated shared instance is env noise or an app bug.**
+Per-user SSE connection caps (ziee: 12/user) make `/api/sync/subscribe` → 429
+look like an app defect, and a parallel audit can self-induce it. Distinguish
+before reporting: probe the endpoint **sequentially with zero concurrency**, and
+probe as a **freshly created user**. Fresh-user 200 + incumbent-user 429 under no
+load = a real per-user slot-reclamation defect; both 429 only while your own
+shards run = self-induced, report as noise. Never report either without the probe.
 
 ## Relationship to existing infra
 

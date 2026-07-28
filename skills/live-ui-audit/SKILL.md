@@ -51,7 +51,34 @@ node .../live-ui-audit.mjs --url=<URL> --fleet --out=<dir>
 Flags: `--url` `--user` `--password` `--viewports=390,768,1280`
 `--themes=light,dark` `--jtbd=<ids>` `--persona=normal|adversarial|all`
 `--fleet` `--out=<dir>` `--probe-deadends` `--headed` `--gate` (exit non-zero on
-any HIGH) `--merge=<dirs>`.
+any HIGH) `--merge=<dirs>` `--stuck-dwell-ms=4000` `--build-note=<text>`
+(repeatable — see *Build caveats*).
+
+### Build caveats — never report a deliberately cold build silently
+
+Performance-shaped findings (`waterfall` / `excess` / `oversized` / `duplicate`)
+describe the **build that was served**, not the app in the abstract. A target
+built with the shipped idle-warm stripped (e.g. `VITE_STORE_PREFETCH=off
+VITE_CLOSURE_PREFETCH=off`, which is how the 24/7 rig target is built) makes a
+request the warm build would already have made read as a serialized cold fetch.
+
+The battery **auto-detects** this: it loads the app authenticated, waits for
+network-idle + an idle tick, and counts runtime-injected `link[rel=prefetch]`
+elements (NOT `modulepreload`, which the bundler emits statically regardless).
+Zero of them means idle prefetch was compiled out. Any caveat — auto-detected or
+declared with `--build-note=` — is written into the report header **and** stamped
+onto every perf-shaped finding (`buildNotes` field + a short marker on `detail`).
+
+### Trusting the instrument
+
+Every repaired detector has a paired **negative control**: a fixture where the
+false positive must NOT fire, and a fixture where a genuine instance of the same
+class must STILL fire. The detectors are exported (`inPageAudit`,
+`analyzeNetwork`, `probeLoading`, `probeIsSettled`, `requestKey`) and the module
+runs `main()` only when it is the process entrypoint, so a harness can import
+them and drive them against hand-written HTML without launching the app. A
+change that only reduces the count is indistinguishable from a disabled check —
+require both halves.
 
 ### Broad sweeps: shard, then merge
 
@@ -94,27 +121,36 @@ Driven at **3 viewports (390 / 768 / 1280) × light AND dark**, navigating real
 JTBD flows; after each step the battery runs:
 
 1. **Bugs (functional):** `console.error` / `pageerror`, ErrorBoundary `crash`,
-   `requestfailed`, non-2xx `/api` responses, step-execution errors, stuck
-   spinners (still present after the settle window).
+   `requestfailed`, non-2xx `/api` responses, step-execution errors, **stuck**
+   spinners — a spinner is only *stuck* if it survives a re-probe after
+   `--stuck-dwell-ms` (default 4000) **and** the app is not declaring in-flight
+   work via its own `[data-busy]` discriminator. A live spinner during an SSE
+   generation is correct rendering, not a defect.
 2. **UI (visual correctness):** horizontal body overflow (`scrollWidth > innerWidth`),
-   pairwise **control collision** (two distinct in-viewport controls overlapping
-   ≥60%, excluding intentional overlaid-actions + open menus/popovers), clipped /
-   off-viewport controls, broken images (`naturalWidth===0`), zero-size clickables.
+   pairwise **control collision** (two distinct in-viewport controls whose
+   **painted, post-clip** boxes overlap ≥60%, excluding intentional
+   overlaid-actions + open menus/popovers), unreachable/clipped controls, broken
+   images (`naturalWidth===0`), zero-size clickables.
 3. **Responsive:** the UI battery at each viewport — controls clipped at 390px,
    body horizontal scroll, a surface that only fits at desktop width.
 4. **Color/theme:** WCAG-AA contrast (fg vs composited effective bg, oklch-aware);
    **palette drift** (a *saturated* color not resolvable to any shipped
-   DESIGN_SYSTEM token → hardcoded-color escape); **light↔dark parity** (an element
+   DESIGN_SYSTEM token **and not carrying the repo's `data-allow-custom-color`
+   opt-out** → hardcoded-color escape); **light↔dark parity** (an element
    that passes AA in one theme and fails in the other — the classic
    works-in-light-only bug).
 5. **Consistency (design-system):** off-4px-grid spacing (2px half-step tolerated,
-   sub-2px hairlines ignored), **mixed variants in a peer icon-button group**
-   (DESIGN_SYSTEM J6).
+   sub-2px hairlines ignored; the finding names an offending element per value),
+   **mixed variants in a peer icon-button group** (DESIGN_SYSTEM J6).
 6. **Network hygiene / request-sense** (per flow-step, from the real request log):
-   `failure` (non-2xx/aborted/timeout), `duplicate` (same url+method ≥2× in a
-   step), `n+1` (many ids on one endpoint template in a burst), `waterfall`
-   (long serial dependent chains), `excess` (same endpoint firing ≥4× across the
-   flow — polling / re-render storm), `oversized` (payload > 200 KiB), and
+   `failure` (non-2xx/aborted/timeout), `duplicate` (same method + path **+
+   normalized query** ≥2× in a step — a paginated list's `?page=1..4` is four
+   resources, not one endpoint four times), `n+1` (many ids on one endpoint
+   template in a burst), `waterfall` (a run of requests each of which
+   demonstrably could not be *issued* until the previous *returned* — strict
+   non-overlap on real `request.timing()`, a ≤150ms continuation gap, each link
+   ≥25ms, ≥300ms serial in total), `excess` (same resource firing ≥4× within one
+   step — polling / re-render storm), `oversized` (payload > 200 KiB), and
    **`irrelevant`** — endpoint-purpose vs page-purpose: a heavy GET whose domain
    has nothing to do with the current flow's job (grounded in the OpenAPI
    summary + the flow's relevant-domain set; e.g. a login page fetching
@@ -203,7 +239,21 @@ Per-persona checks (subcategories):
 Each finding = `{ severity, category (+ subcategory for network/permission),
 flow, jtbd, persona, viewport, theme, the exact signal string (e.g. "body
 scrollWidth 1440 > viewport 390"), screenshot path, cells it appeared in, repro
-steps }`. **Ranked most-severe-first, deduped** across viewports/themes (each row
+steps }`, plus, for consumers that fingerprint or render findings:
+
+| field | what it is |
+|---|---|
+| `surface` / `_surface` | the page/screen the finding fired on (both spellings published) |
+| `dimension` / `_dim` | which of the 7 dimensions it belongs to (both spellings) |
+| `detail` / `message` | the signal string (both spellings) |
+| `signal` | `category/subcategory\|surface\|anchor` — a ready-made fingerprint key |
+| `anchor` | **stable secondary element key**: `tag[role] "accessible name" @ landmark`. A `--mode production` build strips literal `data-test*` attributes, so `selector` degrades to a raw `nth-of-type` DOM path that names nothing a human can find and changes with any sibling edit. Always read `anchor` first. |
+| `buildNotes` | build caveats in force for a perf-shaped finding (see above) |
+
+Publishing both the `_`-prefixed and plain spellings is deliberate: a consumer
+that reached for `surface` used to get an empty string, which silently collapses
+a fingerprint to `severity\|category\|subcategory` and renders the surface as a
+bare `?`. **Ranked most-severe-first, deduped** across viewports/themes (each row
 lists the cells it fired in). **No subjective UX commentary.**
 
 Severity floor: cross-user leaks, ungated surfaces, contrast failures,
@@ -217,7 +267,43 @@ ledger. Notable tunings: control-collision excludes intentional overlaid-actions
 + open popovers and requires ≥60% overlap of distinct in-viewport controls
 (LOW, a vision-pass hint); `net::ERR_ABORTED` on stream/subscribe endpoints is a
 benign client teardown (muted); palette-drift only flags *saturated* colors (the
-neutral ramp is legit); sub-2px spacing is hairline, not grid drift; the network
+neutral ramp is legit, and `data-allow-custom-color` — the repo's own sanctioned
+opt-out, honoured by its committed linter — is respected); sub-2px spacing is
+hairline, not grid drift.
+
+### Geometry is measured on the PAINTED box, never the layout box
+
+`getBoundingClientRect()` is a **layout** box; it is not what the user sees or
+can reach, and conflating the two was historically this battery's largest
+false-positive source (≈79 findings/cycle on one target).
+
+* **Self-clip.** `clip: rect(0,0,0,0)` / `clip-path: inset(50%)` collapse a box
+  to nothing while leaving a 1×1 layout rect. That is `sr-only` — so the
+  keyboard skip link, a *required* a11y affordance, read as a
+  `zero-size-control`. Self-clipped elements are not "visible".
+* **Ancestor overflow.** A row scrolled past the bottom of its scroll container
+  keeps a layout rect down there, where a pinned footer is drawn — hence "two
+  controls overlap 66%" for things the screenshot shows never touching.
+
+`clipState()` intersects an element with every clipping ancestor's padding box
+and classifies the loss by **reachability**, which is the distinction that
+actually matters:
+
+* cut by a **user-scrollable** ancestor → merely scrolled out of view; the user
+  scrolls and reaches it. Not a defect, and its rect is not used for geometry.
+* cut by a **non-scrollable** clipper (`overflow: hidden|clip`, or `auto`/`scroll`
+  with no scroll range) → genuinely **unreachable**, and still reported as
+  `clipped-control` naming the offending clipper and its scroll range.
+
+Do not "fix" a clipping false positive by suppressing the class — re-derive
+which of those two cases the geometry is in.
+
+### Other tunings
+
+`SHELL_DOMAINS` is the set of `/api` domains the authenticated **shell** loads on
+every surface regardless of route (auth/sync/onboarding/notifications/… and
+`conversations`, because the persistent sidebar's recent-conversations widget
+renders on settings too). The per-flow
 relevance set lists each flow's real page dependencies (e.g. the chat composer
 legitimately loads models/providers/voice/summarization) so only genuinely
 off-page fetches flag. When adding a flow, tune its relevant-domain set from a

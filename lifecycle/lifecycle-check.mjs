@@ -550,12 +550,32 @@ function checkA1() {
 
 // A3: diff-added test skips/ignores. Only genuine platform-incompatibility is a
 // legit skip, and that MUST be a #[cfg(target_os=...)] gate — never #[ignore]/.skip.
-const RE_SKIP = /#\[\s*ignore\b|(?:^|[^\w.])(?:test|it|describe|context)\.(?:skip|only)\s*\(|(?:^|[^\w])x(?:it|describe)\s*\(/;
+//
+// `#[ignore]`, `.only(`, and `xit/xdescribe` are unconditionally wrong: they
+// disable a test (or disable every OTHER test) regardless of environment.
+const RE_IGNORE_OR_ONLY = /#\[\s*ignore\b|(?:^|[^\w.])(?:test|it|describe|context)\.only\s*\(|(?:^|[^\w])x(?:it|describe)\s*\(/;
+//
+// `.skip(` is TWO different constructs and only one of them is the offence:
+//   test.skip('name', fn)        — UNCONDITIONAL. The test never runs. Flag it.
+//   test.skip()                  — same, at runtime. Flag it.
+//   test.skip(true, 'why')       — same, dressed as a condition. Flag it.
+//   test.skip(!HAS_KEY, 'why')   — a RUNTIME ENVIRONMENT GATE (the framework's
+//                                  conditional-skip API). NOT a skip-to-go-green.
+// The conditional form is how a spec declares "this needs a real LLM / an API
+// key / an external engine". Flagging it forces the author either to evade the
+// check (`COND ? describe : describe.skip` — identical behaviour, guardrail
+// spelled around it) or to delete the guard, which makes the spec FAIL on every
+// box lacking the dependency. Both outcomes are worse than the thing A3 defends
+// against. Measured on the consuming repo: 43 conditional env gates vs 8
+// unconditional skips — the old rule was 84% false positives.
+const RE_SKIP_UNCONDITIONAL = /(?:^|[^\w.])(?:test|it|describe|context)\.skip\s*\(\s*(?:['"`]|true\b|\))/;
 function checkA3() {
   const g = [];
   for (const a of diffAddedLines()) {
-    if (RE_SKIP.test(a.text))
-      g.push(`A3: ${a.file}:${a.ln}: diff ADDS a test skip/ignore/only ("${a.text.trim().slice(0, 70)}") — no #[ignore]/.skip to go green; a real platform gate is #[cfg(target_os=...)].`);
+    if (RE_IGNORE_OR_ONLY.test(a.text))
+      g.push(`A3: ${a.file}:${a.ln}: diff ADDS a test skip/ignore/only ("${a.text.trim().slice(0, 70)}") — no #[ignore]/.skip/.only to go green; a real platform gate is #[cfg(target_os=...)].`);
+    else if (RE_SKIP_UNCONDITIONAL.test(a.text))
+      g.push(`A3: ${a.file}:${a.ln}: diff ADDS an UNCONDITIONAL test skip ("${a.text.trim().slice(0, 70)}") — this test can never run. A runtime dependency gate is \`test.skip(!HAS_DEP, 'why')\`; a platform gate is #[cfg(target_os=...)].`);
   }
   return g;
 }

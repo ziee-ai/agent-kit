@@ -216,6 +216,39 @@ printf '\n#[ignore]\nfn skipped_test() {}\n' >> "$R/src-app/server/src/modules/b
 git -C "$R" commit -qam add-ignore
 lc 1 "A3: a diff-added #[ignore] is REFUSED" --phase 8 --repo "$R" --dir "$D" --base main
 
+# --- A3 (skip vs env-gate): `.skip(` is two different constructs. An
+# UNCONDITIONAL skip disables the test forever and must be refused; a CONDITIONAL
+# one is the framework's runtime dependency gate ("needs a real LLM / an API key")
+# and must be allowed, or authors evade the check or delete the guard — both
+# worse than what A3 defends against.
+# build_perm (not build_be) because these cases add a .spec.ts: a frontend touch
+# pulls in the npm-check + canary gates, and a backend-only fixture would then
+# fail for reasons unrelated to A3 — the test would pass for the wrong reason.
+R="$(build_perm)"; D="$R/.lifecycle/foo"
+# build_perm deliberately ships WITHOUT the A10 restricted-user e2e so callers can
+# add it; complete it here, or the control below fails on A10 rather than A3.
+cat >> "$D/TESTS.md" <<'EOF'
+- **TEST-4** (tier: e2e) [negative-perm] [covers: ITEM-2] file: `src-app/ui/tests/e2e/foo/perm-gating.spec.ts` — asserts: a user LACKING foo::use sees NO Foo nav entry, page, or Save button.
+EOF
+cat >> "$D/TEST_RESULTS.md" <<'EOF'
+- **TEST-4**: PASS
+EOF
+git -C "$R" commit -qam complete-perm-fixture
+SPEC="$R/src-app/ui/tests/e2e/foo/extra.spec.ts"; mkdir -p "$(dirname "$SPEC")"
+lc 0 "A3-control: the perm fixture passes phase 8 before any skip is added" --phase 8 --repo "$R" --dir "$D" --base main
+printf "import { test } from '@playwright/test'\ntest.skip('sorts by name', async () => {})\n" > "$SPEC"
+git -C "$R" add -A && git -C "$R" commit -qm add-unconditional-skip
+lc 1 "A3: an UNCONDITIONAL test.skip('name', fn) is REFUSED" --phase 8 --repo "$R" --dir "$D" --base main
+printf "import { test } from '@playwright/test'\ntest.skip(true, 'nope')\n" > "$SPEC"
+git -C "$R" commit -qam skip-true
+lc 1 "A3: test.skip(true, …) — a skip dressed as a condition — is REFUSED" --phase 8 --repo "$R" --dir "$D" --base main
+printf "import { test } from '@playwright/test'\ntest.only('just this one', async () => {})\n" > "$SPEC"
+git -C "$R" commit -qam add-only
+lc 1 "A3: .only( is still REFUSED (it disables every OTHER test)" --phase 8 --repo "$R" --dir "$D" --base main
+printf "import { test } from '@playwright/test'\nconst HAS_KEY = !!process.env.ANTHROPIC_API_KEY\ntest.skip(!HAS_KEY, 'ANTHROPIC_API_KEY not set — real-LLM E2E skipped')\n" > "$SPEC"
+git -C "$R" commit -qam env-gate
+lc 0 "A3: a CONDITIONAL env gate test.skip(!HAS_KEY, …) is ALLOWED" --phase 8 --repo "$R" --dir "$D" --base main
+
 # --- A4: a cosmetic assert!(true) -> phase 8 FAIL
 R="$(build_be)"; D="$R/.lifecycle/bar"
 printf '\nfn t() { assert!(true); }\n' >> "$R/src-app/server/src/modules/bar/repository.rs"

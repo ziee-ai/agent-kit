@@ -619,6 +619,18 @@ Record each round in `FIX_ROUND-<n>.md` ending with `**New confirmed findings:**
 <N>`. Repeat until a full blind round yields **0** new confirmed findings. (Reject
 false positives explicitly in the ledger; a dismissed finding is not a fix.)
 
+**Implement the WHOLE round before running anything — never write-one/test-one.**
+Land every fix in the round (code **and** its tests) first, then run once. Do not
+fix one finding, run a suite, fix the next, run again. Each test invocation here
+costs a real server spawn / Playwright boot / cargo link — paying that per
+finding is the same waste as re-running the full suite, just sliced thinner, and
+it serializes work that had no reason to be serial. Batch the round, then measure
+it. The same applies in phase 5: write the implementation and its tests, then run.
+
+(This is about BATCHING, not about skipping the red-first step: where a fix needs
+a failing test to prove the defect, still write that test first and observe it
+RED. Observing one new test go red is not a suite run.)
+
 **Re-running tests inside the loop — scope to the ROUND's diff, never the whole
 feature.** A fix round changes a handful of files; it does not invalidate the
 rest of the suite. Re-run ONLY the tests that cover the files **that round**

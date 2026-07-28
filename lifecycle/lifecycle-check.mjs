@@ -995,7 +995,11 @@ function phase8() {
   // A2: clean working tree — no uncommitted load-bearing files at phase 8.
   const dirty = dirtyWorkingTree();
   if (dirty.length)
-    g.push(`A2: working tree not clean at phase 8 — uncommitted/untracked: ${dirty.slice(0, 10).map((l) => l.slice(3)).join(', ')}${dirty.length > 10 ? ', …' : ''}. Commit or remove before declaring done (load-bearing files must be on the branch).`);
+    // Strip the porcelain status prefix by PATTERN, not a fixed offset: git()
+    // trims its output, which eats the leading space of a first line like
+    // " M sdk" — a slice(3) then reported the path as "dk" and sent a reader
+    // hunting a file that does not exist.
+    g.push(`A2: working tree not clean at phase 8 — uncommitted/untracked: ${dirty.slice(0, 10).map((l) => l.replace(/^\s*[MADRCU?!]{1,2}\s+/, '')).join(', ')}${dirty.length > 10 ? ', …' : ''}. Commit or remove before declaring done (load-bearing files must be on the branch).`);
   // A3/A4/A8/A9/A10 + R2-5: diff-content gates.
   for (const x of checkA3()) g.push(x);
   for (const x of checkA4()) g.push(x);

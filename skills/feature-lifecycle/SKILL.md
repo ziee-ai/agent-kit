@@ -798,6 +798,34 @@ file is normal work, not guard substitution.)
 
 Two rules that make rounds cheap enough to be worth running:
 
+**`cargo check` while iterating; `cargo build` only when you must RUN something.**
+Measured on this repo, warm, one-file edit:
+
+| command | cost | what it does |
+|---|---|---|
+| `cargo check -p <crate>` | **21.7 s** | type/borrow check only — no codegen, no link |
+| `cargo build -p <crate>` | **41.9 s** | the above **+ codegen + link** (~3.5 s of it linking) |
+
+So checking is ~2× faster per iteration, and the difference is codegen — which is
+wasted work if you are not about to execute the binary. Build only when you
+genuinely need an executable: running the server, the integration suite (it spawns
+a server subprocess per test), or a live rig. "Does it compile" never needs a build.
+
+Two things that make this easy to get wrong:
+- **check and build keep SEPARATE artifact caches** (`.rmeta` vs `.rlib`).
+  Alternating check → build → check pays for both. The efficient shape is: check
+  repeatedly while iterating, then **one** build when you are ready to run tests.
+- **Warm cost is dominated by ONE unit, not by build scripts.** A `--timings` run on
+  a one-file edit rebuilt 1204 units: the crate itself at 20.23 s and *every other
+  unit at 0.00 s*. No build script re-runs on a warm build — no dependency fetch, no
+  native compile. Those are cold-build costs, paid once per fresh worktree. If a
+  warm build feels slow, the cause is that the crate is large, not that the build
+  script is doing work.
+
+The corollary: a very large single crate makes even `check` slow, because touching
+any file re-checks all of it. Splitting it is what unlocks a fast edit loop —
+`cargo check -p <small-crate>` instead of re-checking everything.
+
 **Implement the WHOLE round before running anything — never write-one/test-one.**
 Land every fix in the round (code **and** its tests) first, then run once. Do not
 fix one finding, run a suite, fix the next, run again. Each test invocation here

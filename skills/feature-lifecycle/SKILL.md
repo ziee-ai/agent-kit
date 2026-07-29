@@ -614,10 +614,37 @@ Gate: `--phase 6`.
 
 ## Phase 7 — Fix / re-audit loop
 
-Merge the ledger → fix every confirmed finding → **re-run a full blind round**.
-Record each round in `FIX_ROUND-<n>.md` ending with `**New confirmed findings:**
-<N>`. Repeat until a full blind round yields **0** new confirmed findings. (Reject
-false positives explicitly in the ledger; a dismissed finding is not a fix.)
+Merge the ledger → fix every confirmed finding → **re-run a blind round over
+THAT ROUND'S diff**. Record each round in `FIX_ROUND-<n>.md` ending with
+`**New confirmed findings:** <N>`. (Reject false positives explicitly in the
+ledger; a dismissed finding is not a fix.)
+
+**Termination — do NOT "repeat until 0".** That rule is unsound, not merely slow:
+a reviewer with a non-zero false-positive rate has a non-zero chance of emitting a
+finding on *any* round, so the expected number of rounds to a zero-round is
+unbounded. It produced a real 17-round run here. Every defect-estimation model
+assumes a **decreasing** detection profile, so a flat or rising profile falsifies
+the model rather than meaning "converging slowly".
+
+The loop ends in one of four ways:
+
+| | condition | outcome |
+|---|---|---|
+| **Converged** | a round yields 0 **and** the profile decayed | done |
+| **ABORT** | profile flat/rising at round ≥5 (final round ≥ median of the prior) | **re-scope — do NOT run another round** |
+| **Cap** | 6 rounds with findings still open | escalate to a human |
+| — | otherwise | continue |
+
+The ABORT is the important one, and it is a distinct outcome the loop previously
+could not express: *"this artifact was not ready for audit."* The usual cause is a
+**hand-written static-analysis guard standing in for a behavioural test** — its
+evasion space is unbounded, so 0 is unreachable by construction and each round
+finds another spelling. The fix is to replace the guard with a test that asserts
+the behaviour, then restart the loop against the new artifact. Findings in the
+branch's own guard/test scaffolding are recorded, but they do not keep the loop
+alive.
+
+Two rules that make rounds cheap enough to be worth running:
 
 **Implement the WHOLE round before running anything — never write-one/test-one.**
 Land every fix in the round (code **and** its tests) first, then run once. Do not

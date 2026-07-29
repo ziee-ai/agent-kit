@@ -994,15 +994,58 @@ function phase6() {
   return { present: true, gaps: g };
 }
 
+// Phase 7 termination. "Repeat until a round yields 0" is UNSOUND: a reviewer
+// with a non-zero false-positive rate has a non-zero chance of emitting a
+// finding on any round, so the expected number of rounds to a zero-round is
+// unbounded. That rule produced a real 17-round run here. The inspection
+// literature terminates on an ESTIMATE, never on a single observation, and every
+// defect-estimation model assumes a DECREASING detection profile — so a flat or
+// rising profile falsifies the model rather than meaning "converging slowly".
+//
+// Outcomes: converged (0 + a decaying profile) · ABORT (non-decaying → re-scope,
+// do NOT keep looping) · CAP (escalate to a human) · still-looping.
+const FIX_LOOP_ABORT_MIN_ROUND = 5;  // never abort before this: findings can legitimately ramp late (one feature went 0 -> 15 at round 2)
+const FIX_LOOP_ROUND_CAP = 6;
 function phase7() {
   const g = [];
   const rounds = glob('FIX_ROUND');
   if (rounds.length === 0) return { present: false, gaps: ['no FIX_ROUND-<n>.md files (fix/re-audit loop not started)'] };
+
+  const profile = [];
+  for (const r of rounds) {
+    const m = /new confirmed findings\s*:?\s*\*{0,2}\s*(\d+)/i.exec(read(r.file) || '');
+    profile.push(m ? parseInt(m[1], 10) : null);
+  }
   const last = rounds[rounds.length - 1];
-  const lt = read(last.file);
-  const m = /new confirmed findings\s*:?\s*\*{0,2}\s*(\d+)/i.exec(lt);
-  if (!m) g.push(`${last.file}: missing "**New confirmed findings:** <N>" summary line`);
-  else if (parseInt(m[1], 10) !== 0) g.push(`${last.file}: fix loop not converged — ${m[1]} new confirmed finding(s) in the final round`);
+  if (profile[profile.length - 1] == null) {
+    g.push(`${last.file}: missing "**New confirmed findings:** <N>" summary line`);
+    return { present: true, gaps: g };
+  }
+
+  const known = profile.filter((n) => n != null);
+  const fr = profile[profile.length - 1];
+  const r = profile.length;
+
+  // Decay test over the trailing window: the final round must be below the
+  // median of what came before. Cheap, and it is the one rule that separates the
+  // features that converged legitimately from the one that never could.
+  const prior = known.slice(0, -1);
+  const median = (a) => { if (!a.length) return Infinity; const s = [...a].sort((x, y) => x - y); const h = s.length >> 1; return s.length % 2 ? s[h] : (s[h - 1] + s[h]) / 2; };
+  const decaying = prior.length < 2 || fr < median(prior);
+
+  if (fr === 0) {
+    // Converged. Only flag the shape when there was enough history to judge it.
+    if (!decaying && prior.length >= 3) g.push(`${last.file}: reached 0 findings but the profile did not decay (${known.join(', ')}) — a single zero round is an observation, not an estimate. Confirm the round genuinely re-audited the current diff before treating this as converged.`);
+    return { present: true, gaps: g };
+  }
+
+  if (r >= FIX_LOOP_ABORT_MIN_ROUND && !decaying) {
+    g.push(`${last.file}: fix loop is NOT CONVERGING and must be ABORTED, not continued — profile (${known.join(', ')}) is flat or rising after ${r} rounds, which falsifies the assumption every defect-estimation model rests on. Do not run another round. Re-scope instead: record the reason the artifact was not ready for audit (commonly a hand-written static-analysis guard standing in for a behavioural test — its evasion space is unbounded, so 0 is unreachable), replace it, and restart the loop against the new artifact.`);
+  } else if (r >= FIX_LOOP_ROUND_CAP) {
+    g.push(`${last.file}: fix loop hit the ${FIX_LOOP_ROUND_CAP}-round cap with ${fr} finding(s) still open (profile ${known.join(', ')}) — escalate to a human rather than iterating. Past this point the marginal yield is dominated by reviewer false positives.`);
+  } else {
+    g.push(`${last.file}: fix loop not converged — ${fr} new confirmed finding(s) in the final round`);
+  }
   return { present: true, gaps: g };
 }
 

@@ -169,6 +169,23 @@ echo "-- Part A: lifecycle-check.mjs A1-A10 --"
 R="$(build_be)"; D="$R/.lifecycle/bar"
 lc 0 "A-control: clean backend phase 8 passes" --phase 8 --repo "$R" --dir "$D" --base main
 
+# --- Phase 7 termination: a NON-DECAYING profile aborts instead of looping.
+# "Repeat until 0" is unsound (an FP-emitting reviewer can produce a finding on
+# any round), and it produced a real 17-round run. Profiles below are the real
+# ones from this repo's features.
+p7() { # $1=label $2=expect-exit  rest=profile
+  local lbl="$1" want="$2"; shift 2
+  local d; d="$(mktemp -d)"; mkdir -p "$d/.lifecycle/f"; printf '# PLAN\n' > "$d/.lifecycle/f/PLAN.md"
+  local i=1; for n in "$@"; do printf '# R%s\n**New confirmed findings:** %s\n' "$i" "$n" > "$d/.lifecycle/f/FIX_ROUND-$i.md"; i=$((i+1)); done
+  ( cd "$d" && git init -q . && git config user.email t@t && git config user.name t && git add -A >/dev/null 2>&1 && git commit -qm x >/dev/null 2>&1 )
+  lc "$want" "phase7: $lbl" --phase 7 --repo "$d" --dir "$d/.lifecycle/f" --base HEAD
+}
+p7 "geometric decay to 0 converges (workflow-builder)" 0 36 7 7 2 2 1 1 0
+p7 "late ramp then decay converges (ask-user)"         0 0 15 1 0
+p7 "non-decaying profile is REFUSED (activity-rail)"   1 0 2 17 16 20 12 14 15 8 10 7 8 6 8 5 15 21
+p7 "non-decaying is caught EARLY, at round 5"          1 0 2 17 16 20
+p7 "a legitimate late ramp is NOT aborted at round 2"  1 0 15
+
 # --- A1: a SECOND .lifecycle feature dir on the branch -> --all FAILs (global)
 R="$(build_be)"; D="$R/.lifecycle/bar"
 mkdir -p "$R/.lifecycle/stray"

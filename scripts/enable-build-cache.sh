@@ -30,7 +30,14 @@
 #   `incremental` accounting for only 328 non-cacheable calls. So the dependency
 #   graph — the part that dominates a fresh worktree — really is being reused.
 #
-# SCCACHE_BASEDIR — THE CROSS-WORKTREE SETTING PEOPLE MISS
+# SCCACHE_BASEDIRS — THE CROSS-WORKTREE SETTING PEOPLE MISS
+#   NOTE THE PLURAL. `SCCACHE_BASEDIR` (singular) is silently IGNORED — sccache
+#   reads SCCACHE_BASEDIRS, and a wrong name gives you no error, no warning, and
+#   `Base directories (none)` in --show-stats. Verify with that line, never by
+#   assuming the export took.
+#   It is also read by the sccache SERVER at daemon start, so after setting it
+#   you must `sccache --stop-server` (the next client restarts it) or the
+#   already-running daemon keeps the old value.
 #   Without it sccache does NOT normalise absolute paths, so the same C file
 #   compiled under /repo/wt-a/... and /repo/wt-b/... hashes to DIFFERENT keys and
 #   misses. That is the exact shape of a per-worktree fleet, and of any gate that
@@ -84,7 +91,7 @@ CACHE_SIZE=${SCCACHE_CACHE_SIZE:-200G}
 # paths under it to relative ones, so the same native object compiled in two
 # different worktrees hashes to ONE key. Without this, every new worktree
 # re-compiles the whole C/C++ surface (aws-lc-sys alone is ~1500 files).
-BASE_DIR=${SCCACHE_BASEDIR:-/data/pbya/ziee}
+BASE_DIR=${SCCACHE_BASEDIRS:-/data/pbya/ziee}
 
 status() {
   echo "sccache binary : $([ -x "$SCCACHE_BIN" ] && "$SCCACHE_BIN" --version || echo 'NOT INSTALLED')"
@@ -93,8 +100,8 @@ status() {
   else
     echo "wrapper        : disabled (no rustc-wrapper in $CARGO_CFG)"
   fi
-  if grep -q '^SCCACHE_BASEDIR' "$CARGO_CFG" 2>/dev/null; then
-    echo "basedir        : $(grep '^SCCACHE_BASEDIR' "$CARGO_CFG")"
+  if grep -q '^SCCACHE_BASEDIRS' "$CARGO_CFG" 2>/dev/null; then
+    echo "basedir        : $(grep '^SCCACHE_BASEDIRS' "$CARGO_CFG")"
   else
     echo "basedir        : NOT SET  <- cross-worktree C/C++ objects will MISS"
   fi
@@ -143,14 +150,33 @@ else
 fi
 grep -q '^\[env\]' "$CARGO_CFG" || printf '\n[env]\n' >> "$CARGO_CFG"
 grep -q '^SCCACHE_DIR' "$CARGO_CFG" || sed -i "0,/^\[env\]/s||[env]\nSCCACHE_DIR = \"$CACHE_DIR\"\nSCCACHE_CACHE_SIZE = \"$CACHE_SIZE\"|" "$CARGO_CFG"
-if grep -q '^SCCACHE_BASEDIR' "$CARGO_CFG"; then
-  sed -i "s|^SCCACHE_BASEDIR.*|SCCACHE_BASEDIR = \"$BASE_DIR\"|" "$CARGO_CFG"
+if grep -q '^SCCACHE_BASEDIRS' "$CARGO_CFG"; then
+  sed -i "s|^SCCACHE_BASEDIRS.*|SCCACHE_BASEDIRS = \"$BASE_DIR\"|" "$CARGO_CFG"
 else
-  sed -i "0,/^\[env\]/s||[env]\nSCCACHE_BASEDIR = \"$BASE_DIR\"|" "$CARGO_CFG"
+  sed -i "0,/^\[env\]/s||[env]\nSCCACHE_BASEDIRS = \"$BASE_DIR\"|" "$CARGO_CFG"
 fi
+
+# 4. The daemon reads SCCACHE_BASEDIRS at START, so a running server keeps the
+# OLD value and every stat you read afterwards lies to you. Stop it; the next
+# client starts a fresh one with the config above. (Not a data loss: the store
+# on disk is untouched.)
+"$SCCACHE_BIN" --stop-server >/dev/null 2>&1 || true
+sleep 1
+SCCACHE_DIR="$CACHE_DIR" SCCACHE_CACHE_SIZE="$CACHE_SIZE" SCCACHE_BASEDIRS="$BASE_DIR" \
+  "$SCCACHE_BIN" --start-server >/dev/null 2>&1 || true
+sleep 1
 
 echo "=== build cache enabled ==="
 status
+# VERIFY, do not assume: a mistyped variable is silent, so fail loudly here
+# rather than let a no-op masquerade as a speedup.
+if ! "$SCCACHE_BIN" --show-stats 2>/dev/null | grep -q "Base directories.*[^(]none\|Base directories *[^ ]"; then :; fi
+if "$SCCACHE_BIN" --show-stats 2>/dev/null | grep -q "Base directories *(none)"; then
+  echo
+  echo "⚠️  basedirs did NOT take (still '(none)'). The speedup is NOT active."
+  echo "    Check the variable name (PLURAL: SCCACHE_BASEDIRS) and that the path is absolute."
+  exit 1
+fi
 echo
 echo "First build after enabling is a full rebuild (fingerprints changed) and"
 echo "populates the cache. Every worktree created afterwards reuses it."

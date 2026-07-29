@@ -178,6 +178,23 @@ lc 1 "A1: two .lifecycle dirs is REFUSED even with explicit --dir" --all --repo 
 git -C "$R" rm -rq .lifecycle/stray && git -C "$R" commit -qm rm-stray
 lc 0 "A1: one .lifecycle dir is accepted (control)" --all --repo "$R" --dir "$D" --base main
 
+# --- A1 (regression): DELETING an inherited feature dir is itself refused.
+# Making A1 base-relative removed the PRESSURE to delete a sibling's audit trail
+# to go green; it does not DETECT the deletion. The absolute-count era produced a
+# real one. NOTE the ordering trap this pins: deleting the siblings is what
+# LEAVES one dir, so a check that short-circuits on "<=1 dir present" passes
+# exactly when the damage has been done.
+R="$(build_be)"; D="$R/.lifecycle/bar"
+mkdir -p "$R/.lifecycle/sibling"
+echo "# another feature's audit trail, inherited from the base" > "$R/.lifecycle/sibling/PLAN.md"
+git -C "$R" add -A && git -C "$R" commit -qm "sibling feature on the base"
+git -C "$R" branch -f main HEAD
+git -C "$R" checkout -q -b deleter
+git -C "$R" rm -rq .lifecycle/sibling && git -C "$R" commit -qm "delete a sibling's audit trail"
+lc 1 "A1: DELETING a base-inherited feature dir is REFUSED (leaves 1 dir behind)" --phase 1 --repo "$R" --dir "$D" --base main
+git -C "$R" revert --no-edit HEAD >/dev/null 2>&1
+lc 0 "A1: restoring the sibling clears it (control)" --phase 1 --repo "$R" --dir "$D" --base main
+
 # --- A1 (regression): feature dirs INHERITED from the base must NOT trip A1.
 # A branch cut from a long-lived integration branch carries every previously
 # landed feature's committed artifacts. Counting those made A1 unsatisfiable and

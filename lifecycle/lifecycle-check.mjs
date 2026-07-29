@@ -509,13 +509,31 @@ function checkA1() {
   let subs = [];
   try { subs = readdirSync(root).filter((d) => { try { return statSync(join(root, d)).isDirectory(); } catch { return false; } }); }
   catch { return []; }
-  if (subs.length <= 1) return [];
 
   const firstSeg = (p) => {
     const parts = p.split('/').filter(Boolean);
     const i = parts.indexOf('.lifecycle');
     return i >= 0 ? parts[i + 1] : null;
   };
+
+  // The DELETE check must run BEFORE the "<=1 dir" early return below. Deleting
+  // the siblings is what LEAVES one dir, so short-circuiting on the count would
+  // let the check pass exactly when the damage has been done.
+  const gaps = [];
+  try {
+    const removed = new Set(
+      git(repo, 'diff', '--diff-filter=D', '--name-only', `${baseRef}...HEAD`, '--', '.lifecycle')
+        .split('\n').map((l) => firstSeg(l.trim())).filter(Boolean),
+    );
+    // Only a dir with nothing left on disk counts — a branch may legitimately
+    // delete or rename individual files inside its OWN feature dir.
+    for (const d of [...removed]) if (subs.includes(d)) removed.delete(d);
+    if (removed.size) {
+      gaps.push(`A1: this branch DELETES ${removed.size} .lifecycle feature dir(s) inherited from ${baseRef} (${[...removed].sort().join(', ')}) — never remove another feature's audit trail to satisfy a gate. Restore them; if a dir is genuinely obsolete, retire it in its own commit with a stated reason.`);
+    }
+  } catch { /* base unresolvable; the add-side check below reports that */ }
+
+  if (subs.length <= 1) return gaps;
 
   // Feature dirs this branch ADDS relative to the base.
   let added = null;
@@ -543,9 +561,9 @@ function checkA1() {
   } catch { /* status is advisory here */ }
 
   if (added.size > 1) {
-    return [`A1: this branch adds ${added.size} .lifecycle feature dirs (${[...added].sort().join(', ')}) relative to ${baseRef} — a branch may carry exactly ONE. Remove the stray(s) before pushing.`];
+    gaps.push(`A1: this branch adds ${added.size} .lifecycle feature dirs (${[...added].sort().join(', ')}) relative to ${baseRef} — a branch may carry exactly ONE. Remove the stray(s) before pushing.`);
   }
-  return [];
+  return gaps;
 }
 
 // A3: diff-added test skips/ignores. Only genuine platform-incompatibility is a

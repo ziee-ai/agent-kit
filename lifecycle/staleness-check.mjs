@@ -197,9 +197,11 @@ function checkPinnedVsUpstream(subs) {
     const b = Number(behind ?? NaN), a = Number(ahead ?? NaN);
     if (!Number.isFinite(b)) { SKIP('S2 pinned-vs-upstream', `${rel} — distance unmeasurable`, `could not count HEAD..${upstream}.`); continue; }
     INFO('S2 pinned-vs-upstream', `${rel} — ${b} behind / ${a} ahead of ${upstream}`,
-      b === 0
-        ? `submodule '${name}' pin is level with ${upstream} (as last fetched).`
-        : `submodule '${name}' pins a commit ${b} behind ${upstream} (as last fetched) — if those ${b} commits contain rule/gate fixes, work done here is being judged by, or duplicating, an older ruleset. Not a failure: pinning is often deliberate.`,
+      b > 0
+        ? `submodule '${name}' pins a commit ${b} behind ${upstream} (as last fetched) — if those ${b} commits contain rule/gate fixes, work done here is being judged by, or duplicating, an older ruleset. Not a failure: pinning is often deliberate.`
+        : a > 0
+          ? `submodule '${name}' pins a commit ${a} AHEAD of ${upstream} (as last fetched) — local work not yet pushed, or a stale fetch of the remote.`
+          : `submodule '${name}' pin is level with ${upstream} (as last fetched).`,
       { behind: b, ahead: a, upstream, head });
   }
 }

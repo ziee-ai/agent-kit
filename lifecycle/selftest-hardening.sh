@@ -1168,8 +1168,16 @@ lc 0 "A7: the absolute 'gate:ui (ui): PASS' form is still accepted" --phase 8 --
 # in the same file as pasted output reading GATE FAILED is a pipeline artifact,
 # not a result. `cmd | tail` exits with tail's status; one real recorded PASS was
 # exactly that.
-R="$(build_ui 'gate:ui (ui): PASS' '  Ran 41 surfaces ... GATE FAILED (3 HIGH runtime findings)')"; D="$R/.lifecycle/foo"
+R="$(build_ui 'gate:ui (ui): PASS' '```' '  Ran 41 surfaces ... GATE FAILED (3 HIGH runtime findings)' '```')"; D="$R/.lifecycle/foo"
 lc 1 "A7: a recorded PASS contradicted by pasted 'GATE FAILED' output is REFUSED" --phase 8 --repo "$R" --dir "$D" --base main
+
+# A7-4b: ...but PROSE about earlier red runs is NOT pasted output and must NOT
+# contradict a genuine PASS. Scanning the whole file punished honest disclosure:
+# an author who HID four failed attempts passed, one who explained them failed.
+# That is backwards, and it fired on a real branch whose only offence was saying
+# why the gate had failed before it passed. Only fenced blocks count.
+R="$(build_ui 'gate:ui (ui): PASS' 'Note: this took four red runs before I found the cause. Without it the gate failed every time.')"; D="$R/.lifecycle/foo"
+lc 0 "A7: PROSE about an earlier failure does NOT contradict a genuine PASS" --phase 8 --repo "$R" --dir "$D" --base main
 # ...and the catch does NOT fire on ordinary passing output (no blanket refusal
 # of any file that happens to quote a log).
 R="$(build_ui 'gate:ui (ui): PASS' '  Ran 41 surfaces ... 0 HIGH findings, gate OK')"; D="$R/.lifecycle/foo"

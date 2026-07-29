@@ -1511,7 +1511,22 @@ function phase8() {
     }
     // A7: boot/runtime canary — baseline-controlled (branch no worse than base).
     const canary = parseCanaryLines(t);
-    const contradicted = t.split(/\r?\n/).find((ln) => RE_GATE_FAILED_MARKER.test(ln));
+    // Only PASTED OUTPUT can contradict a recorded result. Narrative prose about
+    // earlier red runs cannot — and treating it as contradiction PUNISHES HONEST
+    // DISCLOSURE: an author who hides four failed attempts passes, one who
+    // documents them fails. That is exactly backwards, and it fired on a real
+    // branch whose only offence was explaining why the gate had failed before it
+    // passed. So scan fenced code blocks only, which is where pasted gate output
+    // lives; the `cmd | tail` artifact this catches is always pasted output.
+    const contradicted = (() => {
+      const lines = t.split(/\r?\n/);
+      let inFence = false;
+      for (const ln of lines) {
+        if (/^\s*```/.test(ln)) { inFence = !inFence; continue; }
+        if (inFence && RE_GATE_FAILED_MARKER.test(ln)) return ln;
+      }
+      return undefined;
+    })();
     for (const w of feWs) {
       const v = canary.get(w.toLowerCase());
       if (!v) {

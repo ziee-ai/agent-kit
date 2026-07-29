@@ -329,8 +329,30 @@ let stagingCreated = false;
 
 function makeStaging() {
   if (!staging) {
-    staging = mkdtempSync(join(process.env.TMPDIR || tmpdir(), 'merge-gate-'));
-    // reuse a scratch area under the repo's tmp convention when available
+    // Default the staging tree BESIDE THE REPO, not into the system temp dir.
+    //
+    // Two reasons, both measured rather than stylistic:
+    //
+    // 1. BUILD CACHE. sccache only shares a compiled object between two trees
+    //    when their paths normalise to the same key, which needs SCCACHE_BASEDIR
+    //    to be a COMMON ANCESTOR of both. Worktrees live beside the repo; a
+    //    staging tree in /tmp sits outside any sane basedir, so every gate run
+    //    re-compiled the entire native surface from scratch — aws-lc-sys alone
+    //    is ~1500 C files. Observed C/C++ hit rate with the split layout: 28%,
+    //    against 61% for Rust.
+    // 2. SIZE. /tmp is often a small shared tmpfs; a full staging checkout plus
+    //    its target/ dir is tens of GB and does not belong there.
+    //
+    // Still overridable: --staging <dir> wins, and TMPDIR is honoured if set, so
+    // a CI runner that wants the old behaviour keeps it.
+    const preferred = process.env.TMPDIR || join(repo, '..');
+    let root = preferred;
+    try {
+      mkdirSync(root, { recursive: true });
+    } catch {
+      root = tmpdir(); // unwritable parent (read-only checkout, odd CI layout)
+    }
+    staging = mkdtempSync(join(root, '.merge-gate-'));
   }
   // create a detached worktree at base, then merge the branch
   const add = gitTry(repo, 'worktree', 'add', '--detach', staging, base);

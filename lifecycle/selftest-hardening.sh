@@ -727,6 +727,47 @@ R="$(build_mg 00000000000009_early.sql)"
 assert_exit_cmd 1 "merge-gate C2: migration <= main max is REFUSED" -- \
   node "$MG" feat/mig --repo "$R" --base main --no-fetch --skip-heavy
 
+# --- STALE-REF guard: a bare branch name must never silently grade a local ref
+# that is behind its remote. This is the real-world failure it exists for: the
+# gate once graded a local branch 430 commits behind origin and reported eleven
+# file conflicts that did not exist on the branch anyone was landing.
+#
+# Proven BOTH ways, and the negative control matters more than the positive:
+# without an ahead-only allowance the guard would block legitimate pre-push
+# gating of unpushed work.
+R="$(new_repo)"; CLEANUP+=("$R")
+write_ziee_appconfig "$R"
+mkdir -p "$R/src-app/server/migrations"
+echo "CREATE TABLE a();" > "$R/src-app/server/migrations/00000000000010_a.sql"
+git -C "$R" add -A && git -C "$R" commit -qm mig-10
+git -C "$R" checkout -q -b feat/mig
+echo "CREATE TABLE b();" > "$R/src-app/server/migrations/00000000000011_b.sql"
+git -C "$R" add -A && git -C "$R" commit -qm branch-mig
+# Fabricate a remote that is AHEAD of the local branch (one extra commit on a
+# refs/remotes/origin/feat/mig ref — no network, no real remote needed).
+git -C "$R" update-ref refs/remotes/origin/feat/mig "$(git -C "$R" rev-parse feat/mig)"
+echo "CREATE TABLE c();" > "$R/src-app/server/migrations/00000000000012_c.sql"
+git -C "$R" add -A && git -C "$R" commit -qm remote-only
+git -C "$R" update-ref refs/remotes/origin/feat/mig "$(git -C "$R" rev-parse HEAD)"
+git -C "$R" reset -q --hard HEAD~1   # local falls BEHIND its remote
+assert_exit_cmd 1 "merge-gate: a branch BEHIND its remote is REFUSED (stale-ref guard)" -- \
+  node "$MG" feat/mig --repo "$R" --base main --no-fetch --skip-heavy
+if grep -qiE "STALE ref" "$LC_SELFTEST_OUT"; then
+  PASS=$((PASS+1)); printf '  \033[32mok  \033[0m %s\n' "merge-gate: stale-ref refusal names the reason (not a generic failure)"
+else
+  FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "merge-gate: stale-ref refusal names the reason (not a generic failure)"
+fi
+# Same repo, addressed by the REMOTE ref: must pass — the escape hatch the
+# refusal message tells the user about has to actually work.
+assert_exit_cmd 0 "merge-gate: the suggested 'origin/<branch>' re-run PASSES" -- \
+  node "$MG" origin/feat/mig --repo "$R" --base main --no-fetch --skip-heavy
+# NEGATIVE CONTROL: local AHEAD of remote is normal pre-push gating, not stale.
+# Without this the guard would be indistinguishable from "refuse any divergence".
+R="$(build_mg 00000000000011_b.sql)"
+git -C "$R" update-ref refs/remotes/origin/feat/mig "$(git -C "$R" rev-parse feat/mig~1)"
+assert_exit_cmd 0 "merge-gate: local AHEAD of remote still passes (unpushed work)" -- \
+  node "$MG" feat/mig --repo "$R" --base main --no-fetch --skip-heavy
+
 # de-ziee-ify: with NO .claude/app.config, C2 has no migrations dir configured
 # and SKIPs — the same colliding migration that fails above now PASSES (proving
 # the app-specific gate is app.config-driven, not baked in).

@@ -174,6 +174,59 @@ if (!base) {
 if (!gitTry(repo, 'rev-parse', '--verify', '--quiet', base).ok) die(`base ref not found: ${base}`);
 if (!gitTry(repo, 'rev-parse', '--verify', '--quiet', branch).ok) die(`branch ref not found: ${branch}`);
 
+// ---------------------------------------------------------------------------
+// STALE-REF GUARD — the gate must never silently grade the wrong commit.
+//
+// A BARE branch name resolves to the LOCAL ref, which can be arbitrarily far
+// behind its remote. Observed in practice: `merge-gate.mjs feat/agent-core`
+// graded a local branch **430 commits behind** `origin/feat/agent-core` and
+// reported a confident FAIL — 11 file conflicts and "66 commits behind main" —
+// none of which existed on the real branch. Every downstream number (merge-base,
+// C4's behind-count, the conflict list, C3's regen diff) was computed against
+// that stale tree, so the verdict was not merely wrong, it was wrong in the
+// direction that BLOCKS a good merge and would have sent someone off to resolve
+// eleven imaginary conflicts.
+//
+// This checks the STATE (is the ref I am about to grade the current tip?) rather
+// than the SYNTAX (does it look like a remote ref?). A name-shaped check would
+// miss the case that actually bit: the argument was spelled perfectly.
+if (!branch.startsWith('origin/') && !branch.startsWith('refs/remotes/')) {
+  const remoteRef = `origin/${branch}`;
+  if (!NO_FETCH) {
+    // The gate already fetches origin/main; without this the REMOTE side of the
+    // comparison could itself be stale and the guard would under-report.
+    gitTry(repo, 'fetch', '--quiet', 'origin', branch);
+  }
+  if (gitTry(repo, 'rev-parse', '--verify', '--quiet', remoteRef).ok) {
+    const localSha = git(repo, 'rev-parse', branch);
+    const remoteSha = git(repo, 'rev-parse', remoteRef);
+    if (localSha !== remoteSha) {
+      const behind = Number(git(repo, 'rev-list', '--count', `${branch}..${remoteRef}`)) || 0;
+      const ahead = Number(git(repo, 'rev-list', '--count', `${remoteRef}..${branch}`)) || 0;
+      if (behind > 0) {
+        // Behind or diverged: refuse. Grading a stale tree produces a verdict
+        // about code nobody is trying to land.
+        die(
+          `refusing to grade a STALE ref.\n` +
+          `  '${branch}' is ${behind} commit(s) behind ${remoteRef}` +
+          (ahead ? ` and ${ahead} ahead (DIVERGED)` : '') + `.\n` +
+          `  local  ${localSha.slice(0, 10)}\n` +
+          `  remote ${remoteSha.slice(0, 10)}\n` +
+          `  Every gate result would describe the stale tree, not what you are landing.\n` +
+          `  Fix: re-run against '${remoteRef}', or update the local branch\n` +
+          `       (git update-ref refs/heads/${branch} ${remoteRef}).`,
+        );
+      }
+      // AHEAD-only is legitimate: gating work that is committed but not yet
+      // pushed is a normal pre-push check. Say so rather than failing.
+      process.stderr.write(
+        `merge-gate: note: '${branch}' is ${ahead} commit(s) ahead of ${remoteRef} ` +
+        `(unpushed work is being graded).\n`,
+      );
+    }
+  }
+}
+
 const mergeBase = git(repo, 'merge-base', base, branch);
 
 // ---------------------------------------------------------------------------

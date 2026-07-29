@@ -1063,11 +1063,11 @@ R="$(build_light)"; D="$R/.lifecycle/bar"
 lc 0 "LIGHT: a small no-blast-radius diff needs ONE audit round (phase 7)" --phase 7 --repo "$R" --dir "$D" --base main
 # and the tier + its reason are VISIBLE, not implicit — nobody should have to
 # guess which track they are on.
-if grep -q "tier=LIGHT" /tmp/lc-selftest.out && grep -q "no new permission, migration, module, or public API/schema change" /tmp/lc-selftest.out; then
+if grep -q "tier=LIGHT" "$LC_SELFTEST_OUT" && grep -q "no new permission, migration, module, or public API/schema change" "$LC_SELFTEST_OUT"; then
   PASS=$((PASS+1)); printf '  \033[32mok  \033[0m %s\n' "LIGHT: the tier AND its reason are reported on stdout"
 else
   FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "LIGHT: tier/reason not reported"
-  sed 's/^/        | /' /tmp/lc-selftest.out
+  sed 's/^/        | /' "$LC_SELFTEST_OUT"
 fi
 
 # L-2 (BLAST-RADIUS CONTROL — migration): byte-identical artifacts; the ONLY

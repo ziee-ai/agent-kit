@@ -239,6 +239,25 @@ Gate: `--phase 1`.
 
 ## Phase 2 — PLAN_AUDIT.md
 
+**`DESIGN_FIDELITY.md` is no longer required, and `PLAN_AUDIT.md` is no longer a
+separate file.** Across 22 audited features the fidelity artifact recorded
+**84 UPHELD / 0 DROPPED** — it never once fired — and where it mattered it was
+*wrong*: one feature self-certified all six invariants UPHELD while the blind
+design-conformance auditor found two violated in reachable states. An author's own
+verdict on whether they honoured the design is the one verdict that carries no
+information.
+
+The invariants themselves still matter, and are now proven rather than attested:
+declared in PLAN.md (phase 1) → pinned by an `[acceptance]` test per invariant
+(phase 3) → judged **blind** by the `design-conformance` angle (phase 6) → those
+tests recorded PASS (phase 8). Write the fidelity file if it helps you think; a
+`DROPPED` verdict in it is still refused. Its absence is not a gap.
+
+Likewise the plan-audit **activity** stays (it produced 120 code-verified CONCERNs
+and several were substantive) but the separate document is gone — it was cited by
+zero other artifacts. Put the `- **ITEM-N** — verdict: PASS|CONCERN|BLOCKED — <what
+you verified in the codebase>` lines in PLAN.md. A `BLOCKED` verdict still blocks.
+
 Audit the plan *against the codebase* before writing code. Required dimension
 sections (`## Breakage risk`, `## Pattern conformance`, `## Migration collisions`,
 `## OpenAPI regen`) plus a per-item verdict line for **every** ITEM:
@@ -476,6 +495,38 @@ a divergence from an invariant is a `plan-wins` re-implement, never a quiet acce
 Gate: `--phase 5` (checks the final round is 0).
 
 ## Phase 6 — Blind multi-angle audit
+
+**Two angles, not ten — and they must differ in KIND.** The old rule (≥10 distinct
+angles, every hunk covered by ≥3) has no empirical support and is now removed:
+
+- Porter/Siy/Votta (*IEEE TSE* 1997), **88 randomized industrial inspections**:
+  defect yield saturates **at two** reviewers. One is worse than two; four is no
+  better than two — bigger teams bought effort and elapsed time, not defects.
+- "Perspective-based reading" *is* the ≥3-angles idea, and 25 years of replication
+  failed to confirm it: 3 of 8 studies significant, **all three positives from the
+  originating research network**; every arms-length replication null, including the
+  two largest (N=223, N=177). A replication by the original authors got
+  perspective **p = .655**.
+- Locally: across 22 audited features the coverage TSV (435 generated rows) caught
+  **zero** defects, while four angles carried **74%** of confirmed HIGHs.
+
+Run **two** genuinely different angles per round, at least one from the core
+roster — `correctness` · `tests-quality` · `design-conformance` · `security` —
+plus a conditional angle when the change warrants it (`authz` for a new
+permission, `db` for a migration, `api-contract` for a schema change,
+`concurrency-resource` for async/subprocess/cache, `ux-a11y`/`responsive-fidelity`
+for UI, `perf` for list/stream). Two rewordings of the same reading are one angle.
+
+**Corroboration, not union.** A finding becomes WORK only when **corroborated by
+≥2 angles**, **oracle-confirmed** (a compiler/type/test failure reproduces it), or
+of severity `security` / `data-loss` / `authz`. Record `corroborated_by`,
+`oracle_confirmed` and `severity` per ledger row. Everything else stays in the
+ledger as a triage candidate — it does not enter the fix loop and does not keep it
+alive. Accumulating every angle's raw output is what made the loop unbounded.
+
+**`AUDIT_COVERAGE.tsv` is gone.** It was generated from a file-group map, proved
+only that the audit named the files, and caught nothing. `LEDGER.jsonl` is the
+record.
 
 Spawn **fresh/blind** subagents (diff-only context: `git diff main...HEAD`) — do
 NOT hand them your reasoning. Use ≥10 angles from the proven roster:

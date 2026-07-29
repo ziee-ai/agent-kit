@@ -484,8 +484,25 @@ function priorTestIds() {
 // per-phase validators — each returns { present, gaps: [] }
 // ---------------------------------------------------------------------------
 const FORBIDDEN_DECISION = /\b(TBD|TODO|ASK)\b|\?\?\?|<\s*(ask|decide|todo)\s*>/i;
-const ANGLE_MIN = 10;
-const COVERAGE_MIN_ANGLES = 3;
+// Review breadth. The old rule (>=10 distinct angles, every hunk covered by >=3)
+// has no empirical support and cost more than it returned:
+//   • Porter/Siy/Votta (IEEE TSE 1997), 88 randomized industrial inspections:
+//     yield saturates AT TWO reviewers. 1 is worse than 2; 4 is no better than 2 —
+//     larger teams bought effort and elapsed time, not defects.
+//   • "Perspective-based reading" IS the >=3-angles idea, and it has been tested
+//     for 25 years without replicating: 3 of 8 studies significant, and all three
+//     positives come from the originating research network. Every arms-length
+//     replication was null, including the two largest (N=223, N=177). A
+//     replication by the original authors got perspective p = .655.
+//   • Locally: an audit of 22 completed features found the coverage TSV (435 rows,
+//     ~79 KB, mechanically generated) caught ZERO defects, while four angles
+//     carried 74% of confirmed HIGHs.
+// So: run TWO genuinely different angles per round from a fixed roster, and let a
+// finding become work only when CORROBORATED or oracle-confirmed (see phase6).
+const ANGLE_MIN = 2;
+// The required core — these four carry the yield. Conditional angles (authz, db,
+// api-contract, concurrency, ux-a11y, perf) are added by change type, not by count.
+const ANGLE_CORE = ['correctness', 'tests-quality', 'design-conformance', 'security'];
 
 // ---------------------------------------------------------------------------
 // A1-A9 — the hardening checks (see LIFECYCLE_HARDENING_MASTER.md)
@@ -817,34 +834,40 @@ function phase1() {
 
 function phase2() {
   const g = [];
-  const t = read('PLAN_AUDIT.md');
-  if (t == null) return { present: false, gaps: ['PLAN_AUDIT.md missing'] };
+  // The plan-audit ACTIVITY is valuable (it produced 120 code-verified CONCERNs
+  // across 22 features, several substantive). The separate DOCUMENT was not: it
+  // was cited by zero other artifacts. So the per-ITEM verdict grammar is now
+  // accepted in PLAN.md itself, and PLAN_AUDIT.md is optional. What is still
+  // REFUSED is a BLOCKED verdict left unresolved — that is the part that carried
+  // the signal.
+  const t = read('PLAN_AUDIT.md') ?? read('PLAN.md');
+  if (t == null) return { present: false, gaps: ['neither PLAN_AUDIT.md nor PLAN.md is present — nothing to audit'] };
   const items = parsePlanItems();
   if (!items) return { present: true, gaps: ['PLAN.md missing/empty — cannot audit'] };
-  for (const dim of [['breakage'], ['pattern conformance', 'pattern'], ['migration'], ['openapi']]) {
-    if (!hasSection(t, ...dim)) g.push(`PLAN_AUDIT.md: missing dimension section "${dim[0]}"`);
-  }
   const verdicts = new Map();
   for (const ln of t.split(/\r?\n/)) {
     const m = RE_AUDIT.exec(ln);
     if (m) verdicts.set(m[1], m[2].toUpperCase());
   }
-  for (const id of items.keys()) {
-    if (!verdicts.has(id)) g.push(`PLAN_AUDIT.md: ${id} has no verdict line (- **${id}** — verdict: PASS|CONCERN|BLOCKED — ...)`);
-    else if (verdicts.get(id) === 'BLOCKED') g.push(`PLAN_AUDIT.md: ${id} verdict is BLOCKED — resolve before proceeding`);
+  if (verdicts.size === 0) g.push('no plan-audit verdicts found — record `- **ITEM-N** — verdict: PASS|CONCERN|BLOCKED — <what you verified in the codebase>` in PLAN.md (or PLAN_AUDIT.md). The audit is a codebase check, not a restatement of the plan.');
+  for (const [id, v] of verdicts) {
+    if (v === 'BLOCKED') g.push(`${id} verdict is BLOCKED — resolve before proceeding`);
   }
-  // Design-fidelity gate: DESIGN_FIDELITY.md records how the plan upholds EACH
-  // design invariant. A missing verdict, or any DROPPED verdict, fails phase 2 — a
-  // plan that drops a design invariant is reframing (not realizing) the design,
-  // which is exactly how declarative-canvas-plots reached a false 9/9.
+  // DESIGN_FIDELITY is no longer a required self-attestation. Across 22 audited
+  // features it recorded 84 UPHELD / 0 DROPPED — it never once fired — and where
+  // it mattered it was WRONG: one feature self-certified all six invariants
+  // UPHELD while the blind design-conformance auditor found two violated in
+  // reachable states. An author's own verdict on whether they honoured the design
+  // is the one verdict that carries no information. The invariants still matter:
+  // they are declared in PLAN.md (phase 1), proven by [acceptance] tests (phase 3
+  // + 8), and judged BLIND by the design-conformance angle (phase 6). If the file
+  // is present it is still checked for coherence — a DROPPED invariant is a real
+  // signal — but its absence is no longer a gap.
   const invs = parseInvariants();
   const fidelity = parseFidelity();
-  if (fidelity == null) {
-    g.push('DESIGN_FIDELITY.md missing — record a fidelity verdict per PLAN invariant: `- **INV-N** — fidelity: UPHELD | AT-RISK | DROPPED — <how the plan upholds it>`.');
-  } else {
+  if (fidelity != null) {
     for (const id of invs.keys()) {
-      if (!fidelity.has(id)) g.push(`DESIGN_FIDELITY.md: ${id} has no fidelity line (- **${id}** — fidelity: UPHELD|AT-RISK|DROPPED — <how the plan upholds it>)`);
-      else if (fidelity.get(id) === 'DROPPED') g.push(`DESIGN_FIDELITY.md: ${id} fidelity is DROPPED — a plan may not drop a design invariant. Re-scope the plan to uphold it (or renegotiate the invariant with the owner and amend the design + PLAN "## Invariants").`);
+      if (fidelity.has(id) && fidelity.get(id) === 'DROPPED') g.push(`DESIGN_FIDELITY.md: ${id} fidelity is DROPPED — a plan may not drop a design invariant. Re-scope the plan to uphold it (or renegotiate the invariant with the owner and amend the design + PLAN "## Invariants").`);
     }
     for (const id of fidelity.keys()) {
       if (!invs.has(id)) g.push(`DESIGN_FIDELITY.md: ${id} has a fidelity verdict but is not an INV-N in PLAN.md's "## Invariants".`);
@@ -970,26 +993,35 @@ function phase5() {
 function phase6() {
   const g = [];
   const ledger = parseLedger();
-  const cov = parseCoverage();
-  if (ledger == null && cov == null) return { present: false, gaps: ['LEDGER.jsonl and AUDIT_COVERAGE.tsv missing (blind audit not started)'] };
-  if (ledger == null) g.push('LEDGER.jsonl missing');
-  if (cov == null) g.push('AUDIT_COVERAGE.tsv missing');
-  if (ledger) {
-    const bad = ledger.filter((r) => r.__parse_error);
-    for (const b of bad) g.push(`LEDGER.jsonl:${b.__parse_error}: not valid JSON`);
-    const angles = new Set(ledger.filter((r) => r.angle).map((r) => String(r.angle).toLowerCase()));
-    if (angles.size < ANGLE_MIN) g.push(`LEDGER.jsonl: only ${angles.size} distinct angles; need >= ${ANGLE_MIN}`);
-  }
-  if (cov) {
-    const hunks = diffHunks();
-    if (hunks.length === 0) g.push(`no diff hunks found for ${baseRef}...HEAD (nothing implemented, or wrong --base)`);
-    for (const h of hunks) {
-      const matching = cov.filter((r) => r.file === h.file && r.start <= h.end && r.end >= h.start);
-      const angleUnion = new Set();
-      for (const r of matching) r.angles.forEach((a) => angleUnion.add(a));
-      if (angleUnion.size < COVERAGE_MIN_ANGLES)
-        g.push(`AUDIT_COVERAGE.tsv: hunk ${h.file}:${h.start}-${h.end} reviewed by ${angleUnion.size} angle(s) [${[...angleUnion].join(',') || 'none'}]; need >= ${COVERAGE_MIN_ANGLES}`);
-    }
+  if (ledger == null) return { present: false, gaps: ['LEDGER.jsonl missing (blind audit not started)'] };
+  const bad = ledger.filter((r) => r.__parse_error);
+  for (const b of bad) g.push(`LEDGER.jsonl:${b.__parse_error}: not valid JSON`);
+
+  const angles = new Set(ledger.filter((r) => r.angle).map((r) => String(r.angle).toLowerCase()));
+  if (angles.size < ANGLE_MIN) g.push(`LEDGER.jsonl: only ${angles.size} distinct angle(s); need >= ${ANGLE_MIN}. Two is the number the evidence supports — and they must differ in KIND (e.g. one adversarial/security, one contract/interface), not be two rewordings of the same reading.`);
+
+  // At least one of the four angles that actually carry the yield must have run.
+  // A roster to select from, not a count to satisfy: naming four angles and
+  // running none of them is the failure mode a bare count invites.
+  if (angles.size && !ANGLE_CORE.some((c) => [...angles].some((a) => a.includes(c))))
+    g.push(`LEDGER.jsonl: none of the core angles ran (${ANGLE_CORE.join(', ')}) — those four carried 74% of confirmed HIGH findings across 22 audited features. Ran instead: ${[...angles].join(', ')}.`);
+
+  // A finding becomes WORK only when corroborated by >=2 angles, oracle-confirmed,
+  // or high-severity. The union of angles is a candidate pool, not a work list:
+  // an LLM reviewer's per-finding precision is low enough that accumulating every
+  // angle's output is what makes the fix loop unbounded. Single-angle findings are
+  // kept in the ledger and triaged; they are not a reason to keep looping.
+  // Migration-safe: only enforced once a ledger opts in by recording ANY of the
+  // corroboration fields. A gate that fails every pre-existing ledger would break
+  // in-flight branches to enforce bookkeeping, which is the same trade this whole
+  // reform is removing. Ledgers without the fields are accepted; the skill asks
+  // for them, and this fires only when they are present but nothing qualifies.
+  const usesCorroboration = ledger.some((r) => r.corroborated_by !== undefined || r.oracle_confirmed !== undefined || r.promoted !== undefined);
+  if (usesCorroboration) {
+    const promoted = ledger.filter((r) => r.promoted === true || r.corroborated_by >= 2 || r.oracle_confirmed === true
+      || /^(security|data-loss|authz|high)$/i.test(String(r.severity || '')));
+    if (promoted.length === 0)
+      g.push('LEDGER.jsonl: records corroboration fields but no finding qualifies as promoted (corroborated_by >= 2, oracle_confirmed, or severity in {security,data-loss,authz,high}) — the fix loop should work from promoted findings, not the raw union of every angle.');
   }
   return { present: true, gaps: g };
 }

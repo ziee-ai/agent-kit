@@ -19,10 +19,45 @@ PREFLIGHT="$HERE/preflight.sh"
 # shellcheck source=selftest-lib.sh
 . "$HERE/selftest-lib.sh"
 
+STALE_CHECK="$HERE/staleness-check.mjs"
+HOOK="$HERE/edit-lint-hook.mjs"
+
 lc()  { assert_exit_cmd "$1" "$2" -- node "$CHECK" "${@:3}"; }
+sc()  { assert_exit_cmd "$1" "$2" -- node "$STALE_CHECK" "${@:3}"; }
+
+# sc_says <needle> <label> <staleness-check args...> — asserts the DIAGNOSIS text,
+# not just the exit code. A staleness finding whose message does not name the
+# CONSEQUENCE is the failure mode this whole checker exists to avoid.
+sc_says_impl() {
+  local needle="$1"; shift
+  local out; out="$(node "$STALE_CHECK" "$@" 2>&1)"
+  if printf '%s\n' "$out" | grep -q -- "$needle"; then return 0; fi
+  printf 'expected the diagnosis to contain: %s\n--- actual ---\n%s\n' "$needle" "$out"
+  return 1
+}
+sc_says() { assert_exit_cmd 0 "$2" -- sc_says_impl "$1" "${@:3}"; }
+
+# hook_out <file> — runs the edit-lint hook exactly as a PostToolUse hook would.
+# Exit 0 = the hook stayed QUIET, exit 1 = it emitted findings. (The hook itself
+# always exits 0 by the fail-open contract, so the signal is its stdout.)
+hook_out_impl() {
+  local o
+  o="$(printf '{"tool_input":{"file_path":"%s"}}' "$1" | node "$HOOK" 2>/dev/null)"
+  printf '%s\n' "$o"
+  [ -z "$o" ]
+}
+hk() { assert_exit_cmd "$1" "$2" -- hook_out_impl "$3"; }
+# hk_says <needle> <label> <file> — the finding must name the thing it claims.
+hk_says_impl() { printf '{"tool_input":{"file_path":"%s"}}' "$2" | node "$HOOK" 2>/dev/null | grep -q -- "$1"; }
+hk_says() { assert_exit_cmd 0 "$2" -- hk_says_impl "$1" "$3"; }
+# hk_raw <label> <raw stdin> — fail-open on malformed hook input.
+hk_raw_impl() { local o; o="$(printf '%s' "$1" | node "$HOOK" 2>/dev/null)"; printf '%s\n' "$o"; [ -z "$o" ]; }
 
 CLEANUP=()
-trap 'for d in "${CLEANUP[@]:-}"; do [ -n "$d" ] && rm -rf "$d"; done' EXIT
+KILLPIDS=()
+trap 'for p in "${KILLPIDS[@]:-}"; do [ -n "$p" ] && kill "$p" 2>/dev/null; done
+      for d in "${CLEANUP[@]:-}"; do [ -n "$d" ] && rm -rf "$d"; done
+      rm -f "$LC_SELFTEST_OUT"' EXIT
 
 # write a ziee-shaped .claude/app.config into a fixture repo. This is how the
 # de-ziee-ified preflight.sh + merge-gate.mjs read their app-specific paths; with
@@ -705,12 +740,12 @@ git -C "$R" add -A && git -C "$R" commit -qm branch-mig
 assert_exit_cmd 0 "merge-gate: NO app.config ⇒ C2 SKIPs (collision not flagged)" -- \
   node "$MG" feat/mig --repo "$R" --base main --no-fetch --skip-heavy
 # strengthen: exit 0 alone can't distinguish SKIP from PASS — assert the C2 line
-# actually reads SKIP in the just-captured output (/tmp/lc-selftest.out).
-if grep -qE "C2.*SKIP" /tmp/lc-selftest.out; then
+# actually reads SKIP in the just-captured output ("$LC_SELFTEST_OUT").
+if grep -qE "C2.*SKIP" "$LC_SELFTEST_OUT"; then
   PASS=$((PASS+1)); printf '  \033[32mok  \033[0m %s\n' "merge-gate: NO app.config ⇒ C2 line explicitly reads SKIP (not PASS)"
 else
   FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "merge-gate: NO app.config — C2 did not report SKIP"
-  sed 's/^/        | /' /tmp/lc-selftest.out
+  sed 's/^/        | /' "$LC_SELFTEST_OUT"
 fi
 
 # crash-guard regression: a MISSING MERGE_REGEN_CMD binary must record a clean
@@ -777,18 +812,18 @@ echo work > "$R/w.txt"; git -C "$R" add -A && git -C "$R" commit -qm work-provis
 export GIT_ALLOW_PROTOCOL=file
 assert_exit_cmd 0 "merge-gate: staging is provisioned (submodules + declared gitignored config) ⇒ C3 PASSes" -- \
   node "$MG" feat/provision --repo "$R" --base main --no-fetch
-if grep -qE "staging: submodules checked out" /tmp/lc-selftest.out \
-   && grep -qE 'staging: copied gitignored "cfg/dev.yaml"' /tmp/lc-selftest.out; then
+if grep -qE "staging: submodules checked out" "$LC_SELFTEST_OUT" \
+   && grep -qE 'staging: copied gitignored "cfg/dev.yaml"' "$LC_SELFTEST_OUT"; then
   PASS=$((PASS+1)); printf '  \033[32mok  \033[0m %s\n' "merge-gate: staging provisioning is reported on stdout (submodules + copy)"
 else
   FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "merge-gate: staging provisioning was not reported"
-  sed 's/^/        | /' /tmp/lc-selftest.out
+  sed 's/^/        | /' "$LC_SELFTEST_OUT"
 fi
-if grep -qE 'staging: MERGE_STAGING_COPY_FILES: "gen.txt" is TRACKED by git — NOT copied' /tmp/lc-selftest.out; then
+if grep -qE 'staging: MERGE_STAGING_COPY_FILES: "gen.txt" is TRACKED by git — NOT copied' "$LC_SELFTEST_OUT"; then
   PASS=$((PASS+1)); printf '  \033[32mok  \033[0m %s\n' "merge-gate: a TRACKED declared copy path is REFUSED (merged tree stays authoritative)"
 else
   FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "merge-gate: a TRACKED declared copy path was not refused"
-  sed 's/^/        | /' /tmp/lc-selftest.out
+  sed 's/^/        | /' "$LC_SELFTEST_OUT"
 fi
 
 # fail-SOFT but LOUD: a DECLARED copy file that is absent from the repo must warn
@@ -843,7 +878,7 @@ assert_exit_cmd 0 "preflight: NO app.config ⇒ generic-only, exit 0" -- \
 INJ="$(new_repo)"; CLEANUP+=("$INJ"); mkdir -p "$INJ/.claude"
 INJMARK="$INJ/INJECTION_EXECUTED"
 printf 'PREFLIGHT_BUILD_DB_ENV=x[$(touch %s)]\nPREFLIGHT_BUILD_DB_HOSTPORT=127.0.0.1:5999\n' "$INJMARK" > "$INJ/.claude/app.config"
-env -u DATABASE_URL -u ZIEE_BUILD_DB_PERWORKTREE bash "$PREFLIGHT" --repo "$INJ" >/tmp/lc-selftest.out 2>&1 || true
+env -u DATABASE_URL -u ZIEE_BUILD_DB_PERWORKTREE bash "$PREFLIGHT" --repo "$INJ" >"$LC_SELFTEST_OUT" 2>&1 || true
 if [ -e "$INJMARK" ]; then
   FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "preflight: malicious PREFLIGHT_BUILD_DB_ENV EXECUTED code (injection)"
 else
@@ -1187,6 +1222,271 @@ cat >> "$D/TEST_RESULTS.md" <<'EOF'
 EOF
 git -C "$R" commit -qam negperm-prose
 lc 0 "A10: the positive control is recognized from the asserts prose (no tag required)" --phase 8 --repo "$R" --dir "$D" --base main
+echo "-- Part G: staleness-check.mjs (stale state that answers CONFIDENTLY WRONG) --"
+# ---------------------------------------------------------------------------
+# Every check below is proven BOTH ways: it fires on a genuinely stale fixture and
+# stays silent on the clean twin. A check never observed to fire is not evidence.
+
+# --- F-lib: the SELFTEST HARNESS's own shared-state bug, paired both ways ---
+# assert_exit_cmd captures each command's output to a scratch file and several
+# assertions grep it. That path used to be a hard-coded /tmp/lc-selftest.out, so
+# two concurrent suites interleaved into one file and grepped each other's text —
+# reporting a confident wrong verdict rather than failing loudly. Same class as
+# everything else in Part F, one level down: the tool checking the tool was stale.
+CONC="$(mktemp -d)"; CLEANUP+=("$CONC")
+cat > "$CONC/worker.sh" <<'WEOF'
+#!/usr/bin/env bash
+# Loops assert_exit_cmd and verifies the captured output is the output IT produced.
+set -u
+. "$1"
+tag="$2"; n="${3:-250}"; i=0
+while [ "$i" -lt "$n" ]; do
+  i=$((i+1))
+  assert_exit_cmd 0 "t$i" -- printf '%s\n' "$tag" >/dev/null 2>&1
+  grep -qx -- "$tag" "$LC_SELFTEST_OUT" 2>/dev/null || exit 1
+done
+[ "$FAIL" -eq 0 ] || exit 1
+WEOF
+conc_pair() {  # <unique|shared> — exit 0 when BOTH workers only ever saw their own output
+  local mode="$1" a b ra rb
+  if [ "$mode" = shared ]; then
+    LC_SELFTEST_OUT="$CONC/shared.out" bash "$CONC/worker.sh" "$HERE/selftest-lib.sh" AAAAAAAA 250 & a=$!
+    LC_SELFTEST_OUT="$CONC/shared.out" bash "$CONC/worker.sh" "$HERE/selftest-lib.sh" BBBBBBBB 250 & b=$!
+  else
+    env -u LC_SELFTEST_OUT bash "$CONC/worker.sh" "$HERE/selftest-lib.sh" AAAAAAAA 250 & a=$!
+    env -u LC_SELFTEST_OUT bash "$CONC/worker.sh" "$HERE/selftest-lib.sh" BBBBBBBB 250 & b=$!
+  fi
+  wait "$a"; ra=$?; wait "$b"; rb=$?
+  [ "$ra" -eq 0 ] && [ "$rb" -eq 0 ]
+}
+assert_exit_cmd 0 "selftest harness: two parallel suites with per-run scratch files do NOT clobber" -- conc_pair unique
+assert_exit_cmd 1 "selftest harness: forcing ONE shared scratch file reproduces the clobber (negative control)" -- conc_pair shared
+
+# --- F0: usage errors are exit != 0 (silence must never mean "checked and fine") ---
+sc 1 "staleness: no --repo ⇒ usage error"                       --port 1
+sc 1 "staleness: --repo pointing at a non-directory ⇒ usage error" --repo "$HERE/selftest-lib.sh"
+
+# --- F1/F2: submodule initialised, and the git -C walk-up trap ---
+# sub-origin is the submodule's upstream; parent embeds it at sdk/.
+SUBO="$(new_repo)"; CLEANUP+=("$SUBO")
+echo v1 > "$SUBO/f.txt"; git -C "$SUBO" add -A; git -C "$SUBO" commit -qm c1
+R="$(new_repo)"; CLEANUP+=("$R")
+git -C "$R" -c protocol.file.allow=always submodule add -q "$SUBO" sdk >/dev/null 2>&1
+git -C "$R" commit -qm add-sub >/dev/null 2>&1
+sc 0 "staleness: initialised submodule ⇒ clean"                 --repo "$R"
+
+# advance the submodule's upstream, then fetch so origin/main is ahead of the pin.
+echo v2 > "$SUBO/f.txt"; git -C "$SUBO" commit -qam c2
+echo v3 > "$SUBO/f.txt"; git -C "$SUBO" commit -qam c3
+git -C "$R/sdk" fetch -q origin 2>/dev/null
+# F2: being BEHIND upstream is reported but must NOT gate — pinning is often
+# deliberate, and a gate here would train everyone to ignore the tool.
+sc 0 "staleness: submodule 2 behind upstream ⇒ reported, still exit 0" --repo "$R"
+sc_says "behind" "staleness: the behind-distance is actually reported"  --repo "$R"
+
+# F1-stale: deinit ⇒ an EMPTY dir that still passes existsSync.
+git -C "$R" submodule deinit -f -q sdk >/dev/null 2>&1
+sc 1 "staleness: uninitialised (empty) submodule ⇒ REFUSED"     --repo "$R"
+# and the diagnosis must name the walk-up, because that is what misleads: git -C
+# on the empty dir answers about the PARENT repo at exit 0.
+sc_says "walks UP" "staleness: empty-submodule diagnosis names the git -C walk-up trap" --repo "$R"
+sc_says "EMPTY directory" "staleness: diagnosis names the consequence, not just the state" --repo "$R"
+
+# F1b: declared in .gitmodules but the path is gone entirely.
+rm -rf "$R/sdk"
+sc 1 "staleness: declared submodule whose path is absent ⇒ REFUSED" --repo "$R"
+# F1c: a POPULATED dir that is not its own git repo (someone copied files in, or
+# rm -rf'd its .git) — same walk-up trap, and existsSync + readdir both pass.
+mkdir -p "$R/sdk"; echo "copied" > "$R/sdk/file.txt"
+sc 1 "staleness: populated submodule dir that is not its own repo ⇒ REFUSED" --repo "$R"
+sc_says "not" "staleness: not-own-repo diagnosis names the repo it actually resolved to" --repo "$R"
+# restore for the remaining parts
+rm -rf "$R/sdk"
+git -C "$R" -c protocol.file.allow=always submodule update --init -q sdk >/dev/null 2>&1
+sc 0 "staleness: re-initialised submodule ⇒ clean again"        --repo "$R"
+
+# --- F3: a build stamp vs HEAD (the 87-commits-behind audit rig, generalised) ---
+STAMPDIR="$(mktemp -d)"; CLEANUP+=("$STAMPDIR")
+git -C "$R" rev-parse HEAD > "$STAMPDIR/fresh.stamp"
+sc 0 "staleness: build stamp == HEAD ⇒ clean"                   --repo "$R" --stamp "$STAMPDIR/fresh.stamp"
+OLDSHA="$(git -C "$R" rev-parse HEAD)"
+for i in 1 2 3; do echo "n$i" > "$R/n$i.txt"; git -C "$R" add -A; git -C "$R" commit -qm "n$i"; done
+printf 'built_from=%s\nbuilt_at=whenever\n' "$OLDSHA" > "$STAMPDIR/old.stamp"
+sc 1 "staleness: artifact built 3 commits behind HEAD ⇒ REFUSED" --repo "$R" --stamp "$STAMPDIR/old.stamp"
+sc_says "behind HEAD" "staleness: stamp diagnosis states the distance"  --repo "$R" --stamp "$STAMPDIR/old.stamp"
+echo "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" > "$STAMPDIR/alien.stamp"
+sc 1 "staleness: stamp naming a commit this repo lacks ⇒ REFUSED" --repo "$R" --stamp "$STAMPDIR/alien.stamp"
+sc 1 "staleness: missing stamp file ⇒ REFUSED (provenance unknown)" --repo "$R" --stamp "$STAMPDIR/nope.stamp"
+echo "no sha here at all" > "$STAMPDIR/nosha.stamp"
+sc 1 "staleness: stamp with no commit id ⇒ REFUSED"             --repo "$R" --stamp "$STAMPDIR/nosha.stamp"
+
+# --- F4: a RUNNING process older than the script it was launched from ---
+# Deliberately run against a PLAIN repo (no submodules, no stamp): if F4's fixtures
+# shared $R, an unrelated S1/S3 finding could make an F4 "REFUSED" case pass for the
+# WRONG reason — a test that certifies nothing.
+PR="$(new_repo)"; CLEANUP+=("$PR")
+sc 0 "staleness: --process-pattern matching nothing ⇒ clean"    --repo "$PR" --process-pattern 'zzz-no-such-process-zzz'
+sc 1 "staleness: an invalid --process-pattern regex ⇒ REFUSED (silence would prove nothing)" \
+     --repo "$PR" --process-pattern '['
+if [ -d /proc/self ]; then
+  PROCDIR="$(mktemp -d)"; CLEANUP+=("$PROCDIR")
+  PMARK="stalecheck-loop-$$"
+  cat > "$PROCDIR/$PMARK.sh" <<'LOOPEOF'
+#!/usr/bin/env bash
+while true; do sleep 2; done
+LOOPEOF
+  chmod +x "$PROCDIR/$PMARK.sh"
+  sleep 1
+  bash "$PROCDIR/$PMARK.sh" >/dev/null 2>&1 &
+  LOOPPID=$!; KILLPIDS+=("$LOOPPID")
+  sleep 1
+  # CLEAN twin: the process started AFTER the script's last write.
+  sc 0 "staleness: running process newer than its script ⇒ clean" --repo "$PR" --process-pattern "$PMARK"
+  # Now edit the script mid-run. bash parsed the whole `while` block at start, so
+  # the live loop keeps running the OLD text — reading the file suggests otherwise.
+  # Sleep past STALENESS_FRESH_MARGIN_MS (2s): an edit made within that window of
+  # launch is deliberately NOT a finding, so the fixture must clear it to test the
+  # rule rather than the margin.
+  sleep 3
+  printf '\n# a gate added after the loop started — never runs in the live process\n' >> "$PROCDIR/$PMARK.sh"
+  sc 1 "staleness: script edited AFTER the process started ⇒ REFUSED" --repo "$PR" --process-pattern "$PMARK"
+  sc_says "parsed the OLD text" "staleness: process diagnosis names the parsed-once consequence" \
+       --repo "$PR" --process-pattern "$PMARK"
+  kill "$LOOPPID" 2>/dev/null; wait "$LOOPPID" 2>/dev/null
+  sleep 1
+  sc 0 "staleness: after the stale process exits ⇒ clean again" --repo "$PR" --process-pattern "$PMARK"
+else
+  note "skip: /proc unavailable — S4 process-freshness probe is Linux-only"
+fi
+
+# --- F5: port ownership (the 'reused a sibling worktree's dev server' bug) ---
+if [ -d /proc/net ] && [ -r /proc/net/tcp ]; then
+  PORTDIR="$(mktemp -d)"; CLEANUP+=("$PORTDIR")
+  mkdir -p "$PORTDIR/mine" "$PORTDIR/sibling"
+  PORT=$(( 39000 + ($$ % 900) ))
+  sc 0 "staleness: nothing listening on the port ⇒ clean"        --repo "$PR" --port "$PORT" --expect-root "$PORTDIR/mine"
+  ( cd "$PORTDIR/sibling" && exec node -e "require('http').createServer().listen($PORT,'127.0.0.1')" ) >/dev/null 2>&1 &
+  SRVPID=$!; KILLPIDS+=("$SRVPID")
+  sleep 1
+  sc 0 "staleness: listener owned by THIS tree ⇒ clean"          --repo "$PR" --port "$PORT" --expect-root "$PORTDIR/sibling"
+  sc 1 "staleness: listener owned by a DIFFERENT tree ⇒ REFUSED" --repo "$PR" --port "$PORT" --expect-root "$PORTDIR/mine"
+  sc_says "FOREIGN owner" "staleness: port diagnosis names the foreign owner + its tree" \
+       --repo "$PR" --port "$PORT" --expect-root "$PORTDIR/mine"
+  kill "$SRVPID" 2>/dev/null; wait "$SRVPID" 2>/dev/null
+else
+  note "skip: /proc/net/tcp unavailable — S5 port-ownership probe is Linux-only"
+fi
+
+# ---------------------------------------------------------------------------
+echo "-- Part H: edit-lint-hook.mjs (cheap lints in the agent's own edit loop) --"
+# ---------------------------------------------------------------------------
+# The hook ALWAYS exits 0 (fail-open); its signal is stdout. These cases prove the
+# plumbing — discovery of both scanner dirs, the file-scoped filter, the advisory
+# arm, dedupe, and fail-open — using STUB scanners, so the selftest stays portable
+# (git + node only, no npm install, no sdk checkout). The real scanners are wired
+# by filename; the stubs stand in for them 1:1.
+HR="$(mktemp -d)"; CLEANUP+=("$HR")
+mkdir -p "$HR/sdk/packages/config/src/lint" "$HR/src-app/ui/scripts" "$HR/src-app/ui/src/mod"
+printf '{"name":"ws","private":true}\n' > "$HR/src-app/ui/package.json"
+
+# A stub scanner: scans --root for a marker and prints `<abs>:<line> <msg>`, exit 1.
+write_stub() { # <path> <marker> <msg> <exit-code>
+  cat > "$1" <<STUBEOF
+import fs from 'node:fs'; import path from 'node:path';
+const root = (process.argv.find(a => a.startsWith('--root=')) || '').split('=').slice(1).join('=');
+let hits = 0;
+for (const f of (fs.existsSync(root) ? fs.readdirSync(root) : [])) {
+  if (!/\.(ts|tsx)\$/.test(f)) continue;
+  const p = path.join(root, f);
+  fs.readFileSync(p, 'utf8').split('\n').forEach((l, i) => {
+    if (l.includes('$2')) { hits++; console.log(\`\${p}:\${i + 1}  $3\`); }
+  });
+}
+if (!hits) console.log('[stub] ✓ nothing found.');
+process.exit(hits ? $4 : 0);
+STUBEOF
+}
+write_stub "$HR/sdk/packages/config/src/lint/hardcoded-colors.mjs" "BAD_COLOR" "hardcoded color class" 1
+write_stub "$HR/src-app/ui/scripts/lint-icon-action.mjs"           "BAD_ICON"  "wrong action glyph"   1
+# ADVISORY stub: reports but exits 0, exactly like tooltip-placement/native-scroll.
+write_stub "$HR/sdk/packages/config/src/lint/tooltip-placement.mjs" "BAD_TIP"  "mixed tooltip sides"  0
+# A scanner that CRASHES must never block an edit (fail-open).
+printf 'throw new Error("scanner exploded")\n' > "$HR/sdk/packages/config/src/lint/adjacent-inline.mjs"
+
+M="$HR/src-app/ui/src/mod"
+printf 'export const Clean = () => null\n'                    > "$M/Clean.tsx"
+printf 'export const Dirty = () => "BAD_COLOR"\n'             > "$M/Dirty.tsx"
+printf 'export const Icon = () => "BAD_ICON"\n'               > "$M/Icon.tsx"
+printf 'export const Tip = () => "BAD_TIP"\n'                 > "$M/Tip.tsx"
+
+hk 1 "edit-lint: fires on a violating .tsx (sdk scanner dir)"      "$M/Dirty.tsx"
+hk_says "hardcoded color class" "edit-lint: the finding carries the scanner's message" "$M/Dirty.tsx"
+hk_says "Dirty.tsx" "edit-lint: the finding names the edited file"                     "$M/Dirty.tsx"
+hk 1 "edit-lint: fires on a violating .tsx (app-local scripts dir)" "$M/Icon.tsx"
+hk 1 "edit-lint: an ADVISORY scanner (exit 0 + output) still reports" "$M/Tip.tsx"
+# THE control that matters: Clean.tsx sits in the SAME directory as three
+# violating files. A dir-scoped scanner sees all four; the hook must report none,
+# or the agent learns to ignore it.
+hk 0 "edit-lint: silent on a clean file whose NEIGHBOURS all violate"  "$M/Clean.tsx"
+# fail-open, four ways
+hk 0 "edit-lint: silent when a scanner throws (fail-open)"            "$M/Clean.tsx"
+hk 0 "edit-lint: silent for a non-source extension"                   "$HR/src-app/ui/package.json"
+hk 0 "edit-lint: silent for a file that does not exist"               "$HR/src-app/ui/src/mod/ghost.tsx"
+assert_exit_cmd 0 "edit-lint: silent on malformed hook stdin"    -- hk_raw_impl 'not json at all'
+assert_exit_cmd 0 "edit-lint: silent on hook stdin with no file" -- hk_raw_impl '{"tool_input":{}}'
+# An UNINITIALISED sdk submodule (the S1 condition) must degrade to silence here,
+# never to a phantom failure — staleness-check is what diagnoses it out loud.
+mv "$HR/sdk/packages/config/src/lint" "$HR/lint-parked"
+hk 0 "edit-lint: silent when the sdk lint dir is missing (uninitialised submodule)" "$M/Dirty.tsx"
+mv "$HR/lint-parked" "$HR/sdk/packages/config/src/lint"
+hk 1 "edit-lint: fires again once the sdk lint dir is back"           "$M/Dirty.tsx"
+# Duplicate lines from overlapping --root dirs collapse to one.
+DUPES="$(printf '{"tool_input":{"file_path":"%s"}}' "$M/Dirty.tsx" | node "$HOOK" 2>/dev/null | grep -c 'hardcoded color class' || true)"
+assert_exit_cmd 0 "edit-lint: identical findings are deduped (exactly 1 line)" -- test "$DUPES" = "1"
+
+# --- G-rust: rustfmt arm, diff-scoped ---
+if command -v rustfmt >/dev/null 2>&1; then
+  RR="$(new_repo)"; CLEANUP+=("$RR")
+  mkdir -p "$RR/src"
+  printf '[package]\nname = "f"\nversion = "0.1.0"\nedition = "2021"\n' > "$RR/Cargo.toml"
+  cat > "$RR/src/lib.rs" <<'RSEOF'
+pub fn a() -> i32 {
+    1
+}
+
+pub fn b(  ) ->i32{
+let x=2;
+    x
+}
+
+pub fn c() -> i32 {
+    3
+}
+RSEOF
+  git -C "$RR" add -A; git -C "$RR" commit -qm baseline
+  # 84 of a 120-file sample of the real server tree already fail rustfmt at HEAD,
+  # so an un-scoped rustfmt arm would be ~70% noise. It must blame only the lines
+  # this working tree changed.
+  hk 0 "edit-lint(rust): pre-existing unformatted hunk, no edit ⇒ silent"      "$RR/src/lib.rs"
+  printf 'pub fn d(  )->i32{ 4 }\n' >> "$RR/src/lib.rs"
+  hk 1 "edit-lint(rust): an edit that introduces bad formatting ⇒ fires"       "$RR/src/lib.rs"
+  hk_says "rustfmt" "edit-lint(rust): the finding names rustfmt + the fix"     "$RR/src/lib.rs"
+  git -C "$RR" checkout -q -- src/lib.rs
+  # An edit in a WELL-FORMATTED region must not resurrect the pre-existing hunk.
+  printf 'pub fn e() -> i32 {\n    5\n}\n' >> "$RR/src/lib.rs"
+  hk 0 "edit-lint(rust): a well-formatted edit does not blame the old hunk"    "$RR/src/lib.rs"
+  # A brand-new UNTRACKED file has no baseline ⇒ every hunk is this edit's.
+  printf 'pub fn z(  )->i32{ 9 }\n' > "$RR/src/new.rs"
+  hk 1 "edit-lint(rust): untracked new file has no baseline ⇒ all hunks fire"  "$RR/src/new.rs"
+  # The hook must never write to the tree it is inspecting.
+  git -C "$RR" checkout -q -- src/lib.rs; rm -f "$RR/src/new.rs"
+  BEFORE="$(git -C "$RR" status --porcelain)"
+  printf '{"tool_input":{"file_path":"%s"}}' "$RR/src/lib.rs" | node "$HOOK" >/dev/null 2>&1
+  assert_exit_cmd 0 "edit-lint: the hook never mutates the tree it inspects" \
+    -- test "$BEFORE" = "$(git -C "$RR" status --porcelain)"
+else
+  note "skip: rustfmt not installed — the Rust arm's paired controls need it"
+fi
 
 echo "== $PASS passed, $FAIL failed =="
 [ "$FAIL" -eq 0 ]

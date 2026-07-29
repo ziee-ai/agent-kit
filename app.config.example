@@ -97,3 +97,13 @@ LIFECYCLE_OPENAPI_SPECS=src-app/ui/openapi/openapi.json src-app/desktop/ui/opena
 # submodules etc.), space-separated. `*.log` scratch files are always ignored
 # on top of this. Default = ziee's vendored pgvector submodule.
 LIFECYCLE_CLEAN_TREE_IGNORE=vendor/pgvector
+
+# LIGHT-tier size threshold: the maximum number of changed lines (added+deleted
+# in base...HEAD, excluding .lifecycle artifacts and generated openapi/types) a
+# diff may have and still qualify for the LIGHT track. Size is necessary but not
+# sufficient — any ONE of {new permission, migration, new module, public
+# API/schema change} forces HEAVY regardless of size. LIGHT requires the core
+# artifacts and ONE audit round; every deterministic hardening check runs in
+# both tiers. Default 800 — a review-capacity judgement (two angles saturate
+# somewhere in the high hundreds of lines), not a blast-radius one.
+LIFECYCLE_LIGHT_MAX_LINES=800

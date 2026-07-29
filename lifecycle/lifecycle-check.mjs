@@ -99,6 +99,24 @@ const OPENAPI_SPECS = (APP.LIFECYCLE_OPENAPI_SPECS
 // vendored pgvector submodule.
 const CLEAN_TREE_IGNORE = (APP.LIFECYCLE_CLEAN_TREE_IGNORE || 'vendor/pgvector')
   .split(/\s+/).filter(Boolean);
+// LIFECYCLE_LIGHT_MAX_LINES: the LIGHT-tier size threshold (added+deleted lines in
+// base...HEAD, excluding lifecycle artifacts + generated files). See classifyTier.
+// The default is a REVIEW-CAPACITY judgement, not a measurement: two angles
+// reading one diff carefully saturate somewhere in the high hundreds of lines,
+// past which "one audit round covered it" stops being credible. It is NOT a
+// blast-radius judgement — that is what the four signals in classifyTier are
+// for, and any one of them forces HEAVY at any size.
+//
+// Calibration data (all we could measure directly — 3 completed features):
+// 1132, 1653 and 10923 changed lines. None qualifies at 800, so on this evidence
+// LIGHT is a minority track, and the sample is biased (these features were
+// selected for verification because they were interesting, not at random).
+// Revisit against the full feature set; that is why it is a config key and not a
+// literal.
+const LIGHT_MAX_LINES = (() => {
+  const n = parseInt(APP.LIFECYCLE_LIGHT_MAX_LINES || '', 10);
+  return Number.isFinite(n) && n > 0 ? n : 800;
+})();
 
 let featureDir;
 if (dirArg) {
@@ -194,6 +212,24 @@ const RE_FIDELITY = /^-\s*\*\*(INV-[A-Za-z0-9._-]+)\*\*.*?fidelity\s*:\s*(UPHELD
 // flags it as the RESTRICTED-USER spec (logs in as a user LACKING the perm and
 // asserts the feature UI is ABSENT — not merely 403-on-use).
 const RE_TEST_NEGPERM = /\[\s*negative-perm\s*\]/i;
+// A10 POSITIVE CONTROL. "The UI is absent for a restricted user" passes
+// VACUOUSLY if the page never loaded at all — a blank render, a failed route, a
+// 500, a login bounce all satisfy "the affordance is not visible". One real spec
+// was confounded exactly this way: it would have passed with the permission gate
+// DELETED, because it never established that the restricted user reached the
+// subject at all. The negative-perm spec must therefore also assert the SUBJECT
+// LOADS for that same user — the control that makes "absent" mean "gated"
+// instead of "never rendered". Canonical form is an explicit [positive-control]
+// tag; a clear affirmative claim in the `asserts:` prose is also accepted (same
+// grammar A9 uses for its deny-path prose).
+const RE_TEST_POSCONTROL = /\[\s*positive-control\s*\]/i;
+const RE_POSCONTROL_PROSE = new RegExp([
+  // "can open the page", "still renders", "does load" — but NOT "still sees NO x"
+  /\b(?:can|does|still|successfully)\s+(?:\w+\s+){0,2}(?:open|opens|load|loads|render|renders|reach|reaches|view|views|access|accesses|obtain|obtains|see|sees)\b(?!\s*(?:no|not|none|never|nothing|zero|neither)\b)/.source,
+  /\bpage\s+(?:still\s+)?(?:loads|renders)\b/.source,
+  /\b(?:loads|renders|is\s+reachable|is\s+visible|is\s+served)\s+for\s+(?:that|the|a|an)\b/.source,
+  /\b(?:HTTP\s*)?200\b/.source,
+].join('|'), 'i');
 // DECISION:    ### DEC-1: question   then **Resolution:** ...  **Basis:** ...
 const RE_DEC = /^#{2,6}\s*(DEC-[A-Za-z0-9._-]+)\s*:/;
 // DRIFT entry: - **DRIFT-1.2** — verdict: plan-wins — text
@@ -226,10 +262,11 @@ function parseTests() {
     const file = (RE_TEST_FILE.exec(ln) || [])[1];
     const asserts = (RE_TEST_ASSERTS.exec(ln) || [])[1];
     const negPerm = RE_TEST_NEGPERM.test(ln);
+    const posControl = RE_TEST_POSCONTROL.test(ln) || RE_POSCONTROL_PROSE.test(asserts || '');
     const acceptance = RE_TEST_ACCEPTANCE.test(ln);
     const invRaw = (RE_TEST_INVARIANT.exec(ln) || [])[1] || '';
     const invariants = invRaw.split(/[,\s]+/).map((s) => s.trim()).filter((s) => /^INV-/.test(s));
-    tests.push({ id: idm[1], tier, covers, file: file && file.trim(), asserts: asserts && asserts.trim(), negPerm, acceptance, invariants, line: ln });
+    tests.push({ id: idm[1], tier, covers, file: file && file.trim(), asserts: asserts && asserts.trim(), negPerm, posControl, acceptance, invariants, line: ln });
   }
   return tests;
 }
@@ -377,6 +414,94 @@ function planFrontendWorkspaces() {
 // Frontend workspaces touched by the real diff (empty if not implemented yet).
 function diffFrontendWorkspaces() {
   try { return frontendWorkspacesOf(changedFilePaths()); } catch { return new Set(); }
+}
+
+// ---------------------------------------------------------------------------
+// TIER — scale gate weight to BLAST RADIUS, not diff size alone.
+// ---------------------------------------------------------------------------
+// The evidence says the process is not uniformly heavy: across 22 completed
+// features the MEDIAN ran ONE fix round and 17 of 22 ran <=3. What it has is an
+// unbounded TAIL. But a 3-line auth change and a 900-line generated-registry
+// diff currently get identical treatment, which is the wrong axis: what should
+// buy extra rounds is how far a mistake can reach, not how many lines moved.
+//
+// LIGHT = small AND none of the four blast-radius signals:
+//   • a new permission        (an authz mistake is unrecoverable + invisible)
+//   • a migration             (a schema mistake is not revertible in place)
+//   • a new module            (a new seam nothing has exercised yet)
+//   • a public API/schema change (every downstream consumer inherits the error)
+//
+// What LIGHT changes: phase 7 accepts ONE completed audit round instead of
+// requiring a re-audit round that finds nothing. What it does NOT change:
+// EVERY deterministic hardening check (A1-A10, R2-5, FB-7, the invariant ↔
+// acceptance-test binding) runs identically in both tiers. Those are nearly
+// free and they are what catch the silent failures — tiering them would trade
+// away the cheap half of the value to save none of the cost.
+//
+// The tier is printed on the header line so nobody has to guess which track
+// they are on, or why.
+const RE_ADDED_MIGRATION = /(?:^|\/)migrations\/[^/]*\.sql$/;
+const RE_ADDED_MODULE = /(?:^|\/)(?:mod\.rs|module\.tsx)$/;
+const RE_PUBLIC_API_ARTIFACT = /(?:^|\/)openapi\.json$|(?:^|\/)api-client\/types\.ts$/;
+const RE_ROUTE_REGISTRATION = /\.api_route\s*\(/;
+// Added+deleted line count over the SAME exclude set the audit uses.
+function diffLineCount() {
+  let out;
+  try { out = git(repo, 'diff', `${baseRef}...HEAD`, '--numstat', '--no-color', '--', '.', ...DIFF_EXCLUDES); }
+  catch { try { out = git(repo, 'diff', baseRef, '--numstat', '--no-color', '--', '.', ...DIFF_EXCLUDES); } catch { return null; } }
+  let n = 0;
+  for (const ln of out.split(/\r?\n/)) {
+    const m = /^(\d+|-)\t(\d+|-)\t/.exec(ln);
+    if (!m) continue;
+    if (m[1] !== '-') n += parseInt(m[1], 10);
+    if (m[2] !== '-') n += parseInt(m[2], 10);
+  }
+  return n;
+}
+// Files this branch ADDS (for the migration / new-module signals).
+function addedFilePaths() {
+  for (const range of [[`${baseRef}...HEAD`], [baseRef]]) {
+    try { return git(repo, 'diff', '--diff-filter=A', '--name-only', '--no-color', ...range, '--', '.').split(/\r?\n/).map((s) => s.trim()).filter(Boolean); }
+    catch { /* try the next form */ }
+  }
+  return null;
+}
+// Every changed path INCLUDING the generated artifacts (which changedFilePaths
+// deliberately excludes) — a regenerated openapi.json IS the public-API signal.
+function changedFilePathsWithGenerated() {
+  for (const range of [[`${baseRef}...HEAD`], [baseRef]]) {
+    try { return git(repo, 'diff', '--name-only', '--no-color', ...range, '--', '.').split(/\r?\n/).map((s) => s.trim()).filter(Boolean); }
+    catch { /* try the next form */ }
+  }
+  return null;
+}
+let _tierCache = null;
+function classifyTier() {
+  if (_tierCache) return _tierCache;
+  const heavy = [];
+  const lines = diffLineCount();
+  if (lines == null) {
+    // Base unresolvable → we cannot measure blast radius, so we do not get to
+    // relax anything. Default to HEAVY (fail-closed on an unmeasurable diff).
+    _tierCache = { tier: 'HEAVY', lines: null, reasons: [`the diff vs '${baseRef}' could not be measured`] };
+    return _tierCache;
+  }
+  if (lines >= LIGHT_MAX_LINES) heavy.push(`${lines} changed lines >= ${LIGHT_MAX_LINES}`);
+  if (introducesGatingPerm()) heavy.push('introduces a user-facing permission');
+  const added = addedFilePaths() || [];
+  const migs = added.filter((p) => RE_ADDED_MIGRATION.test(p));
+  if (migs.length) heavy.push(`adds ${migs.length} migration(s)`);
+  const mods = added.filter((p) => RE_ADDED_MODULE.test(p));
+  if (mods.length) heavy.push(`adds ${mods.length} new module(s)`);
+  const changed = changedFilePathsWithGenerated() || [];
+  const apiArtifacts = changed.filter((p) => RE_PUBLIC_API_ARTIFACT.test(p));
+  const addsRoute = diffAddedLines().some((a) => RE_ROUTE_REGISTRATION.test(a.text));
+  if (apiArtifacts.length || addsRoute)
+    heavy.push(apiArtifacts.length ? 'changes the public API/schema (openapi.json / api-client types)' : 'registers a new API route');
+  _tierCache = heavy.length
+    ? { tier: 'HEAVY', lines, reasons: heavy }
+    : { tier: 'LIGHT', lines, reasons: [`${lines} changed lines < ${LIGHT_MAX_LINES}; no new permission, migration, module, or public API/schema change`] };
+  return _tierCache;
 }
 
 function parseCoverage() {
@@ -640,10 +765,56 @@ function checkA5() {
   return [];
 }
 
-// A7: boot/runtime canary result line — a UI diff must record that the runtime-
-// health/gate:ui pass ran (a non-booting app or a root ErrorBoundary crash is
-// otherwise invisible; "green e2e" can ship a non-rendering app).
-const RE_BOOT_CANARY = /(?:gate:ui|boot[ -]?canary|runtime[ -]?health)\s*\(\s*([A-Za-z0-9._/\- ]+?)\s*\)\s*:?\s*.*?\b(PASS|FAIL)\b/i;
+// ---------------------------------------------------------------------------
+// A7 — boot/runtime canary, BASELINE-CONTROLLED.
+// ---------------------------------------------------------------------------
+// A UI diff must record that the runtime-health/gate:ui pass ran: a non-booting
+// app or a root ErrorBoundary crash is otherwise invisible, and "green e2e" can
+// ship a non-rendering app. That part stands.
+//
+// What changed: A7 used to demand an ABSOLUTE `gate:ui (<ws>): PASS`. On a
+// loaded shared box that is a tax on the author for the box's state ("took three
+// attempts"), and it is a tax that BUYS a false signal — one recorded PASS
+// turned out to be the exit code of a `tail` in a pipeline while the real output
+// said `GATE FAILED`. An absolute bar that the environment can move is a bar
+// people learn to route around.
+//
+// So the requirement is now a CONTROLLED comparison: the branch must be no worse
+// than its base. Two accepted forms, both still one line:
+//   absolute:    `gate:ui (ui): PASS`             — 0 findings cannot be worse
+//                                                   than any base; still valid
+//   comparative: `gate:ui (ui): branch 3 vs base 5`
+//                `gate:ui (ui): branch=3 base=5`  — passes iff branch <= base
+// The absolute form keeps every existing artifact valid; the comparative form is
+// the relief, and it is what an author on a busy box should record.
+const RE_CANARY_LINE = /(?:gate:ui|boot[ -]?canary|runtime[ -]?health)\s*\(\s*([A-Za-z0-9._/\- ]+?)\s*\)\s*:?\s*(.*)$/i;
+const RE_CANARY_COMPARATIVE = /branch\s*[=:]?\s*(\d+)[\s\S]*?base\s*[=:]?\s*(\d+)|(\d+)\s*(?:findings?\s*)?(?:vs\.?|versus|against)\s*(?:a\s*)?base\s*(?:of\s*)?(\d+)/i;
+const RE_CANARY_ABSOLUTE = /\b(PASS|FAIL)\b/i;
+// The false-PASS catch — the part of the old A7 worth keeping. A recorded PASS
+// that sits in the same file as pasted output saying the gate FAILED is not a
+// result, it is a pipeline bug (`… | tail` returns tail's exit code). Cheap,
+// and it caught a real one.
+const RE_GATE_FAILED_MARKER = /\bgate\s*(?::|-|—)?\s*failed\b|\bgate:ui\b[^\n]*\bfailed\b|\bnpm run check\b[^\n]*\bfailed\b/i;
+// → Map(workspace-label → { ok:boolean, how:string }) parsed from TEST_RESULTS.md
+function parseCanaryLines(text) {
+  const out = new Map();
+  for (const ln of text.split(/\r?\n/)) {
+    const m = RE_CANARY_LINE.exec(ln);
+    if (!m) continue;
+    const ws = m[1].trim().toLowerCase();
+    const tail = m[2] || '';
+    const cmp = RE_CANARY_COMPARATIVE.exec(tail);
+    if (cmp) {
+      const branch = parseInt(cmp[1] !== undefined ? cmp[1] : cmp[3], 10);
+      const base = parseInt(cmp[2] !== undefined ? cmp[2] : cmp[4], 10);
+      out.set(ws, { ok: branch <= base, how: `branch ${branch} vs base ${base}`, comparative: true });
+      continue;
+    }
+    const abs = RE_CANARY_ABSOLUTE.exec(tail);
+    if (abs) out.set(ws, { ok: abs[1].toUpperCase() === 'PASS', how: abs[1].toUpperCase(), comparative: false });
+  }
+  return out;
+}
 
 // A8: a diff that adds a built-in MCP server must include BOTH the
 // auto_attach_builtin_ids AND is_builtin_server_id edits (else it registers but
@@ -729,7 +900,15 @@ function negPermE2eTests(tests) {
 function checkA10Enumeration() {
   if (!introducesGatingPerm()) return [];
   const tests = parseTests() || [];
-  if (negPermE2eTests(tests).length > 0) return [];
+  const neg = negPermE2eTests(tests);
+  if (neg.length > 0) {
+    // The negative alone is confounded: it passes whether the UI is GATED or
+    // merely NEVER RENDERED. Require the positive control on the same spec.
+    const uncontrolled = neg.filter((t) => !t.posControl);
+    if (uncontrolled.length === neg.length)
+      return [`A10: the restricted-user e2e (${uncontrolled.map((t) => t.id).join(', ')}) asserts only that the UI is ABSENT — that is a CONFOUNDED test: it passes identically when the page never loaded (a failed route, a login bounce, a render crash), so it would go green with the permission gate DELETED. The same spec must also assert the subject page/resource LOADS for that restricted user. Add a [positive-control] tag and state it in the asserts, e.g. "… the Foo page LOADS for that user and its nav entry/composer/Save button are ABSENT".`];
+    return [];
+  }
   const misTagged = tests.filter((t) => t.negPerm && t.tier !== 'e2e');
   const hint = misTagged.length
     ? ` (found a [negative-perm] tag on ${misTagged.map((t) => t.id).join(', ')} but not at tier: e2e — a 403/deny test is A9, not A10; the restricted-user proof MUST be an e2e that renders the UI).`
@@ -1018,12 +1197,159 @@ function phase6() {
   // for them, and this fires only when they are present but nothing qualifies.
   const usesCorroboration = ledger.some((r) => r.corroborated_by !== undefined || r.oracle_confirmed !== undefined || r.promoted !== undefined);
   if (usesCorroboration) {
-    const promoted = ledger.filter((r) => r.promoted === true || r.corroborated_by >= 2 || r.oracle_confirmed === true
-      || /^(security|data-loss|authz|high)$/i.test(String(r.severity || '')));
+    const promoted = ledger.filter(isPromotedFinding);
     if (promoted.length === 0)
       g.push('LEDGER.jsonl: records corroboration fields but no finding qualifies as promoted (corroborated_by >= 2, oracle_confirmed, or severity in {security,data-loss,authz,high}) — the fix loop should work from promoted findings, not the raw union of every angle.');
   }
   return { present: true, gaps: g };
+}
+
+// ---------------------------------------------------------------------------
+// T1 — capture-recapture estimate of the defects REMAINING.
+// ---------------------------------------------------------------------------
+// The inspection literature never terminates on an observation ("a round found
+// 0"); it terminates on an ESTIMATE of what is still in the artifact. With two
+// angles per round we already record the one input that estimate needs — the
+// OVERLAP between them (`corroborated_by`) — and until now we threw it away.
+//
+// Two samples ⇒ Lincoln-Petersen: N̂ = n1·n2/m. LP is badly biased upward (and
+// undefined) at small m, so we use the CHAPMAN correction, which is
+// near-unbiased for small samples and defined at m = 0:
+//
+//     N̂ = (n1+1)(n2+1)/(m+1) − 1
+//
+//   n1 = findings angle A reported   n2 = findings angle B reported
+//   m  = findings BOTH reported (a row with corroborated_by >= 2)
+//
+// remaining = N̂ − observed. We then scale by the observed promoted fraction to
+// get the quantity the loop actually cares about: estimated remaining PROMOTED
+// defects. Terminate when that is < 1 — i.e. the model says there is less than
+// one real defect left to find, so another round buys reviewer noise.
+//
+// ASSUMPTIONS — and they are NOT satisfied here. State them plainly:
+//   1. EQUAL CATCHABILITY: every defect is equally likely to be caught. False —
+//      defects vary enormously in obviousness, and heterogeneous catchability
+//      biases N̂ DOWNWARD (the easy defects are over-represented in the overlap,
+//      which inflates m, which shrinks N̂).
+//   2. INDEPENDENCE of the two samples. Also false, and worse here than in the
+//      human-inspection studies the model comes from: our two "angles" are two
+//      PROMPTS TO ONE MODEL. They share weights, training data, and whatever the
+//      diff makes salient, so they co-miss the same defects and co-find the same
+//      defects. Positive dependence inflates m ⇒ deflates N̂.
+//   Both errors point the SAME way: this estimate is biased LOW. It is a floor
+//   on remaining defects, not a measurement, and it is why T1 is an ADDITIONAL
+//   termination condition (satisfied OR the decay rule) rather than a
+//   replacement for one — and why the guard-substitution tripwire and the
+//   round cap still apply on top of it.
+//
+// Small-sample floor: below these counts the estimator's variance swamps its
+// value, so we decline to estimate rather than guess. The decay rule then
+// decides alone — which is also what happens for any ledger that does not
+// record `corroborated_by` at all (every pre-existing one). T1 can only ever
+// ADD a way to terminate; it can never fail a branch.
+const T1_MIN_OBSERVED = 5;   // distinct findings in the scoped round
+const T1_MIN_OVERLAP = 2;    // findings both angles reported
+// A finding becomes WORK (see phase 6) when corroborated by >=2 angles,
+// oracle-confirmed, or high-severity. One predicate, used by phase 6 and T1.
+function isPromotedFinding(r) {
+  return r.promoted === true
+    || Number(r.corroborated_by) >= 2
+    || r.oracle_confirmed === true
+    || /^(security|data-loss|authz|high)$/i.test(String(r.severity || ''));
+}
+// A ledger row that records a REAL finding (not one the reviewer withdrew).
+function isRejectedFinding(r) {
+  return /^\s*(rejected|false[-\s]?positive|dismissed|invalid|not[-\s]a[-\s]bug|no[-\s]finding)/i
+    .test(String(r.status || r.verdict || ''));
+}
+// Scope the ledger to the round the estimate is about: the highest explicit
+// `round` if the ledger carries one, else the whole file (the phase-6 case).
+function scopedLedgerRound() {
+  const ledger = parseLedger();
+  if (!ledger) return null;
+  const rows = ledger.filter((r) => !r.__parse_error);
+  const nums = rows.map((r) => Number(r.round)).filter((n) => Number.isFinite(n));
+  if (!nums.length) return { rows, round: null, label: 'the whole ledger' };
+  const last = Math.max(...nums);
+  return { rows: rows.filter((r) => Number(r.round) === last), round: last, label: `round ${last}` };
+}
+function t1Estimate() {
+  const scope = scopedLedgerRound();
+  if (!scope) return { ok: false, why: 'LEDGER.jsonl is missing' };
+  const found = scope.rows.filter((r) => !isRejectedFinding(r));
+  if (!found.some((r) => r.corroborated_by !== undefined))
+    return { ok: false, why: `no finding in ${scope.label} records \`corroborated_by\`` };
+  const angles = [...new Set(found.map((r) => String(r.angle || '').toLowerCase()).filter(Boolean))];
+  if (angles.length !== 2)
+    return { ok: false, why: `a two-sample estimate needs exactly 2 angles; ${scope.label} has ${angles.length} (${angles.join(', ') || 'none'})` };
+  let m = 0, sA = 0, sB = 0;
+  for (const r of found) {
+    if (Number(r.corroborated_by) >= 2) m++;
+    else if (String(r.angle || '').toLowerCase() === angles[0]) sA++;
+    else sB++;
+  }
+  const observed = m + sA + sB;
+  const n1 = m + sA, n2 = m + sB;
+  if (observed < T1_MIN_OBSERVED || m < T1_MIN_OVERLAP)
+    return { ok: false, why: `${scope.label} has ${observed} finding(s) with ${m} corroborated — below the small-sample floor (>=${T1_MIN_OBSERVED} observed, >=${T1_MIN_OVERLAP} overlapping) at which a two-sample estimate carries information` };
+  const nHat = ((n1 + 1) * (n2 + 1)) / (m + 1) - 1;        // Chapman
+  const remaining = Math.max(0, nHat - observed);
+  const promotedFrac = observed ? found.filter(isPromotedFinding).length / observed : 0;
+  const remainingPromoted = remaining * promotedFrac;
+  return {
+    ok: true, scope: scope.label, angles, n1, n2, m, observed, nHat, remaining, promotedFrac, remainingPromoted,
+    satisfied: remainingPromoted < 1,
+  };
+}
+function t1Note(t1) {
+  if (!t1.ok) return `T1 (capture-recapture) not estimable — ${t1.why}; the decay rule decides alone.`;
+  return `T1 (capture-recapture, ${t1.scope}): n1=${t1.n1} n2=${t1.n2} overlap=${t1.m} → Chapman N̂=${t1.nHat.toFixed(1)} vs ${t1.observed} observed ⇒ ~${t1.remaining.toFixed(1)} defect(s) unfound, ~${t1.remainingPromoted.toFixed(2)} of them promotable. ${t1.satisfied ? 'SATISFIED (< 1).' : 'not satisfied (>= 1).'} Biased LOW — two prompts to one model are not independent samples.`;
+}
+
+// ---------------------------------------------------------------------------
+// Guard-substitution tripwire — a concentration measure, not another decay test.
+// ---------------------------------------------------------------------------
+// When most of a round's findings land on ONE test/guard file, the loop has
+// stopped auditing the feature and started playing whack-a-mole with a guard.
+// The real case: one feature's rounds 13-17 put 46 of 59 findings on a single
+// hand-written AST source-guard; round 17 was 21 of 22. The correct action is to
+// REPLACE the syntactic guard with a behavioural test — a guard that
+// pattern-matches a SEMANTIC property has an unbounded evasion space, so zero
+// findings is unreachable by construction and each round just finds another
+// spelling.
+//
+// This is NOT redundant with the decay rule, and the same feature proves it: at
+// its round 12 the concentration was 8 of 9 (89%) on that guard while the
+// profile was still DECAYING — the decay rule said "converging fine" and the
+// abort did not fire for another five rounds. Concentration detects the wrong
+// KIND of work; decay only detects the wrong RATE of it.
+//
+// Opt-in on data presence: needs per-round attribution (`round` + `file` on the
+// ledger rows). A ledger without it is not guessed at.
+const GUARD_CONCENTRATION = 0.60;
+const GUARD_MIN_FINDINGS = 5;   // below this, a "share" is noise
+const GUARD_MIN_ROUND = 2;      // round 1 may legitimately concentrate on the new tests
+// Only a TEST or GUARD file triggers this. A round concentrating on the one
+// source file the feature is building is normal and must not fire.
+const RE_GUARD_FILE = /(?:^|\/)tests?\/|[._-](?:test|spec)\.[cm]?[jt]sx?$|_test\.rs$|(?:^|\/)tests\.rs$|guard/i;
+function checkGuardSubstitution() {
+  const scope = scopedLedgerRound();
+  if (!scope || scope.round == null || scope.round < GUARD_MIN_ROUND) return { gaps: [], note: null };
+  const found = scope.rows.filter((r) => !isRejectedFinding(r) && r.file);
+  if (found.length < GUARD_MIN_FINDINGS) return { gaps: [], note: null };
+  const byFile = new Map();
+  for (const r of found) byFile.set(String(r.file), (byFile.get(String(r.file)) || 0) + 1);
+  const [file, n] = [...byFile.entries()].sort((a, b) => b[1] - a[1])[0];
+  const share = n / found.length;
+  const pct = Math.round(share * 100);
+  if (share < GUARD_CONCENTRATION)
+    return { gaps: [], note: `guard-substitution tripwire: silent — ${scope.label}'s top file holds ${n}/${found.length} (${pct}%) findings (${file}), under the ${Math.round(GUARD_CONCENTRATION * 100)}% concentration threshold.` };
+  if (!RE_GUARD_FILE.test(file))
+    return { gaps: [], note: `guard-substitution tripwire: silent — ${scope.label} is ${pct}% concentrated on ${file}, but that is a SOURCE file, not a test/guard. Concentrating on the code under construction is normal work.` };
+  return {
+    gaps: [`GUARD-SUB: ${pct}% of ${scope.label}'s confirmed findings (${n}/${found.length}) target ONE test/guard file — \`${file}\`. STOP the loop and escalate: the audit is no longer finding defects in the feature, it is finding evasions of a guard. A guard that pattern-matches a SEMANTIC property has an unbounded evasion space, so 0 findings is unreachable by construction and each round yields another spelling. Replace it with a test that asserts the BEHAVIOUR the guard was standing in for, then restart the loop against the new artifact — do NOT write another predicate.`],
+    note: null,
+  };
 }
 
 // Phase 7 termination. "Repeat until a round yields 0" is UNSOUND: a reviewer
@@ -1040,6 +1366,7 @@ const FIX_LOOP_ABORT_MIN_ROUND = 5;  // never abort before this: findings can le
 const FIX_LOOP_ROUND_CAP = 6;
 function phase7() {
   const g = [];
+  const notes = [];
   const rounds = glob('FIX_ROUND');
   if (rounds.length === 0) return { present: false, gaps: ['no FIX_ROUND-<n>.md files (fix/re-audit loop not started)'] };
 
@@ -1051,12 +1378,24 @@ function phase7() {
   const last = rounds[rounds.length - 1];
   if (profile[profile.length - 1] == null) {
     g.push(`${last.file}: missing "**New confirmed findings:** <N>" summary line`);
-    return { present: true, gaps: g };
+    return { present: true, gaps: g, notes };
   }
 
   const known = profile.filter((n) => n != null);
   const fr = profile[profile.length - 1];
   const r = profile.length;
+
+  // Guard-substitution tripwire — runs in BOTH tiers and regardless of the
+  // profile shape: it is the one signal that says the loop is auditing the
+  // wrong artifact, and it fires while the decay rule still reads "converging".
+  const guard = checkGuardSubstitution();
+  for (const x of guard.gaps) g.push(x);
+  if (guard.note) notes.push(guard.note);
+
+  // T1 — the estimate. Recorded on every run so the number is visible whether or
+  // not it fires, and so a ledger that cannot support one says why.
+  const t1 = t1Estimate();
+  notes.push(t1Note(t1));
 
   // Decay test over the trailing window: the final round must be below the
   // median of what came before. Cheap, and it is the one rule that separates the
@@ -1065,20 +1404,52 @@ function phase7() {
   const median = (a) => { if (!a.length) return Infinity; const s = [...a].sort((x, y) => x - y); const h = s.length >> 1; return s.length % 2 ? s[h] : (s[h - 1] + s[h]) / 2; };
   const decaying = prior.length < 2 || fr < median(prior);
 
-  if (fr === 0) {
-    // Converged. Only flag the shape when there was enough history to judge it.
-    if (!decaying && prior.length >= 3) g.push(`${last.file}: reached 0 findings but the profile did not decay (${known.join(', ')}) — a single zero round is an observation, not an estimate. Confirm the round genuinely re-audited the current diff before treating this as converged.`);
-    return { present: true, gaps: g };
+  // LIGHT track: one completed audit round is the requirement. A change with no
+  // blast radius does not earn a re-audit round that finds nothing — that round
+  // is pure cost on the 17-of-22 features that were already going to stop here.
+  // Only relaxes at exactly one round; a LIGHT feature that chose to keep going
+  // has the profile data, so the normal rules judge it.
+  const tier = classifyTier();
+  if (tier.tier === 'LIGHT' && r === 1) {
+    notes.push(`LIGHT track: ONE completed audit round satisfies phase 7 (${fr} finding(s) recorded in ${last.file}; fix them in-round). Every deterministic hardening check still applies.`);
+    return { present: true, gaps: g, notes };
   }
 
-  if (r >= FIX_LOOP_ABORT_MIN_ROUND && !decaying) {
+  // A flat-or-rising profile at round >= 5 is the ABORT state: it falsifies the
+  // decreasing-detection assumption that EVERY defect-estimation model rests on
+  // — including T1's. So T1 may NOT rescue it. An estimate computed from a model
+  // the data has already contradicted is not evidence; using it here would
+  // convert the one outcome the loop gained ("this artifact was not ready for
+  // audit") back into a silent pass. T1 may override the round CAP (that is a
+  // budget, and an estimate is exactly the right thing to spend it against), but
+  // never the ABORT.
+  const abortState = r >= FIX_LOOP_ABORT_MIN_ROUND && !decaying;
+
+  if (fr === 0) {
+    // Converged. Only flag the shape when there was enough history to judge it.
+    if (!decaying && prior.length >= 3 && !(t1.ok && t1.satisfied))
+      g.push(`${last.file}: reached 0 findings but the profile did not decay (${known.join(', ')}) — a single zero round is an observation, not an estimate. Confirm the round genuinely re-audited the current diff before treating this as converged.`);
+    return { present: true, gaps: g, notes };
+  }
+
+  // T1 termination: the estimate says under one promotable defect remains, so
+  // another round buys reviewer noise. Additive to the decay rule, never a
+  // replacement — see the assumptions above (this number is biased LOW).
+  if (t1.ok && t1.satisfied && !abortState) {
+    notes.push(`T1 SATISFIED — terminating with ${fr} finding(s) in the final round (profile ${known.join(', ')}): the estimate, not the observation, is the termination criterion. Fix this round's findings; do not run another round to watch it read 0.`);
+    return { present: true, gaps: g, notes };
+  }
+  if (t1.ok && t1.satisfied && abortState)
+    notes.push('T1 is SATISFIED but IGNORED: the profile is flat/rising, which falsifies the decreasing-detection model the estimate itself assumes. A non-decaying profile is an ABORT, not a convergence.');
+
+  if (abortState) {
     g.push(`${last.file}: fix loop is NOT CONVERGING and must be ABORTED, not continued — profile (${known.join(', ')}) is flat or rising after ${r} rounds, which falsifies the assumption every defect-estimation model rests on. Do not run another round. Re-scope instead: record the reason the artifact was not ready for audit (commonly a hand-written static-analysis guard standing in for a behavioural test — its evasion space is unbounded, so 0 is unreachable), replace it, and restart the loop against the new artifact.`);
   } else if (r >= FIX_LOOP_ROUND_CAP) {
     g.push(`${last.file}: fix loop hit the ${FIX_LOOP_ROUND_CAP}-round cap with ${fr} finding(s) still open (profile ${known.join(', ')}) — escalate to a human rather than iterating. Past this point the marginal yield is dominated by reviewer false positives.`);
   } else {
     g.push(`${last.file}: fix loop not converged — ${fr} new confirmed finding(s) in the final round`);
   }
-  return { present: true, gaps: g };
+  return { present: true, gaps: g, notes };
 }
 
 function phase8() {
@@ -1138,13 +1509,29 @@ function phase8() {
       if (!v) g.push(`TEST_RESULTS.md: frontend workspace "${w}" was touched but no "npm run check (${w}): PASS" line is present (tsc + biome guardrails + lint:colors/settings-field + check:kit-manifest/testid-registry/design-spec/gallery-coverage/state-matrix). A6: the gallery + gate:ui + runtime-health IS the browser-verify harness — "I can't verify in a browser" is NOT a valid gap; run it against the mock-API gallery build.`);
       else if (v !== 'PASS') g.push(`TEST_RESULTS.md: "npm run check (${w})" is ${v}, not PASS.`);
     }
-    // A7: boot/runtime canary — require a recorded gate:ui/runtime-health/boot-canary PASS per FE workspace.
-    const canary = new Map();
-    for (const ln of t.split(/\r?\n/)) { const m = RE_BOOT_CANARY.exec(ln); if (m) canary.set(m[1].trim().toLowerCase(), m[2].toUpperCase()); }
+    // A7: boot/runtime canary — baseline-controlled (branch no worse than base).
+    const canary = parseCanaryLines(t);
+    const contradicted = t.split(/\r?\n/).find((ln) => RE_GATE_FAILED_MARKER.test(ln));
     for (const w of feWs) {
       const v = canary.get(w.toLowerCase());
-      if (!v) g.push(`A7: TEST_RESULTS.md: no boot/runtime canary line for "${w}" — record "gate:ui (${w}): PASS" (runtime-health boot + console-error + ErrorBoundary vs the REAL prod build, BEFORE specs). A green e2e can still ship a non-booting app or a root crash on an un-exercised path.`);
-      else if (v !== 'PASS') g.push(`A7: TEST_RESULTS.md: "gate:ui (${w})" is ${v}, not PASS.`);
+      if (!v) {
+        g.push(`A7: TEST_RESULTS.md: no boot/runtime canary line for "${w}" — record either "gate:ui (${w}): PASS" or the baseline-controlled form "gate:ui (${w}): branch <N> vs base <M>" (branch must be no worse than base). Run runtime-health boot + console-error + ErrorBoundary against the REAL prod build, BEFORE the specs; a green e2e can still ship a non-booting app or a root crash on an un-exercised path.`);
+      } else if (!v.ok) {
+        g.push(v.comparative
+          ? `A7: TEST_RESULTS.md: "gate:ui (${w})" records ${v.how} — the branch is WORSE than its base. A7 is a controlled comparison, not an absolute bar: you do not have to beat a loaded box, but you may not regress against the base you branched from.`
+          : `A7: TEST_RESULTS.md: "gate:ui (${w})" is ${v.how}, not PASS. If the absolute gate is unreachable on this box, record the baseline-controlled form instead ("gate:ui (${w}): branch <N> vs base <M>") — measured against the SAME box, back-to-back.`);
+      } else if (contradicted && !v.comparative) {
+        // The false-PASS catch: a recorded pass contradicted by pasted output in
+        // the same file. `cmd | tail` reports tail's exit code, not cmd's.
+        //
+        // Scoped to the ABSOLUTE form deliberately. "PASS" claims zero findings,
+        // so pasted FAILED output flatly contradicts it. A COMPARATIVE line
+        // ("branch 3 vs base 5") already ADMITS findings — a gate that exits
+        // non-zero on both runs is exactly what that line describes, so firing
+        // there would punish the honest record and push authors back onto the
+        // absolute form this reform is trying to relieve.
+        g.push(`A7: TEST_RESULTS.md records a passing canary for "${w}" (${v.how}) but the SAME file contains gate output reading FAILED: "${contradicted.trim().slice(0, 100)}". A recorded PASS contradicted by its own pasted output is a pipeline artifact, not a result — \`cmd | tail\` exits with tail's status. Re-run the gate capturing the command's OWN exit code (\`set -o pipefail\`, or read \`\${PIPESTATUS[0]}\`) and record what it actually returned.`);
+      }
     }
     const e2e = tests.filter((tt) => tt.tier === 'e2e');
     if (e2e.length === 0) {
@@ -1217,6 +1604,10 @@ function report(results) {
     const status = !r.present ? 'PENDING' : r.gaps.length === 0 ? 'OK' : 'FAIL';
     const glyph = status === 'OK' ? '✓' : status === 'PENDING' ? '·' : '✗';
     process.stdout.write(`  ${glyph} phase ${r.n} ${r.name.padEnd(16)} ${status}\n`);
+    // Notes are INFORMATIONAL — the estimate, the tier, the concentration
+    // measure. They never fail a phase; they exist so the numbers a gate decided
+    // on are visible instead of implicit.
+    for (const n of r.notes || []) process.stdout.write(`      · ${n}\n`);
     if (r.gaps.length) {
       for (const gap of r.gaps) process.stdout.write(`      - ${gap}\n`);
       if (r.present) anyFail = true;
@@ -1225,7 +1616,9 @@ function report(results) {
   return anyFail;
 }
 
-process.stdout.write(`lifecycle-check  feature=${featureDir.replace(repo + '/', '')}  base=${baseRef}\n`);
+const TIER = classifyTier();
+process.stdout.write(`lifecycle-check  feature=${featureDir.replace(repo + '/', '')}  base=${baseRef}  tier=${TIER.tier}\n`);
+process.stdout.write(`  tier ${TIER.tier}: ${TIER.reasons.join('; ')}\n`);
 
 if (wantAll) {
   const results = [];

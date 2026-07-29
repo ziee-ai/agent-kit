@@ -186,6 +186,120 @@ p7 "non-decaying profile is REFUSED (activity-rail)"   1 0 2 17 16 20 12 14 15 8
 p7 "non-decaying is caught EARLY, at round 5"          1 0 2 17 16 20
 p7 "a legitimate late ramp is NOT aborted at round 2"  1 0 15
 
+# ---------------------------------------------------------------------------
+# --- T1: capture-recapture termination (an ESTIMATE, not an observation) ---
+# ---------------------------------------------------------------------------
+# p7t <label> <want> <ledger-body-file> -- <profile...>
+# Same as p7 but also plants a LEDGER.jsonl so the estimator has an input.
+p7t() {
+  local lbl="$1" want="$2" ledger="$3"; shift 3; [ "${1:-}" = "--" ] && shift
+  local d; d="$(mktemp -d)"; CLEANUP+=("$d"); mkdir -p "$d/.lifecycle/f"
+  printf '# PLAN\n' > "$d/.lifecycle/f/PLAN.md"
+  cp "$ledger" "$d/.lifecycle/f/LEDGER.jsonl"
+  local i=1; for n in "$@"; do printf '# R%s\n**New confirmed findings:** %s\n' "$i" "$n" > "$d/.lifecycle/f/FIX_ROUND-$i.md"; i=$((i+1)); done
+  ( cd "$d" && git init -q . && git config user.email t@t && git config user.name t && git add -A >/dev/null 2>&1 && git commit -qm x >/dev/null 2>&1 )
+  lc "$want" "phase7: $lbl" --phase 7 --repo "$d" --dir "$d/.lifecycle/f" --base HEAD
+}
+# mkledger <out> <round> <n-corroborated> <n-single-A> <n-single-B> [omit-corrob-field]
+# Emits one row per finding: `m` rows corroborated by both angles, then singles.
+mkledger() {
+  local out="$1" rnd="$2" m="$3" sa="$4" sb="$5" omit="${6:-}"
+  : > "$out"; local i=0
+  while [ "$i" -lt "$m" ]; do
+    if [ -n "$omit" ]; then printf '{"round":%s,"angle":"correctness","file":"src/a%s.rs","severity":"medium","finding":"f%s","status":"confirmed"}\n' "$rnd" "$i" "$i" >> "$out"
+    else printf '{"round":%s,"angle":"correctness","file":"src/a%s.rs","severity":"medium","corroborated_by":2,"finding":"f%s","status":"confirmed"}\n' "$rnd" "$i" "$i" >> "$out"; fi
+    i=$((i+1))
+  done
+  i=0; while [ "$i" -lt "$sa" ]; do
+    printf '{"round":%s,"angle":"correctness","file":"src/b%s.rs","severity":"medium","corroborated_by":1,"finding":"g%s","status":"confirmed"}\n' "$rnd" "$i" "$i" >> "$out"; i=$((i+1)); done
+  i=0; while [ "$i" -lt "$sb" ]; do
+    printf '{"round":%s,"angle":"security","file":"src/c%s.rs","severity":"medium","corroborated_by":1,"finding":"h%s","status":"confirmed"}\n' "$rnd" "$i" "$i" >> "$out"; i=$((i+1)); done
+}
+LEDG="$(mktemp -d)"; CLEANUP+=("$LEDG")
+
+# T1-1: heavy OVERLAP ⇒ the two angles saturated ⇒ Chapman N̂ ≈ observed ⇒ under
+# one promotable defect estimated remaining ⇒ TERMINATE even though the final
+# round is NOT 0. This is the payoff: the loop stops on the estimate, and the
+# author is spared a round run purely to watch a counter read 0.
+#   m=8 sA=1 sB=1 ⇒ n1=9 n2=9 obs=10 ⇒ N̂=(10·10)/9−1=10.1 ⇒ remaining 0.1
+mkledger "$LEDG/hi.jsonl" 2 8 1 1
+p7t "T1: high angle-overlap terminates the loop with findings still open" 0 "$LEDG/hi.jsonl" -- 12 6
+
+# T1-2 (DISCRIMINATING CONTROL): the SAME profile and the same finding COUNT,
+# but the two angles barely overlap ⇒ N̂ ≫ observed ⇒ many defects unfound ⇒ the
+# loop must NOT terminate. Without this case, T1-1 could be passing because the
+# gate went blanket-permissive rather than because the estimate said stop.
+#   m=2 sA=4 sB=4 ⇒ n1=6 n2=6 obs=10 ⇒ N̂=(7·7)/3−1=15.3 ⇒ remaining 5.3
+mkledger "$LEDG/lo.jsonl" 2 2 4 4
+p7t "T1: LOW angle-overlap does NOT terminate (estimate says defects remain)" 1 "$LEDG/lo.jsonl" -- 12 6
+
+# T1-3 (MIGRATION SAFETY): a ledger that records no `corroborated_by` at all —
+# i.e. every ledger written before this reform — must fall back to the decay rule
+# untouched, never be guessed at. Same shape as T1-1, which T1 would otherwise
+# terminate; here it FAILs, proving the fallback is real.
+mkledger "$LEDG/nofield.jsonl" 2 8 1 1 omit
+p7t "T1: a ledger without corroborated_by falls back to the decay rule" 1 "$LEDG/nofield.jsonl" -- 12 6
+
+# T1-4 (SMALL-SAMPLE FLOOR): 2 findings both corroborated would compute a tidy
+# "0 remaining", but a two-sample estimate over 2 observations carries no
+# information. Below the floor the estimator declines and the decay rule decides.
+mkledger "$LEDG/tiny.jsonl" 2 2 0 0
+p7t "T1: below the small-sample floor the estimator declines (no free pass)" 1 "$LEDG/tiny.jsonl" -- 12 6
+
+# T1-5: T1 must not rescue the case the decay rule exists to catch — a
+# non-decaying profile is an ABORT regardless of what the estimate says, because
+# a flat/rising profile falsifies the model the estimate itself rests on.
+mkledger "$LEDG/hi5.jsonl" 5 8 1 1
+p7t "T1: does NOT override the non-decaying ABORT (model falsified)" 1 "$LEDG/hi5.jsonl" -- 0 2 17 16 20
+
+# ---------------------------------------------------------------------------
+# --- GUARD-SUB: the guard-substitution tripwire (concentration, not decay) ---
+# ---------------------------------------------------------------------------
+# mkconc <out> <round> <n-on-top-file> <n-elsewhere> <top-file>
+mkconc() {
+  local out="$1" rnd="$2" n="$3" rest="$4" top="$5"; : > "$out"; local i=0
+  while [ "$i" -lt "$n" ]; do printf '{"round":%s,"angle":"tests-quality","file":"%s","severity":"low","finding":"evasion %s","status":"confirmed"}\n' "$rnd" "$top" "$i" >> "$out"; i=$((i+1)); done
+  i=0; while [ "$i" -lt "$rest" ]; do printf '{"round":%s,"angle":"correctness","file":"src/other%s.rs","severity":"low","finding":"real %s","status":"confirmed"}\n' "$rnd" "$i" "$i" >> "$out"; i=$((i+1)); done
+}
+GRD="$(mktemp -d)"; CLEANUP+=("$GRD")
+
+# All five G-cases share ONE profile: `20 10 5 0` — a clean geometric decay that
+# CONVERGES. The decay rule reports OK on every one of them, so the only variable
+# is the concentration measure. That is the point: if the decay rule already
+# caught these, every case below would be exit 1 and the tripwire would be
+# redundant. It is not — G-1 fires on a profile the decay rule calls converged.
+
+# G-1 (THE NON-REDUNDANCY PROOF): 8 of 9 findings on the hand-written AST
+# source-guard `railIsolation.test.ts` — the real file from the real feature
+# whose rounds 13-17 put 46 of 59 findings on it. The profile CONVERGED, so the
+# decay rule passes it; the tripwire refuses it, because a guard that
+# pattern-matches a semantic property has an unbounded evasion space and each
+# round only finds another spelling. Six rounds burned on a guard is not
+# convergence, it is the wrong artifact under audit.
+mkconc "$GRD/g1.jsonl" 4 8 1 "src-app/ui/src/modules/chat/components/rail/railIsolation.test.ts"
+p7t "GUARD-SUB: fires at 89% guard concentration on a profile the decay rule calls CONVERGED" 1 "$GRD/g1.jsonl" -- 20 10 5 0
+
+# G-2 (CONTROL — the axis is CONCENTRATION, not volume): identical round, same
+# guard file, but the findings are SPREAD (3 of 9). Silent.
+mkconc "$GRD/spread.jsonl" 4 3 6 "src-app/ui/src/modules/chat/components/rail/railIsolation.test.ts"
+p7t "GUARD-SUB: a SPREAD round on the same guard file does not fire" 0 "$GRD/spread.jsonl" -- 20 10 5 0
+
+# G-3 (CONTROL — the subject must be a TEST/GUARD file): the same 89% on the
+# feature's own SOURCE file is normal work on the code under construction.
+# Firing here would make the tripwire useless on every small feature.
+mkconc "$GRD/src.jsonl" 4 8 1 "src-app/server/src/modules/rail/repository.rs"
+p7t "GUARD-SUB: the same concentration on a SOURCE file does not fire" 0 "$GRD/src.jsonl" -- 20 10 5 0
+
+# G-4 (CONTROL — round 1 is exempt): the first fix round may legitimately land
+# almost entirely on the tests it just wrote.
+mkconc "$GRD/r1.jsonl" 1 8 1 "src-app/ui/src/modules/chat/components/rail/railIsolation.test.ts"
+p7t "GUARD-SUB: round 1 is exempt (new tests legitimately concentrate)" 0 "$GRD/r1.jsonl" -- 20 10 5 0
+
+# G-5 (MIGRATION SAFETY): a ledger with no per-round attribution is not guessed
+# at. Byte-identical to G-1 with `round` stripped ⇒ silent.
+sed 's/"round":4,//' "$GRD/g1.jsonl" > "$GRD/noround.jsonl"
+p7t "GUARD-SUB: a ledger without per-round attribution is not guessed at" 0 "$GRD/noround.jsonl" -- 20 10 5 0
+
 # --- A1: a SECOND .lifecycle feature dir on the branch -> --all FAILs (global)
 R="$(build_be)"; D="$R/.lifecycle/bar"
 mkdir -p "$R/.lifecycle/stray"
@@ -262,7 +376,7 @@ R="$(build_perm)"; D="$R/.lifecycle/foo"
 # build_perm deliberately ships WITHOUT the A10 restricted-user e2e so callers can
 # add it; complete it here, or the control below fails on A10 rather than A3.
 cat >> "$D/TESTS.md" <<'EOF'
-- **TEST-4** (tier: e2e) [negative-perm] [covers: ITEM-2] file: `src-app/ui/tests/e2e/foo/perm-gating.spec.ts` — asserts: a user LACKING foo::use sees NO Foo nav entry, page, or Save button.
+- **TEST-4** (tier: e2e) [negative-perm] [positive-control] [covers: ITEM-2] file: `src-app/ui/tests/e2e/foo/perm-gating.spec.ts` — asserts: a user LACKING foo::use still loads the app shell and can open the dashboard (positive control), and sees NO Foo nav entry, page, or Save button.
 EOF
 cat >> "$D/TEST_RESULTS.md" <<'EOF'
 - **TEST-4**: PASS
@@ -396,7 +510,7 @@ lc 1 "A10: a [negative-perm] tag on a NON-e2e test does NOT satisfy A10" --phase
 # A10-3: add the restricted-user e2e -> phase 3 + 8 PASS (A9 backend + A10 frontend both present)
 R="$(build_perm)"; D="$R/.lifecycle/foo"
 cat >> "$D/TESTS.md" <<'EOF'
-- **TEST-4** (tier: e2e) [negative-perm] [covers: ITEM-2] file: `src-app/ui/tests/e2e/foo/perm-gating.spec.ts` — asserts: a user LACKING foo::use sees NO Foo nav entry, page, or Save button.
+- **TEST-4** (tier: e2e) [negative-perm] [positive-control] [covers: ITEM-2] file: `src-app/ui/tests/e2e/foo/perm-gating.spec.ts` — asserts: a user LACKING foo::use still loads the app shell and can open the dashboard (positive control), and sees NO Foo nav entry, page, or Save button.
 EOF
 cat >> "$D/TEST_RESULTS.md" <<'EOF'
 - **TEST-4**: PASS
@@ -408,7 +522,7 @@ lc 0 "A10: new ::use perm WITH a restricted-user e2e passes (phase 8)" --phase 8
 # A10-4: the restricted-user e2e is enumerated but its RESULT is FAIL -> phase 8 FAIL
 R="$(build_perm)"; D="$R/.lifecycle/foo"
 cat >> "$D/TESTS.md" <<'EOF'
-- **TEST-4** (tier: e2e) [negative-perm] [covers: ITEM-2] file: `src-app/ui/tests/e2e/foo/perm-gating.spec.ts` — asserts: a user LACKING foo::use sees no Foo UI.
+- **TEST-4** (tier: e2e) [negative-perm] [positive-control] [covers: ITEM-2] file: `src-app/ui/tests/e2e/foo/perm-gating.spec.ts` — asserts: a user LACKING foo::use still loads the app shell and can open the dashboard (positive control), and sees no Foo UI.
 EOF
 cat >> "$D/TEST_RESULTS.md" <<'EOF'
 - **TEST-4**: FAIL
@@ -456,7 +570,7 @@ EOF
 git -C "$R" add -A && git -C "$R" commit -qm feat-permmig
 lc 1 "A10: a migration granting ::use without a restricted-user e2e is REFUSED (A9 alone misses it)" --phase 8 --repo "$R" --dir "$D" --base main
 cat >> "$D/TESTS.md" <<'EOF'
-- **TEST-2** (tier: e2e) [negative-perm] [covers: ITEM-1] file: `src-app/ui/tests/e2e/foo/perm-gating.spec.ts` — asserts: a user LACKING foo::use sees no Foo UI.
+- **TEST-2** (tier: e2e) [negative-perm] [positive-control] [covers: ITEM-1] file: `src-app/ui/tests/e2e/foo/perm-gating.spec.ts` — asserts: a user LACKING foo::use still loads the app shell and can open the dashboard (positive control), and sees no Foo UI.
 EOF
 cat >> "$D/TEST_RESULTS.md" <<'EOF'
 - **TEST-2**: PASS
@@ -889,6 +1003,190 @@ gate:ui (webapp): PASS
 EOF
 git -C "$R" commit -qam webfe-results-complete
 lc 0 "lifecycle-check: webapp FE workspace satisfied by 'npm run check (webapp): PASS'" --phase 8 --repo "$R" --dir "$D" --base main
+
+# ---------------------------------------------------------------------------
+echo "-- Part F: LIGHT track + baseline-controlled A7 + A10 positive control --"
+# ---------------------------------------------------------------------------
+
+# --- LIGHT track: gate weight scales to BLAST RADIUS, not diff size alone. ---
+# build_light [extra-setup] — build_be, but FIX_ROUND-1 records 3 open findings
+# and there is no second round. Under HEAVY that is "not converged"; under LIGHT
+# one completed round is the requirement.
+build_light() {
+  local R; R="$(build_be)"
+  cat > "$R/.lifecycle/bar/FIX_ROUND-1.md" <<'EOF'
+# FIX_ROUND 1
+Three confirmed findings, all fixed in this round.
+**New confirmed findings:** 3
+EOF
+  git -C "$R" commit -qam one-round >/dev/null
+  echo "$R"
+}
+
+# L-1: a small, no-blast-radius change stops after ONE audit round.
+R="$(build_light)"; D="$R/.lifecycle/bar"
+lc 0 "LIGHT: a small no-blast-radius diff needs ONE audit round (phase 7)" --phase 7 --repo "$R" --dir "$D" --base main
+# and the tier + its reason are VISIBLE, not implicit — nobody should have to
+# guess which track they are on.
+if grep -q "tier=LIGHT" /tmp/lc-selftest.out && grep -q "no new permission, migration, module, or public API/schema change" /tmp/lc-selftest.out; then
+  PASS=$((PASS+1)); printf '  \033[32mok  \033[0m %s\n' "LIGHT: the tier AND its reason are reported on stdout"
+else
+  FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "LIGHT: tier/reason not reported"
+  sed 's/^/        | /' /tmp/lc-selftest.out
+fi
+
+# L-2 (BLAST-RADIUS CONTROL — migration): byte-identical artifacts; the ONLY
+# change is that the diff now adds a migration. A schema mistake is not
+# revertible in place, so that change buys the HEAVY track and the same
+# single-round loop is REFUSED. This is the case that proves the tier is
+# computed from blast radius, not from whether the author felt done.
+R="$(build_light)"; D="$R/.lifecycle/bar"
+mkdir -p "$R/src-app/server/migrations"
+echo "ALTER TABLE bar ADD COLUMN note TEXT;" > "$R/src-app/server/migrations/00000000000011_bar_note.sql"
+git -C "$R" add -A && git -C "$R" commit -qm add-migration
+lc 1 "LIGHT: adding a MIGRATION flips the same feature to HEAVY (one round refused)" --phase 7 --repo "$R" --dir "$D" --base main
+
+# L-3 (BLAST-RADIUS CONTROL — new module): same artifacts, plus a new module
+# seam nothing has exercised yet.
+R="$(build_light)"; D="$R/.lifecycle/bar"
+mkdir -p "$R/src-app/server/src/modules/baz"
+printf 'pub mod repository;\n' > "$R/src-app/server/src/modules/baz/mod.rs"
+git -C "$R" add -A && git -C "$R" commit -qm add-module
+lc 1 "LIGHT: adding a NEW MODULE flips the same feature to HEAVY" --phase 7 --repo "$R" --dir "$D" --base main
+
+# L-4 (SIZE CONTROL): no blast-radius signal at all, but the diff crosses the
+# size threshold — a 900-line change is not reviewed by one round either.
+R="$(build_light)"; D="$R/.lifecycle/bar"
+i=0; while [ "$i" -lt 900 ]; do printf 'pub fn filler_%s() -> u32 { %s }\n' "$i" "$i" >> "$R/src-app/server/src/modules/bar/repository.rs"; i=$((i+1)); done
+git -C "$R" commit -qam bulk
+lc 1 "LIGHT: crossing the size threshold alone flips to HEAVY" --phase 7 --repo "$R" --dir "$D" --base main
+
+# L-5 (THE LOAD-BEARING GUARANTEE): LIGHT relaxes the audit-ROUND requirement and
+# NOTHING else. Every deterministic hardening check runs in both tiers — they are
+# nearly free and they are what catch the silent failures. A cosmetic assertion
+# on a LIGHT diff is still refused.
+R="$(build_light)"; D="$R/.lifecycle/bar"
+lc 0 "LIGHT: control — the light fixture passes phase 8 before the bad assert" --phase 8 --repo "$R" --dir "$D" --base main
+printf '\nfn t() { assert!(true); }\n' >> "$R/src-app/server/src/modules/bar/repository.rs"
+git -C "$R" commit -qam light-cosmetic
+lc 1 "LIGHT: A4 (and every hardening check) still runs on the LIGHT track" --phase 8 --repo "$R" --dir "$D" --base main
+
+# --- A7: baseline-controlled canary + the false-PASS catch ---
+# build_ui <canary-line...> — a UI-touching feature whose TEST_RESULTS carries
+# whatever canary line(s) the caller passes. Echoes the repo root.
+build_ui() {
+  local R; R="$(new_repo)"; CLEANUP+=("$R")
+  git -C "$R" checkout -q -b feat/ui7
+  mkdir -p "$R/src-app/ui/src/modules/foo" "$R/.lifecycle/foo"
+  cat > "$R/src-app/ui/src/modules/foo/FooPage.tsx" <<'EOF'
+export function FooPage() {
+  return <div><h1>Foo</h1><button>Save</button></div>;
+}
+EOF
+  local D="$R/.lifecycle/foo"
+  cat > "$D/PLAN.md" <<'EOF'
+# PLAN — foo
+## Design source
+- `docs/design/foo.md` §2 "Foo surface" — this plan realizes the single-action
+  Foo page described there.
+## Invariants
+- **INV-1**: The Foo surface exposes exactly one Save affordance.
+## Items
+- **ITEM-1**: Add a FooPage component.
+## Files to touch
+- `src-app/ui/src/modules/foo/FooPage.tsx` — new page (ITEM-1).
+## Patterns to follow
+- Mirror an existing settings page.
+EOF
+  write_common "$D" "src-app/ui/src/modules/foo/FooPage.tsx" 3
+  cat > "$D/TESTS.md" <<'EOF'
+# TESTS — foo
+- **TEST-1** (tier: unit) [acceptance] [invariant: INV-1] [covers: ITEM-1] file: `src-app/ui/src/modules/foo/FooPage.test.tsx` — asserts: renders exactly one Save button.
+- **TEST-2** (tier: e2e) [covers: ITEM-1] file: `src-app/ui/tests/e2e/foo/foo.spec.ts` — asserts: user clicks Save.
+EOF
+  { printf '# TEST_RESULTS — foo\n- **TEST-1**: PASS\n- **TEST-2**: PASS\nnpm run check (ui): PASS\n'
+    for l in "$@"; do printf '%s\n' "$l"; done; } > "$D/TEST_RESULTS.md"
+  git -C "$R" add -A && git -C "$R" commit -qm feat-ui7
+  echo "$R"
+}
+
+# A7-1: the BASELINE-CONTROLLED form — the branch is no worse than its base. On a
+# loaded shared box an absolute PASS is a tax on the author for the box's state;
+# a controlled comparison is the honest measurement and it is now accepted.
+R="$(build_ui 'gate:ui (ui): branch 3 vs base 5')"; D="$R/.lifecycle/foo"
+lc 0 "A7: a baseline-controlled canary (branch 3 vs base 5) is ACCEPTED" --phase 8 --repo "$R" --dir "$D" --base main
+# equal is "no worse" — the common real case on a box with pre-existing findings.
+R="$(build_ui 'gate:ui (ui): branch=5 base=5')"; D="$R/.lifecycle/foo"
+lc 0 "A7: branch == base is 'no worse' and passes" --phase 8 --repo "$R" --dir "$D" --base main
+
+# A7-2 (CONTROL): a REGRESSION against the base is still refused — the relief is
+# from the absolute bar, not from the requirement.
+R="$(build_ui 'gate:ui (ui): branch 7 vs base 5')"; D="$R/.lifecycle/foo"
+lc 1 "A7: a branch WORSE than its base is REFUSED (branch 7 vs base 5)" --phase 8 --repo "$R" --dir "$D" --base main
+
+# A7-3: the absolute PASS form still works — every pre-existing artifact stays
+# valid (zero findings cannot be worse than any base).
+R="$(build_ui 'gate:ui (ui): PASS')"; D="$R/.lifecycle/foo"
+lc 0 "A7: the absolute 'gate:ui (ui): PASS' form is still accepted" --phase 8 --repo "$R" --dir "$D" --base main
+
+# A7-4 (THE FALSE-PASS CATCH — the part worth keeping): a recorded PASS sitting
+# in the same file as pasted output reading GATE FAILED is a pipeline artifact,
+# not a result. `cmd | tail` exits with tail's status; one real recorded PASS was
+# exactly that.
+R="$(build_ui 'gate:ui (ui): PASS' '  Ran 41 surfaces ... GATE FAILED (3 HIGH runtime findings)')"; D="$R/.lifecycle/foo"
+lc 1 "A7: a recorded PASS contradicted by pasted 'GATE FAILED' output is REFUSED" --phase 8 --repo "$R" --dir "$D" --base main
+# ...and the catch does NOT fire on ordinary passing output (no blanket refusal
+# of any file that happens to quote a log).
+R="$(build_ui 'gate:ui (ui): PASS' '  Ran 41 surfaces ... 0 HIGH findings, gate OK')"; D="$R/.lifecycle/foo"
+lc 0 "A7: passing pasted output does NOT trip the false-PASS catch" --phase 8 --repo "$R" --dir "$D" --base main
+# ...and the catch is scoped to the ABSOLUTE form: a COMPARATIVE line already
+# ADMITS findings, so a gate that exits non-zero on BOTH runs is exactly what it
+# describes. Firing here would punish the honest record and push authors back
+# onto the absolute form this reform exists to relieve.
+R="$(build_ui 'gate:ui (ui): branch 3 vs base 5' '  branch run: GATE FAILED (3)' '  base run: GATE FAILED (5)')"; D="$R/.lifecycle/foo"
+lc 0 "A7: 'GATE FAILED' output does NOT contradict a COMPARATIVE line (it admits findings)" --phase 8 --repo "$R" --dir "$D" --base main
+
+# --- A10 positive control: "the UI is absent" must not pass vacuously ---
+# A negative-permission spec asserting only ABSENCE passes identically when the
+# page never loaded at all — a failed route, a login bounce, a render crash. One
+# real spec was confounded exactly this way and would have gone green with the
+# permission gate DELETED.
+R="$(build_perm)"; D="$R/.lifecycle/foo"
+cat >> "$D/TESTS.md" <<'EOF'
+- **TEST-4** (tier: e2e) [negative-perm] [covers: ITEM-2] file: `src-app/ui/tests/e2e/foo/perm-gating.spec.ts` — asserts: a user LACKING foo::use sees NO Foo nav entry, page, or Save button.
+EOF
+cat >> "$D/TEST_RESULTS.md" <<'EOF'
+- **TEST-4**: PASS
+EOF
+git -C "$R" commit -qam negperm-uncontrolled
+lc 1 "A10: an ABSENCE-ONLY restricted-user e2e is REFUSED as confounded (phase 3)" --phase 3 --repo "$R" --dir "$D" --base main
+lc 1 "A10: an ABSENCE-ONLY restricted-user e2e is REFUSED as confounded (phase 8)" --phase 8 --repo "$R" --dir "$D" --base main
+
+# ...the same spec with the POSITIVE CONTROL added passes. The control is what
+# makes "absent" mean "gated" rather than "never rendered".
+R="$(build_perm)"; D="$R/.lifecycle/foo"
+cat >> "$D/TESTS.md" <<'EOF'
+- **TEST-4** (tier: e2e) [negative-perm] [positive-control] [covers: ITEM-2] file: `src-app/ui/tests/e2e/foo/perm-gating.spec.ts` — asserts: a user LACKING foo::use still loads the dashboard (positive control) and sees NO Foo nav entry, page, or Save button.
+EOF
+cat >> "$D/TEST_RESULTS.md" <<'EOF'
+- **TEST-4**: PASS
+EOF
+git -C "$R" commit -qam negperm-controlled
+lc 0 "A10: a restricted-user e2e WITH the positive control passes (phase 3)" --phase 3 --repo "$R" --dir "$D" --base main
+lc 0 "A10: a restricted-user e2e WITH the positive control passes (phase 8)" --phase 8 --repo "$R" --dir "$D" --base main
+
+# ...and the control is recognized from the asserts PROSE too (same grammar A9
+# uses for its deny-path prose), so an author who states it plainly without
+# reaching for the tag is not blocked on bookkeeping.
+R="$(build_perm)"; D="$R/.lifecycle/foo"
+cat >> "$D/TESTS.md" <<'EOF'
+- **TEST-4** (tier: e2e) [negative-perm] [covers: ITEM-2] file: `src-app/ui/tests/e2e/foo/perm-gating.spec.ts` — asserts: a restricted user can open the dashboard and reach /settings, and sees NO Foo nav entry, page, or Save button.
+EOF
+cat >> "$D/TEST_RESULTS.md" <<'EOF'
+- **TEST-4**: PASS
+EOF
+git -C "$R" commit -qam negperm-prose
+lc 0 "A10: the positive control is recognized from the asserts prose (no tag required)" --phase 8 --repo "$R" --dir "$D" --base main
 
 echo "== $PASS passed, $FAIL failed =="
 [ "$FAIL" -eq 0 ]

@@ -35,6 +35,28 @@ mkdir -p /data/pbya/ziee/tmp/<slug>-wt/.lifecycle/<feature>
 > not judgment. Passing it is necessary, not sufficient; the phases below carry
 > the judgment. Never write filler to satisfy the parser.
 >
+> **Gate weight scales to BLAST RADIUS — check your tier first.** Every run
+> prints `tier=LIGHT` or `tier=HEAVY` and the reason, on the header line. The
+> evidence says this process is not uniformly heavy: across 22 completed features
+> the MEDIAN ran ONE fix round and 17 of 22 ran ≤3. What it has is an unbounded
+> TAIL. But a 3-line auth change and a 900-line generated-registry diff were
+> getting identical treatment, which is the wrong axis — what should buy extra
+> rounds is how far a mistake can REACH, not how many lines moved.
+>
+> **LIGHT** = the diff is under `LIFECYCLE_LIGHT_MAX_LINES` (default 800 changed
+> lines, excluding lifecycle artifacts + generated files) **AND** none of the four
+> blast-radius signals: a **new permission** (an authz mistake is unrecoverable
+> and invisible), a **migration** (a schema mistake is not revertible in place), a
+> **new module** (a seam nothing has exercised yet), or a **public API/schema
+> change** (every downstream consumer inherits the error). Any one of those ⇒
+> HEAVY.
+>
+> LIGHT requires the core artifacts and **ONE audit round**. HEAVY is the full
+> flow. **Every deterministic hardening check (A1–A10, R2-5, FB-7, the invariant ↔
+> acceptance-test binding) runs identically in BOTH tiers** — they are nearly free
+> and they are what catch the silent failures, so there is nothing to save by
+> tiering them.
+>
 > **The phase gates are necessary-not-sufficient; the `## Invariants` + their
 > `[acceptance]` tests are the SUFFICIENT anchor.** A green 9/9 proves the process
 > ran — it does NOT prove the shipped feature still means what the design meant.
@@ -89,21 +111,35 @@ Match these line formats precisely or the gate will not pass.
   anchor: a green phase-gate is necessary but NOT sufficient; the invariant ↔
   acceptance-test binding is what makes "the design's intent still holds"
   machine-checkable.
-- **Restricted-user e2e** (`[negative-perm]` tag) — `- **TEST-7** (tier: e2e) [negative-perm] [covers: ITEM-3] file: \`.../foo.spec.ts\` — asserts: a user LACKING foo::use sees NO Foo UI (nav entry, page, composer, buttons all absent)`.
+- **Restricted-user e2e** (`[negative-perm]` + `[positive-control]`) — `- **TEST-7** (tier: e2e) [negative-perm] [positive-control] [covers: ITEM-3] file: \`.../foo.spec.ts\` — asserts: a user LACKING foo::use still LOADS the dashboard and can open /settings (positive control), and sees NO Foo UI (nav entry, page, composer, buttons all absent)`.
   REQUIRED whenever the diff introduces a user-facing permission
   (`X::use`/`X::read`/`X::manage` defined in a `modules/*/permissions.rs` or
   granted in a migration). This is the FRONTEND half of the authz gate (A10),
   paired with the backend deny test (A9). It must be `tier: e2e` — a 403/deny
   integration test does NOT satisfy it (that's A9).
+  **The `[positive-control]` half is not optional bookkeeping — it is what makes
+  the test mean anything.** "The UI is absent for a restricted user" passes
+  VACUOUSLY when the page never loaded at all: a failed route, a login bounce, a
+  render crash, a blank shell all satisfy "the affordance is not visible". One
+  real spec was confounded exactly this way and **would have passed with the
+  permission gate DELETED**. So the same spec must also assert the subject
+  page/resource LOADS for that same restricted user — that is the control that
+  makes "absent" mean "gated" instead of "never rendered". The gate accepts the
+  explicit `[positive-control]` tag, or a plain affirmative claim in the
+  `asserts:` prose ("…can open the dashboard…", "…the page still loads…", "…200…").
 - **Decision** — `### DEC-1: <question>` then a `**Resolution:** <answer>` line
   and a `**Basis:** <convention|user|codebase>` line
 - **Drift entry** — `- **DRIFT-1.2** — verdict: plan-wins — <text>`
   (verdict ∈ `plan-wins | impl-wins | none | resolved`); each DRIFT-*.md needs a
   `**Unresolved drifts:** <N>` summary line
 - **Ledger row** (`LEDGER.jsonl`, one JSON/line) —
-  `{"angle":"correctness","file":"src/...","line":42,"severity":"high","finding":"...","status":"confirmed"}`
-- **Coverage row** (`AUDIT_COVERAGE.tsv`, tab-separated, header `file⇥start⇥end⇥angles`) —
-  `src/foo.rs⇥120⇥145⇥correctness,security,perf`
+  `{"angle":"correctness","file":"src/...","line":42,"severity":"high","corroborated_by":2,"round":3,"finding":"...","status":"confirmed"}`
+  `corroborated_by` = how many angles independently reported it (1 or 2). It
+  decides what becomes WORK (≥2, or oracle-confirmed, or severity
+  security/data-loss/authz) **and** it is the input to the phase-7 T1 estimate —
+  omit it and the loop falls back to the slower decay rule. `round` + `file` are
+  what let the guard-substitution tripwire attribute a round's findings.
+  There is **no `AUDIT_COVERAGE.tsv`** — it was removed; the ledger is the record.
 - **Fix round** (`FIX_ROUND-1.md`) — a `**New confirmed findings:** <N>` line
 - **Test result** (`TEST_RESULTS.md`) — `- **TEST-2**: PASS`
 - **Frontend gate line** (`TEST_RESULTS.md`, REQUIRED once the diff touches a UI
@@ -529,7 +565,8 @@ only that the audit named the files, and caught nothing. `LEDGER.jsonl` is the
 record.
 
 Spawn **fresh/blind** subagents (diff-only context: `git diff main...HEAD`) — do
-NOT hand them your reasoning. Use ≥10 angles from the proven roster:
+NOT hand them your reasoning. The roster the two angles are SELECTED from (a
+roster to choose from, not a count to satisfy):
 
 `correctness · security · error-handling · concurrency · perms/authz ·
 api-contract · state-management · a11y · patterns-conformance · tests-quality ·
@@ -646,20 +683,29 @@ cost/behavior conflicts with a decision the human explicitly made (e.g. a perf
 tradeoff on a UX choice they picked), record it as a tracked `HUMAN_FEEDBACK`
 item and surface it — do NOT silently reverse the human's decision.
 
-Each angle appends findings to `LEDGER.jsonl`. **Coverage law:** every hunk of
-`git diff main...HEAD --unified=0` must appear in `AUDIT_COVERAGE.tsv` as reviewed
-by **≥3 distinct angles**. The validator parses the real diff and reconciles it
-against the TSV — any uncovered hunk fails the gate. (Forks that share the
-parent's cached context are the cheap way to fan out — [[feedback_fork_cache_review]].)
+Each angle appends its findings to `LEDGER.jsonl`. There is **no coverage law and
+no coverage file** — `AUDIT_COVERAGE.tsv` proved only that the audit had NAMED the
+files and caught nothing across 22 features. The ledger is the record. (Forks that
+share the parent's cached context are the cheap way to fan out —
+[[feedback_fork_cache_review]].)
 
-> The coverage law excludes the lifecycle artifacts and **mechanically-generated
-> files** (`**/openapi.json`, `**/api-client/types.ts`) — those are derived
+> The audit excludes the lifecycle artifacts and **mechanically-generated files**
+> (`**/openapi.json`, `**/api-client/types.ts`) — those are derived
 > deterministically from reviewed source by a golden-tested generator, so review
 > the *source* hunks, not the generated output. (The same exclusion is why a
 > backend feature that merely regenerates the client is **not** treated as UI
 > work by the phase 3 / phase 8 frontend gates.) A regen may produce a large
 > positional (key-order) diff in `openapi.json` with a tiny content delta; verify
 > the content delta with `comm` on sorted files and record it as a drift entry.
+
+**Record `corroborated_by` on every row — it is the input to the T1 estimate.**
+Beyond deciding what becomes work, the OVERLAP between your two angles is the one
+measurement that lets phase 7 terminate on an ESTIMATE of defects remaining rather
+than on the observation that a round found none. Set `corroborated_by` to the
+number of angles that independently reported that finding (1 or 2), and give each
+row its `angle`, `file` and `severity`. A ledger without `corroborated_by` still
+passes every gate — phase 7 simply falls back to the decay rule, and you pay for
+the extra rounds that buys.
 
 Gate: `--phase 6`.
 
@@ -677,23 +723,78 @@ unbounded. It produced a real 17-round run here. Every defect-estimation model
 assumes a **decreasing** detection profile, so a flat or rising profile falsifies
 the model rather than meaning "converging slowly".
 
-The loop ends in one of four ways:
+The loop ends in one of six ways:
 
 | | condition | outcome |
 |---|---|---|
+| **LIGHT** | the change is LIGHT-tier (below) **and** one round is complete | done |
+| **T1** | the capture-recapture estimate says **< 1** promotable defect remains | done — even with findings still open |
 | **Converged** | a round yields 0 **and** the profile decayed | done |
 | **ABORT** | profile flat/rising at round ≥5 (final round ≥ median of the prior) | **re-scope — do NOT run another round** |
+| **GUARD-SUB** | ≥60% of a round's findings target ONE test/guard file (round ≥2) | **stop + escalate — replace the guard** |
 | **Cap** | 6 rounds with findings still open | escalate to a human |
 | — | otherwise | continue |
 
-The ABORT is the important one, and it is a distinct outcome the loop previously
-could not express: *"this artifact was not ready for audit."* The usual cause is a
-**hand-written static-analysis guard standing in for a behavioural test** — its
-evasion space is unbounded, so 0 is unreachable by construction and each round
-finds another spelling. The fix is to replace the guard with a test that asserts
-the behaviour, then restart the loop against the new artifact. Findings in the
-branch's own guard/test scaffolding are recorded, but they do not keep the loop
-alive.
+### T1 — terminate on the ESTIMATE, not on the observation
+
+The inspection literature never stops because a round found nothing; it stops on
+an estimate of what is STILL in the artifact. Two angles per round give exactly
+the input that needs — the overlap between them:
+
+```
+n1 = findings angle A reported    n2 = findings angle B reported
+m  = findings BOTH reported (corroborated_by ≥ 2)
+N̂  = (n1+1)(n2+1)/(m+1) − 1        ← Chapman (Lincoln-Petersen is badly
+                                      biased and undefined at small m)
+remaining = N̂ − observed;  terminate when remaining × promoted-fraction < 1
+```
+
+High overlap means the two angles have SATURATED the artifact — they are finding
+the same things, so there is little left to find, and another round buys reviewer
+noise. Low overlap means they are each finding things the other missed, so there
+is more in there: keep going. **This is the payoff that made the 2-angle reform
+worth the corroboration bookkeeping**, and it is why `corroborated_by` matters.
+
+**Its assumptions do not hold, and you should know which way that cuts.** Capture-
+recapture assumes (1) equal catchability — every defect equally likely to be
+caught, false, defects vary enormously in obviousness — and (2) INDEPENDENCE of
+the two samples, which is worse here than in the human studies the model comes
+from: our two "angles" are **two prompts to one model**. They share weights,
+training data, and whatever the diff makes salient, so they co-find and co-miss
+together. Both violations inflate `m`, which deflates `N̂`. **The estimate is
+biased LOW — it is a floor on remaining defects, not a measurement.** That is
+exactly why T1 is an ADDITIONAL termination condition rather than a replacement:
+the decay rule, the guard tripwire and the round cap all still apply on top of it,
+and a **non-decaying profile overrides T1 entirely** (a flat/rising profile
+falsifies the decreasing-detection model the estimate itself rests on, so an
+estimate computed from it is not evidence).
+
+Below a small-sample floor (≥5 findings observed, ≥2 corroborated) the estimator
+declines rather than guessing, and a ledger with no `corroborated_by` at all is
+never guessed at. In both cases the decay rule decides alone.
+
+### ABORT and GUARD-SUB — "this artifact was not ready for audit"
+
+The ABORT is a distinct outcome the loop previously could not express. Its usual
+cause is a **hand-written static-analysis guard standing in for a behavioural
+test** — a guard that pattern-matches a SEMANTIC property has an unbounded evasion
+space, so 0 findings is unreachable by construction and each round only finds
+another spelling.
+
+**GUARD-SUB names that cause directly instead of inferring it, and it fires
+earlier than the ABORT can.** When ≥60% of a round's confirmed findings land on a
+single test/guard file, the loop has stopped auditing the feature and started
+playing whack-a-mole with a guard. The real case: one feature's rounds 13-17 put
+46 of 59 findings on one AST source-guard (round 17 was 21 of 22) — and at its
+round 12 the concentration was already 8 of 9 (89%) **while the profile was still
+decaying**, i.e. while the decay rule read "converging fine". Concentration
+detects the wrong KIND of work; decay only detects the wrong RATE of it.
+
+The remedy is never another predicate. Replace the syntactic guard with a test
+that asserts the BEHAVIOUR it was standing in for, then restart the loop against
+the new artifact. (Round 1 is exempt — the first round may legitimately land on
+the tests it just wrote — and a round concentrated on the feature's own SOURCE
+file is normal work, not guard substitution.)
 
 Two rules that make rounds cheap enough to be worth running:
 
@@ -810,11 +911,22 @@ so budget for them — they are not optional polish:
   recorded PASS in `TEST_RESULTS.md` — a design invariant left unproven fails
   phase 8. This is stricter than "all TESTs pass": it names the invariant proofs
   explicitly so a soft/dropped acceptance leg is unmissable.
-- **A7** a UI diff must record a boot/runtime canary line
-  (`gate:ui (<ws>): PASS`) — a green e2e can still ship a non-booting app or a
-  root ErrorBoundary crash on an un-exercised path. **A6:** the gallery +
-  `gate:ui` + `runtime-health` IS the browser-verify harness — "I can't verify
-  in a browser" is not a valid gap.
+- **A7** a UI diff must record a boot/runtime canary line — a green e2e can still
+  ship a non-booting app or a root ErrorBoundary crash on an un-exercised path.
+  A7 is **baseline-controlled**: the branch must be **no worse than its base**,
+  not absolutely clean. Two accepted forms:
+  `gate:ui (ui): PASS` (zero findings — can't be worse than any base) or
+  `gate:ui (ui): branch 3 vs base 5` (passes iff branch ≤ base). Measure both
+  runs **back-to-back on the SAME box**; an absolute bar the environment can move
+  is a bar people learn to route around ("took three attempts / the box was
+  busy"). A regression against the base is still refused.
+  **Capture the gate's OWN exit code.** A recorded PASS sitting in the same file
+  as pasted output reading `GATE FAILED` is refused: that combination is a
+  pipeline artifact, not a result — `cmd | tail` exits with *tail's* status, and
+  one recorded PASS here was exactly that. Use `set -o pipefail` or read
+  `${PIPESTATUS[0]}`.
+  **A6:** the gallery + `gate:ui` + `runtime-health` IS the browser-verify
+  harness — "I can't verify in a browser" is not a valid gap.
 - **A8** a new built-in MCP server must include BOTH `mcp.rs` edits
   (`auto_attach_builtin_ids` + `is_builtin_server_id`) — else it registers but
   the model never sees the tools.
@@ -826,7 +938,11 @@ so budget for them — they are not optional polish:
   user LACKING the permission and asserts the feature UI is ABSENT, and it must
   be enumerated (phase 3) and PASS (phase 8). A9 proves the API refuses; A10
   proves the UI is hidden. Both are required — a 403 backend test alone leaves
-  an ungated menu item / composer / nav entry invisible to the gate.
+  an ungated menu item / composer / nav entry invisible to the gate. That spec
+  must carry a **positive control** (`[positive-control]`, or the equivalent in
+  its `asserts:` prose): it must also assert the subject page/resource LOADS for
+  that restricted user, or "absent" is indistinguishable from "never rendered"
+  and the spec passes with the gate deleted.
 - **R2-5** every `/api/` e2e route-mock the diff adds must match a live route in
   `openapi.json` — a renamed route makes the mock a silent no-op that
   false-greens the spec.

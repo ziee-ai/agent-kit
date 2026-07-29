@@ -30,6 +30,19 @@
 PASS=0
 FAIL=0
 
+# Scratch file for the last assertion's captured output. It MUST be unique per
+# run. This was a hard-coded `/tmp/lc-selftest.out`, and it produced exactly the
+# failure mode staleness-check.mjs exists for: two selftest processes (two clones,
+# two agents, or a run alongside CI) interleave into ONE file, the grep-based
+# assertions then match — or fail to match — text they never produced, and the
+# suite reports a CONFIDENT WRONG verdict (observed: `91 passed, 2 failed` in
+# parallel vs `93 passed, 0 failed` alone) instead of failing loudly. Two agents
+# lost debugging time to it independently. Per-PID path + removal on exit.
+: "${LC_SELFTEST_OUT:=${TMPDIR:-/tmp}/lc-selftest.$$.out}"
+# Suites that install their own EXIT trap must chain this in (selftest-hardening.sh
+# does); for suites with no trap of their own, this one stands.
+trap 'rm -f "$LC_SELFTEST_OUT"' EXIT
+
 note() { printf '  %s\n' "$*"; }
 
 # assert_exit_cmd <expected 0|1> <label> -- <command...>
@@ -38,14 +51,14 @@ note() { printf '  %s\n' "$*"; }
 # are "did not pass"), and compares to <expected>.
 assert_exit_cmd() {
   local want="$1"; local label="$2"; shift 2; [ "${1:-}" = "--" ] && shift
-  "$@" >/tmp/lc-selftest.out 2>&1
+  "$@" >"$LC_SELFTEST_OUT" 2>&1
   local got=$?
   [ "$got" -ne 0 ] && got=1
   if [ "$got" = "$want" ]; then
     PASS=$((PASS+1)); printf '  \033[32mok  \033[0m %s (exit %s)\n' "$label" "$got"
   else
     FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s (want exit %s, got %s)\n' "$label" "$want" "$got"
-    sed 's/^/        | /' /tmp/lc-selftest.out
+    sed 's/^/        | /' "$LC_SELFTEST_OUT"
   fi
 }
 

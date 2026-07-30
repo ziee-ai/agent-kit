@@ -65,7 +65,7 @@
  */
 
 import { chromium } from 'playwright'
-import { mkdirSync, writeFileSync, appendFileSync } from 'node:fs'
+import { mkdirSync, writeFileSync, appendFileSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 // ---------------------------------------------------------------------------
@@ -83,11 +83,41 @@ const OUT = arg('out', `/data/pbya/ziee/tmp/live-ui-explore/run-${Date.now()}`)
 const MODEL = arg('model', process.env.EXPLORE_MODEL || 'qwen3.6-35b-a3b')
 const LLM = (process.env.EXPLORE_LLM_URL || 'http://localhost:4000/v1') + '/chat/completions'
 const HEADED = process.argv.includes('--headed')
+// Coverage memory ACROSS cycles. Without it every cycle restarts at "/" and
+// re-treads whatever is nearest — measured over 304 runs: /knowledge 158 visits
+// and /chat 132, against /scheduled-tasks 22 and /settings/assistants 14. The
+// file is written by this script and read by the next run; the routes in it are
+// ones the app itself offered, never a hardcoded list.
+const COVERAGE = arg('coverage', '/data/pbya/ziee/tmp/live-ui-explore/coverage.json')
+const routeOf = u => {
+  const path = String(u).replace(/^https?:\/\/[^/]+/, '') || '/'
+  const seg = path.split('?')[0].split('/').filter(Boolean)
+  // collapse ids so /knowledge/<uuid> counts as /knowledge/:id, not 40 routes
+  return '/' + seg.map(x => (/^[0-9a-f-]{16,}$/i.test(x) ? ':id' : x)).slice(0, 2).join('/')
+}
+let coverage = {}
+try { coverage = JSON.parse(readFileSync(COVERAGE, 'utf8')) } catch { coverage = {} }
 
 mkdirSync(OUT, { recursive: true })
 mkdirSync(join(OUT, 'shots'), { recursive: true })
 const findings = []
 const steps = []
+const leastVisited = () => Object.entries(coverage)
+  .filter(([r]) => r !== '/' && !r.includes(':id'))
+  .sort((a, b) => a[1] - b[1]).slice(0, 8).map(([r]) => r)
+const discoveredRoutes = new Set()
+// Every API call the app makes, normalised to an openapi-style template so it
+// can be diffed against the spec. Route coverage is a weak proxy for what the
+// app actually exercises — two pages can look "visited" while never triggering a
+// write. This is the real coverage number.
+const apiHits = new Map()   // "METHOD /api/x/{id}" -> count
+const API_COVERAGE = arg('api-coverage', '/data/pbya/ziee/tmp/live-ui-explore/api-coverage.json')
+const templatize = u => {
+  const path = String(u).replace(/^https?:\/\/[^/]+/, '').split('?')[0]
+  return path.split('/').map(seg =>
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(seg) ? '{id}'
+    : /^\d+$/.test(seg) ? '{id}' : seg).join('/')
+}
 const log = m => {
   const line = `${new Date().toISOString().slice(11, 19)} ${m}`
   console.log(line)
@@ -121,6 +151,18 @@ const MARK_SCRIPT = `(() => {
     const s = getComputedStyle(el);
     if (s.visibility === 'hidden' || s.display === 'none' || Number(s.opacity) < 0.05) return false;
     if (el.disabled) return false;
+    // HIT-TEST. Visible-and-sized is not the same as clickable: when a modal is
+    // open every control BEHIND it still passes the checks above, so they get
+    // marked, the model picks one, and Playwright waits the full timeout for an
+    // element that can never receive the event. That was the entire residual
+    // interaction-failed class — including clicks on the chat composer, which
+    // obviously works. It also explains narrow coverage: with a dialog open the
+    // explorer kept choosing unreachable things instead of the dialog's own
+    // controls.
+    const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    const hit = document.elementFromPoint(cx, cy);
+    if (!hit) return false;
+    if (hit !== el && !el.contains(hit) && !hit.contains(el)) return false;
     return true;
   };
   const out = [];
@@ -194,7 +236,7 @@ async function decide(ctx, shotB64) {
     messages: [{
       role: 'user',
       content: [
-        { type: 'text', text: `${SYSTEM}\n\n--- CURRENT STATE ---\nurl: ${ctx.url}\ntitle: ${ctx.title}\nstep ${ctx.step} of ${STEPS}\n\nrecently tried (avoid repeating):\n${ctx.history || '(nothing yet)'}\n\nelements you can CLICK:\n${JSON.stringify(ctx.elements.filter(e => !e.editable))}\n\nelements you can TYPE into (only these accept "type" — typing into anything else does nothing):\n${JSON.stringify(ctx.elements.filter(e => e.editable))}\n\nlinks this page offers for "goto":\n${JSON.stringify(ctx.hrefs)}` },
+        { type: 'text', text: `${SYSTEM}\n\n--- CURRENT STATE ---\nurl: ${ctx.url}\ntitle: ${ctx.title}\nstep ${ctx.step} of ${STEPS}\n\nrecently tried (avoid repeating):\n${ctx.history || '(nothing yet)'}\n\nelements you can CLICK:\n${JSON.stringify(ctx.elements.filter(e => !e.editable))}\n\nelements you can TYPE into (only these accept "type" — typing into anything else does nothing):\n${JSON.stringify(ctx.elements.filter(e => e.editable))}\n\nlinks this page offers for "goto":\n${JSON.stringify(ctx.hrefs)}\n\nareas you have explored LEAST across all previous sessions (prefer these when you see a way to reach one):\n${JSON.stringify(ctx.leastVisited)}` },
         { type: 'image_url', image_url: { url: `data:image/png;base64,${shotB64}` } },
       ],
     }],
@@ -252,6 +294,12 @@ page.on('requestfailed', r => {
   if (BENIGN_ABORT.test(err) && STREAMING.test(r.url())) return
   bus.reqfail.push(`${r.method()} ${r.url().slice(0, 160)} — ${err}`)
 })
+page.on('request', r => {
+  const u = r.url()
+  if (!/\/api\//.test(u)) return
+  const key = `${r.method()} ${templatize(u)}`
+  apiHits.set(key, (apiHits.get(key) || 0) + 1)
+})
 page.on('response', r => { if (r.status() >= 500) bus.http5xx.push(`${r.status()} ${r.request().method()} ${r.url().slice(0, 160)}`) })
 // A native dialog blocks everything; accept so exploration continues, but record it.
 page.on('dialog', async d => { bus.dialog.push(`${d.type()}: ${d.message().slice(0, 200)}`); await d.accept().catch(() => {}) })
@@ -305,6 +353,17 @@ try {
   } else {
     log('no login form — continuing (already authenticated?)')
   }
+  // Start where we have been LEAST, not always at "/". This is what turns
+  // per-cycle coverage from "whatever is nearest" into a sweep, without any
+  // hardcoded route list — every candidate here was discovered by an earlier run.
+  const known = Object.entries(coverage).filter(([r]) => r !== '/' && !r.includes(':id'))
+  if (known.length) {
+    known.sort((a, b) => a[1] - b[1])
+    const target = known[0][0]
+    log(`starting at least-visited route ${target} (${known[0][1]} prior visits, ${known.length} known)`)
+    await page.goto(BASE + target, { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => {})
+    await page.waitForTimeout(2500)
+  }
   clearBus()
 
   const history = []
@@ -313,6 +372,7 @@ try {
     try { ctx = await page.evaluate(MARK_SCRIPT) }
     catch (e) { log(`step ${i}: evaluate FAILED — ${String(e).split('\n')[0].slice(0, 200)}`) }
     if (!ctx) { await page.goBack().catch(() => {}); await page.waitForTimeout(1500); continue }
+    for (const h of ctx.hrefs || []) discoveredRoutes.add(routeOf(h))
     const shotPath = join(OUT, 'shots', `step-${String(i).padStart(3, '0')}.png`)
     const buf = await page.screenshot({ path: shotPath })
     await page.evaluate(unmark).catch(() => {})
@@ -332,7 +392,7 @@ try {
     let act
     try {
       act = await decide({
-        ...ctx, step: i,
+        ...ctx, step: i, leastVisited: leastVisited(),
         history: history.slice(-6).join('\n') +
           (stuck ? `\n\nSTOP. You have done "${recent[0]}" three times with no effect. It does not work. Choose a DIFFERENT element, or navigate somewhere you have not been.` : ''),
       }, buf.toString('base64'))
@@ -436,15 +496,27 @@ try {
   log(`FATAL ${String(e).slice(0, 300)}`)
   record('harness-error', 'HIGH', String(e).slice(0, 300), null, 'detector')
 } finally {
+  let summaryApi = null
   const summary = {
     startedAt: new Date().toISOString(), base: BASE, model: MODEL,
     stepsPlanned: STEPS, stepsTaken: steps.length,
     urlsVisited: [...new Set(steps.map(s => s.url))],
+    apiEndpointsHit: [...apiHits.entries()].sort((a, b) => b[1] - a[1]).map(([k, v]) => `${v}x ${k}`),
     findings, steps,
   }
+  // merge this run's endpoint hits into the durable tally
+  let apiCov = {}
+  try { apiCov = JSON.parse(readFileSync(API_COVERAGE, 'utf8')) } catch {}
+  for (const [k, v] of apiHits) apiCov[k] = (apiCov[k] || 0) + v
+  try { writeFileSync(API_COVERAGE, JSON.stringify(apiCov, null, 1)) } catch {}
+  summaryApi = { thisRun: apiHits.size, cumulative: Object.keys(apiCov).length }
+  for (const s2 of steps) coverage[routeOf(s2.url)] = (coverage[routeOf(s2.url)] || 0) + 1
+  for (const h of discoveredRoutes) if (!(h in coverage)) coverage[h] = 0   // seen but never visited
+  try { writeFileSync(COVERAGE, JSON.stringify(coverage, null, 1)) } catch {}
   writeFileSync(join(OUT, 'result.json'), JSON.stringify(summary, null, 2))
   const bySev = s => findings.filter(f => f.severity === s).length
   const det = findings.filter(f => f.verifiedBy === 'detector').length
+  log(`api endpoints hit this run: ${apiHits.size}${summaryApi ? ` (cumulative ${summaryApi.cumulative})` : ''}`)
   log(`done: ${steps.length} steps, ${[...new Set(steps.map(s => s.url))].length} distinct urls, ` +
       `${findings.length} findings (HIGH ${bySev('HIGH')} / MEDIUM ${bySev('MEDIUM')} / LOW ${bySev('LOW')}; ${det} detector-verified)`)
   writeFileSync(join(OUT, 'FINDINGS.md'),

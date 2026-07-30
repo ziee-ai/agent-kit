@@ -108,7 +108,13 @@ function loadAppConfig(root) {
   return cfg;
 }
 const APP = loadAppConfig(repo);
-const MIGRATIONS_DIR = APP.MERGE_MIGRATIONS_DIR || null;      // C2 / --verify-head
+// C2 / --verify-head. A COMMA-SEPARATED list of roots, because migrations are
+// not necessarily one flat directory: this app keeps them per-module under
+// src/modules/<mod>/migrations/. Every root is scanned recursively and the
+// numeric prefixes share ONE namespace (they all apply to the same database),
+// which is exactly what the collision check needs.
+const MIGRATION_ROOTS = (APP.MERGE_MIGRATIONS_DIR || '')
+  .split(',').map((s) => s.trim()).filter(Boolean);
 const CARGO_PACKAGE = APP.MERGE_CARGO_PACKAGE || null;         // C1
 const CARGO_DESKTOP_PACKAGE = APP.MERGE_CARGO_DESKTOP_PACKAGE || null; // C1 (optional)
 const DESKTOP_TOUCH_PREFIX = APP.MERGE_DESKTOP_TOUCH_PREFIX || null;   // C1 (optional)
@@ -138,8 +144,8 @@ if (VERIFY_HEAD) {
 
   // C2: no duplicate migration number prefixes in the committed tree.
   // Skipped when MERGE_MIGRATIONS_DIR is unset (app has no migrations dir).
-  if (MIGRATIONS_DIR) {
-    const ml = gitTry(repo, 'ls-tree', '-r', '--name-only', rev, '--', MIGRATIONS_DIR);
+  if (MIGRATION_ROOTS.length) {
+    const ml = gitTry(repo, 'ls-tree', '-r', '--name-only', rev, '--', ...MIGRATION_ROOTS);
     if (ml.ok) {
       const byNum = new Map();
       for (const line of ml.out.split(/\r?\n/)) {
@@ -147,6 +153,13 @@ if (VERIFY_HEAD) {
         if (!m) continue;
         (byNum.get(m[1]) || byNum.set(m[1], []).get(m[1])).push(line.trim());
       }
+      // A configured root that matches NOTHING means the gate is checking thin
+      // air. This is not a pass: MERGE_MIGRATIONS_DIR pointed at a flat
+      // `server/migrations` for months after the migrations moved per-module,
+      // so every landing reported "C2 PASS — no migrations dir" while checking
+      // 106 real migration files not at all.
+      if (byNum.size === 0)
+        problems.push(`C2: MERGE_MIGRATIONS_DIR (${MIGRATION_ROOTS.join(', ')}) matched no migration files in ${rev} — the collision check is misconfigured, not clean.`);
       for (const [num, files] of byNum) {
         if (files.length > 1) problems.push(`C2: duplicate migration number ${num}: ${files.join(', ')} — renumber one above the other before landing on main.`);
       }
@@ -235,9 +248,9 @@ const mergeBase = git(repo, 'merge-base', base, branch);
 // filename `00000000000135_create_x.sql` → number "00000000000135"
 // (MIGRATIONS_DIR is resolved from app.config near the top; null ⇒ no migrations.)
 function migsAt(ref) {
-  if (!MIGRATIONS_DIR) return new Map();
-  // list migration files present in <ref>'s tree; tolerant of the dir being absent
-  const r = gitTry(repo, 'ls-tree', '-r', '--name-only', ref, '--', MIGRATIONS_DIR);
+  if (!MIGRATION_ROOTS.length) return new Map();
+  // list migration files present in <ref>'s tree; tolerant of a root being absent
+  const r = gitTry(repo, 'ls-tree', '-r', '--name-only', ref, '--', ...MIGRATION_ROOTS);
   if (!r.ok) return new Map();
   const m = new Map();
   for (const line of r.out.split(/\r?\n/)) {
@@ -282,12 +295,16 @@ function gateC4() {
 // the BRANCH added must sort after main's max-at-fork (else it renumbers-needs).
 // ===========================================================================
 function gateC2() {
-  if (!MIGRATIONS_DIR) { record('C2', 'migration-collision', 'SKIP', 'MERGE_MIGRATIONS_DIR unset (no migrations dir configured)'); return; }
+  if (!MIGRATION_ROOTS.length) { record('C2', 'migration-collision', 'SKIP', 'MERGE_MIGRATIONS_DIR unset (no migrations dir configured)'); return; }
   const atMergeBase = migsAt(mergeBase);
   const atBase = migsAt(base);
   const atBranch = migsAt(branch);
   if (atBranch.size === 0 && atBase.size === 0) {
-    record('C2', 'migration-collision', 'PASS', 'no migrations dir');
+    // Configured but matching nothing on EITHER side is a misconfiguration, not
+    // a clean tree — see the note in verifyHead. Reporting PASS here is how this
+    // gate silently stopped checking anything when migrations moved per-module.
+    record('C2', 'migration-collision', 'FAIL',
+      `MERGE_MIGRATIONS_DIR (${MIGRATION_ROOTS.join(', ')}) matched no migration files on main or branch — fix the configured root(s); a gate that checks nothing must not report PASS`);
     return;
   }
   const nums = (m) => [...m.keys()];

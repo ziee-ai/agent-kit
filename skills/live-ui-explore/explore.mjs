@@ -99,7 +99,15 @@ const log = m => {
 // The selector list is plain HTML/ARIA. Nothing here knows what this app is.
 // ---------------------------------------------------------------------------
 const MARK_SCRIPT = `(() => {
+  // Remove the badge DIVs *and* clear the marked-attributes from the previous
+  // enumeration. Clearing the attributes is the load-bearing half: indices are
+  // reassigned from 0 each time, so a leftover data-explore-marked="5" on an
+  // old node makes the selector match TWO elements, and .first() picks the
+  // stale (often detached) one — which then times out. That manufactured 458
+  // false interaction-failed findings overnight, on buttons that click in
+  // 29-67ms by hand.
   document.querySelectorAll('[data-explore-mark]').forEach(n => n.remove());
+  document.querySelectorAll('[data-explore-marked]').forEach(n => n.removeAttribute('data-explore-marked'));
   const SEL = [
     'button', 'a[href]', 'input', 'textarea', 'select',
     '[role=button]', '[role=tab]', '[role=menuitem]', '[role=option]',

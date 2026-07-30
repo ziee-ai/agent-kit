@@ -166,7 +166,7 @@ Your goals, in order:
 
 Bias strongly toward parts of the app you have not touched yet. Do not sit on one page.
 
-You are shown a screenshot with small red NUMBER badges overlaid on every element you can interact with, plus a list describing them. Choose exactly ONE action.
+You are shown a screenshot with small red NUMBER badges overlaid on every element you can interact with, plus two lists: one of clickable elements and one of elements that accept typing. "type" works ONLY on a badge from the typeable list — aiming it at a button or a div does nothing and wastes your turn. If nothing on screen is typeable, click something first to open a form. Choose exactly ONE action.
 
 Reply with ONLY a JSON object, no prose, no code fence:
 {"reason":"<12 words on why>","action":"click|type|press|scroll|back|goto|done","n":<badge number, for click/type>,"text":"<for type>","key":"<for press: Enter|Escape|Tab>","href":"<for goto, MUST be one from the offered list>","broken":"<empty string, or what looks broken to you>"}
@@ -186,7 +186,7 @@ async function decide(ctx, shotB64) {
     messages: [{
       role: 'user',
       content: [
-        { type: 'text', text: `${SYSTEM}\n\n--- CURRENT STATE ---\nurl: ${ctx.url}\ntitle: ${ctx.title}\nstep ${ctx.step} of ${STEPS}\n\nrecently tried (avoid repeating):\n${ctx.history || '(nothing yet)'}\n\ninteractive elements:\n${JSON.stringify(ctx.elements)}\n\nlinks this page offers for "goto":\n${JSON.stringify(ctx.hrefs)}` },
+        { type: 'text', text: `${SYSTEM}\n\n--- CURRENT STATE ---\nurl: ${ctx.url}\ntitle: ${ctx.title}\nstep ${ctx.step} of ${STEPS}\n\nrecently tried (avoid repeating):\n${ctx.history || '(nothing yet)'}\n\nelements you can CLICK:\n${JSON.stringify(ctx.elements.filter(e => !e.editable))}\n\nelements you can TYPE into (only these accept "type" — typing into anything else does nothing):\n${JSON.stringify(ctx.elements.filter(e => e.editable))}\n\nlinks this page offers for "goto":\n${JSON.stringify(ctx.hrefs)}` },
         { type: 'image_url', image_url: { url: `data:image/png;base64,${shotB64}` } },
       ],
     }],
@@ -226,8 +226,8 @@ const page = await context.newPage()
 
 // Per-step event buffers. Cleared after each step so an event is attributed to
 // the action that caused it, not to the whole run.
-let bus = { console: [], pageerror: [], reqfail: [], http5xx: [], dialog: [] }
-const clearBus = () => { bus = { console: [], pageerror: [], reqfail: [], http5xx: [], dialog: [] } }
+let bus = { console: [], pageerror: [], reqfail: [], http5xx: [], dialog: [], filechooser: [] }
+const clearBus = () => { bus = { console: [], pageerror: [], reqfail: [], http5xx: [], dialog: [], filechooser: [] } }
 const NOISE = /favicon|\/@vite\/|__vite|sockjs|hot-update|ERR_ABORTED.*\.map/i
 // A long-lived stream aborted by NAVIGATION is the browser working, not the app
 // failing. Measured: 6 of 14 findings in cycle 1 were this one non-event. Scoped
@@ -247,6 +247,17 @@ page.on('requestfailed', r => {
 page.on('response', r => { if (r.status() >= 500) bus.http5xx.push(`${r.status()} ${r.request().method()} ${r.url().slice(0, 160)}`) })
 // A native dialog blocks everything; accept so exploration continues, but record it.
 page.on('dialog', async d => { bus.dialog.push(`${d.type()}: ${d.message().slice(0, 200)}`); await d.accept().catch(() => {}) })
+
+// A file chooser is modal and invisible to the page, so an unanswered one makes
+// the click look like a no-op and the explorer retries it forever. Answer every
+// chooser with a small generated file: app-agnostic, and it is the only way the
+// upload paths get exercised at all.
+const FIXTURE = '/tmp/live-ui-explore-fixture.txt'
+try { writeFileSync(FIXTURE, 'live-ui-explore upload fixture\n' + 'lorem ipsum dolor sit amet\n'.repeat(40)) } catch {}
+page.on('filechooser', async fc => {
+  bus.filechooser.push(`filechooser (multiple=${fc.isMultiple()}) answered with a text fixture`)
+  await fc.setFiles(FIXTURE).catch(() => {})
+})
 
 // Stable key for cross-cycle dedup. Normalises ONLY volatile identifiers —
 // uuids, bare numbers — never whole messages. An over-broad key silently
@@ -305,9 +316,18 @@ try {
       continue
     }
 
+    // If the last 3 actions were identical, the action is not working. Saying so
+    // explicitly beats relying on the model to notice its own history — it did
+    // not (an ineffective button clicked 6x in one run).
+    const recent = history.slice(-3)
+    const stuck = recent.length === 3 && new Set(recent).size === 1
     let act
     try {
-      act = await decide({ ...ctx, step: i, history: history.slice(-6).join('\n') }, buf.toString('base64'))
+      act = await decide({
+        ...ctx, step: i,
+        history: history.slice(-6).join('\n') +
+          (stuck ? `\n\nSTOP. You have done "${recent[0]}" three times with no effect. It does not work. Choose a DIFFERENT element, or navigate somewhere you have not been.` : ''),
+      }, buf.toString('base64'))
     } catch (e) {
       log(`step ${i}: model error — ${String(e).slice(0, 160)}`)
       continue
@@ -334,8 +354,38 @@ try {
     }
     clearBus()
     const before = page.url()
+
+    // RE-RESOLVE the target by DESCRIPTION, not by the stale badge index.
+    //
+    // Badge numbers are assigned when the screenshot is taken, but the model
+    // takes seconds to answer and this is a React SPA — a re-render replaces DOM
+    // nodes and drops the `data-explore-marked` attribute. Playwright then waits
+    // the full timeout for a node that no longer exists, which surfaced as
+    // `interaction-failed: TimeoutError`. That was 3 of 4 findings in cycle 2,
+    // and it was entirely this harness: probed by hand, the same buttons click in
+    // 21-27ms. A false-finding class that buries real ones is worse than none.
+    //
+    // So: re-mark, then find the element matching the chosen one's identity
+    // (tag + role + type + label). If it is genuinely gone, that is not a defect —
+    // the page moved on. If it is still there and STILL cannot be used, that is a
+    // real finding.
+    let liveN = target ? target.n : null
+    if (target) {
+      const fresh = await page.evaluate(MARK_SCRIPT).catch(() => null)
+      await page.evaluate(unmark).catch(() => {})
+      const same = fresh?.elements?.find(e =>
+        e.tag === target.tag && e.role === target.role &&
+        e.type === target.type && e.label === target.label)
+      if (!same) {
+        log(`  affordance gone after re-render: [${target.n}] ${target.tag} "${target.label}" — page moved on, not a defect`)
+        steps.push({ ...step, skipped: 'affordance-vanished', urlAfter: page.url() })
+        continue
+      }
+      liveN = same.n
+    }
+
     try {
-      const loc = target ? page.locator(`[data-explore-marked="${target.n}"]`).first() : null
+      const loc = target ? page.locator(`[data-explore-marked="${liveN}"]`).first() : null
       switch (act.action) {
         case 'click': if (loc) await loc.click({ timeout: 8000 }); break
         case 'type':
@@ -366,6 +416,7 @@ try {
     for (const t of bus.console) record('console-error', 'MEDIUM', t, step, 'detector')
     for (const t of bus.reqfail) record('request-failed', 'MEDIUM', t, step, 'detector')
     for (const t of bus.dialog) record('native-dialog', 'LOW', t, step, 'detector')
+    for (const t of bus.filechooser) log(`  ${t}`)
 
     // blank page after an action = something navigated into nothing
     const bodyLen = await page.evaluate(() => document.body?.innerText?.trim().length ?? 0).catch(() => -1)

@@ -162,7 +162,22 @@ const MARK_SCRIPT = `(() => {
     const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
     const hit = document.elementFromPoint(cx, cy);
     if (!hit) return false;
-    if (hit !== el && !el.contains(hit) && !hit.contains(el)) return false;
+    // Accept only: the point resolves to THIS element, or to a descendant of it
+    // (a span inside a button). An ANCESTOR is a rejection, not a pass — that
+    // was an escape hatch: a hover-gated control inside
+    // div.row-actions{opacity:0;pointer-events:none} resolves to its ancestor,
+    // so hit.contains(el) waved it through and every click on it timed out.
+    if (hit !== el && !el.contains(hit)) return false;
+    // Effective, inherited properties — not the element's own. opacity and
+    // pointer-events both cascade in effect: a control with opacity:1 inside an
+    // opacity:0 wrapper is invisible and unclickable, and reading only the
+    // element lied about both.
+    for (let a = el; a && a !== document.body; a = a.parentElement) {
+      const as = getComputedStyle(a);
+      if (as.pointerEvents === 'none') return false;
+      if (Number(as.opacity) < 0.05) return false;
+      if (as.visibility === 'hidden' || as.display === 'none') return false;
+    }
     return true;
   };
   const out = [];

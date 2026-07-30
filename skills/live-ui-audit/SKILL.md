@@ -3,6 +3,20 @@ name: live-ui-audit
 description: Drive the LIVE running app like a human and produce an EVIDENCE-BASED audit of functional bugs, UI/visual correctness, responsive behavior, color/theme conformance, design-system consistency, network hygiene, and RBAC permission/resource-scoping. Objective, measurable signals ONLY — no subjective UX opinion. Use when asked to audit/QA/smoke-test a running instance, find real UI/responsive/theme/perf/permission bugs across viewports and themes, verify a deploy, or check whether a build "actually works" in the real app (not just gallery/tests). Takes a base URL + credentials, works against any running ziee-stack instance. Runs Playwright across 3 viewports × 2 themes × JTBD flows × personas and emits a ranked, deduped finding report with screenshots.
 ---
 
+> **SUPERSEDED by `live-ui-explore`.** Kept for reference only.
+>
+> This driver walks a hardcoded route list with hardcoded selectors. Measured:
+> 19 interactions, ~17 of them the chat composer — so across 149 cycles it
+> RENDERED /projects, /knowledge and /settings/users and never once created a
+> project, added a group or scheduled a task. Every write path went unexercised,
+> which is invisible if you judge coverage by routes visited rather than by API
+> endpoints actually hit.
+>
+> Do not extend it with more routes or scripted journeys: a journey only finds
+> bugs in the path someone thought to script. Use `live-ui-explore`, which is
+> given no app knowledge at all.
+
+
 # Live UI Audit
 
 Points an **objective** check battery at a **running** app and produces a ranked,

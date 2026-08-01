@@ -138,7 +138,23 @@ const SINKS = arg('sinks', '/data/pbya/ziee/tmp/live-ui-explore/sinks.json')
 let sinks = {}
 try { sinks = JSON.parse(readFileSync(SINKS, 'utf8')) } catch { sinks = {} }
 const SINK_MIN_STEPS = 40      // enough evidence to judge
-const isSink = r => { const s = sinks[r]; return !!s && s.steps >= SINK_MIN_STEPS && !s.newRoutes }
+// A route is a sink only when it yields NOTHING NEW — neither a route nor an
+// untried control.
+//
+// Keying on new ROUTES alone was wrong, and wrong in a way that got worse over
+// time: as discovery saturates, every page stops revealing new routes, so the
+// whole app classifies as a sink and the explorer refuses to start anywhere and
+// bails after five steps. It had already mislabelled /settings/general,
+// /settings/assistants, /hub/assistants and /notifications — real pages, full of
+// untried controls, whose only sin was linking nowhere new.
+// A page whose controls are all exhausted AND that links nowhere new is genuinely
+// spent; that is the condition worth acting on.
+// Measured over a RECENT window, not a lifetime total. Cumulative counters do not
+// decay: once a route had ever produced anything it could never be judged spent,
+// and once it had produced nothing it could never be redeemed after the app's
+// state changed underneath it. `barren` is consecutive steps on that route
+// yielding nothing new, and it resets the moment the route pays out again.
+const isSink = (r) => (sinks[r]?.barren || 0) >= SINK_MIN_STEPS
 // Every API call the app makes, normalised to an openapi-style template so it
 // can be diffed against the spec. Route coverage is a weak proxy for what the
 // app actually exercises — two pages can look "visited" while never triggering a
@@ -485,6 +501,28 @@ try {
     await page.getByPlaceholder(/password/i).first().fill(PASS)
     await page.getByRole('button', { name: /sign in/i }).first().click()
     await page.waitForTimeout(6000)
+    // ASSERT it worked. Logging success right after clicking asserts nothing, and
+    // the cost of that was not hypothetical: the explorer renamed its own admin
+    // account through the profile UI, every later cycle logged "logged in as
+    // admin" while sitting on the login screen, and hours of cycles explored
+    // exactly one page. The loop HAS a recovery path for this; it never fired
+    // because it greps for a string this file never printed.
+    //
+    // So the failure must be (a) detected by state, not assumed, and (b) reported
+    // in the exact wording explore-loop.sh's recovery greps for. Those two strings
+    // are a contract between the files — change one and recovery silently dies.
+    if (await page.locator('input[type=password]').count()) {
+      log(`authentication failed as ${USER} — still on the login form (credentials changed?)`)
+      findings.push({
+        kind: 'locked-out', severity: 'HIGH', verifiedBy: 'detector',
+        detail: `could not authenticate as "${USER}"; every subsequent step in this cycle would explore the login screen only`,
+        url: page.url(), fingerprint: 'locked-out',
+      })
+      writeFileSync(join(OUT, 'result.json'), JSON.stringify(
+        { lockedOut: true, findings, urlsVisited: [], stepsTaken: 0 }, null, 2))
+      await browser.close()
+      process.exit(3)
+    }
     log(`logged in as ${USER}`)
   } else {
     log('no login form — continuing (already authenticated?)')
@@ -520,7 +558,7 @@ try {
           .filter(([r]) => r !== '/' && !r.includes(':id') && !isSink(r))
           .sort((a, b) => a[1] - b[1])[0]
         if (escape) {
-          log(`SINK ESCAPE: ${here} has consumed ${sinks[here].steps} steps across cycles and revealed no new route — leaving for ${escape[0]}`)
+          log(`SINK ESCAPE: ${here} has gone ${sinks[here].barren} consecutive steps without a new route or an untried control (${sinks[here].steps} steps total) — leaving for ${escape[0]}`)
           await page.goto(BASE + escape[0], { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => {})
           await page.waitForTimeout(2500)
           sinkStreak = 0
@@ -542,12 +580,18 @@ try {
     // never reveals anything is what the sink test is looking for.
     {
       const here = routeOf(ctx.url)
-      sinks[here] = sinks[here] || { steps: 0, newRoutes: 0 }
+      sinks[here] = sinks[here] || { steps: 0, barren: 0 }
+      if (sinks[here].barren === undefined) sinks[here].barren = 0
+      let paidOut = 0
       for (const h of ctx.hrefs || []) {
         const r = routeOf(h)
-        if (!discoveredRoutes.has(r) && !(r in coverage)) sinks[here].newRoutes++
+        if (!discoveredRoutes.has(r) && !(r in coverage)) paidOut++
         discoveredRoutes.add(r)
       }
+      // Untried controls are productive ground too — a settings page that links
+      // nowhere new is still worth operating.
+      paidOut += ctx.elements.filter(e => !tried[sigOf(ctx.url, e)]).length
+      sinks[here].barren = paidOut ? 0 : sinks[here].barren + 1
     }
 
     // Which of the offered controls has this rig NEVER operated, in any cycle?
@@ -600,7 +644,7 @@ try {
     // Charge the step to the route it happened on, for the sink ledger.
     {
       const r = routeOf(ctx.url)
-      sinks[r] = sinks[r] || { steps: 0, newRoutes: 0 }
+      sinks[r] = sinks[r] || { steps: 0, barren: 0 }
       sinks[r].steps++
     }
 

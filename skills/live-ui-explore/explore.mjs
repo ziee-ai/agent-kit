@@ -106,11 +106,45 @@ const leastVisited = () => Object.entries(coverage)
   .filter(([r]) => r !== '/' && !r.includes(':id'))
   .sort((a, b) => a[1] - b[1]).slice(0, 8).map(([r]) => r)
 const discoveredRoutes = new Set()
+
+// ---------------------------------------------------------------------------
+// NOVELTY MEMORY — per-affordance, persistent across cycles.
+//
+// Route-level hinting already existed and is not the bottleneck: the prompt has
+// carried "prefer the areas you have explored LEAST" on every step from the
+// start, and each cycle already STARTS at the least-visited route. After 41
+// cycles the rig had still seen 13 of the app's 73 routes, and 0 discovered
+// routes were unvisited — the hint was working perfectly on a list of 13.
+//
+// A page-level exhortation cannot tell the model WHICH of 60 badges is new, so
+// it re-clicks the same handful. This records the individual controls it has
+// operated and marks the untouched ones, which is a signal it can act on. The
+// signature is the app's own accessible description of the control, never a
+// badge index (reassigned every step) or a position (moves on reflow).
+const AFFORDANCES = arg('affordances', '/data/pbya/ziee/tmp/live-ui-explore/affordances.json')
+let tried = {}
+try { tried = JSON.parse(readFileSync(AFFORDANCES, 'utf8')) } catch { tried = {} }
+const sigOf = (url, el) =>
+  `${routeOf(url)}|${(el.tag || '?').toLowerCase()}${el.role ? ':' + el.role : ''}|${(el.label || '').trim().slice(0, 40).toLowerCase()}`
+
+// ---------------------------------------------------------------------------
+// SINK LEDGER — routes that consume steps without ever yielding new ground.
+//
+// /onboarding took 368 visits, 21% of all recorded activity, while total route
+// discovery sat at 13. A route that expensive and that unproductive is a trap,
+// and no amount of prompt encouragement escapes it, because the model does not
+// experience the cost across cycles — only the ledger does.
+const SINKS = arg('sinks', '/data/pbya/ziee/tmp/live-ui-explore/sinks.json')
+let sinks = {}
+try { sinks = JSON.parse(readFileSync(SINKS, 'utf8')) } catch { sinks = {} }
+const SINK_MIN_STEPS = 40      // enough evidence to judge
+const isSink = r => { const s = sinks[r]; return !!s && s.steps >= SINK_MIN_STEPS && !s.newRoutes }
 // Every API call the app makes, normalised to an openapi-style template so it
 // can be diffed against the spec. Route coverage is a weak proxy for what the
 // app actually exercises — two pages can look "visited" while never triggering a
 // write. This is the real coverage number.
-const apiHits = new Map()   // "METHOD /api/x/{id}" -> count
+const apiHits = new Map()   // "METHOD /api/x/{id}" -> count (attempted)
+const apiOutcomes = new Map() // "METHOD /api/x/{id}" -> {ok, c4, c5} (what came back)
 const API_COVERAGE = arg('api-coverage', '/data/pbya/ziee/tmp/live-ui-explore/api-coverage.json')
 const templatize = u => {
   const path = String(u).replace(/^https?:\/\/[^/]+/, '').split('?')[0]
@@ -138,12 +172,38 @@ const MARK_SCRIPT = `(() => {
   // 29-67ms by hand.
   document.querySelectorAll('[data-explore-mark]').forEach(n => n.remove());
   document.querySelectorAll('[data-explore-marked]').forEach(n => n.removeAttribute('data-explore-marked'));
+  // Controls that are interactive BY DEFINITION — native elements and ARIA roles
+  // whose whole purpose is to be operated. This list is pure HTML/ARIA semantics:
+  // it says nothing about this particular app, which is the property that keeps
+  // the explorer a clueless user rather than a scripted tour.
+  //
+  // The second half of this list was missing, and measurably so: a coverage pass
+  // found combobox / listbox / treeitem / slider / spinbutton / summary controls
+  // rendered and never offered as candidates. The explorer was not declining to
+  // open selects, trees and disclosures — it could not see them.
   const SEL = [
-    'button', 'a[href]', 'input', 'textarea', 'select',
+    'button', 'a[href]', 'input', 'textarea', 'select', 'summary',
     '[role=button]', '[role=tab]', '[role=menuitem]', '[role=option]',
     '[role=switch]', '[role=checkbox]', '[role=radio]', '[role=link]',
+    '[role=combobox]', '[role=listbox]', '[role=treeitem]', '[role=slider]',
+    '[role=spinbutton]', '[role=menuitemcheckbox]', '[role=menuitemradio]',
+    '[role=searchbox]', '[role=textbox]',
     '[contenteditable="true"]', '[tabindex]:not([tabindex="-1"])',
   ].join(',');
+  // Cell-like elements are a different case. A table renders ~36 visible cells per
+  // page and MOST DO NOTHING when clicked, so adding td,th outright would spend
+  // a 45-step budget on no-ops and look like coverage while teaching nothing.
+  // Offer one only when the app itself presents it as clickable — an inherited
+  // cursor:pointer is the app's own declaration of intent, and reading it is
+  // still generic CSS, not app knowledge.
+  const SEL_CELL = 'td,th,[role=gridcell],[role=row],[role=treeitem],li';
+  const presentsAsClickable = el => {
+    for (let a = el; a && a !== document.body; a = a.parentElement) {
+      if (getComputedStyle(a).cursor === 'pointer') return true;
+      if (a.matches('table,[role=grid],[role=treegrid],ul,ol')) break;
+    }
+    return false;
+  };
   const vis = el => {
     const r = el.getBoundingClientRect();
     if (r.width < 6 || r.height < 6) return false;
@@ -182,7 +242,45 @@ const MARK_SCRIPT = `(() => {
   };
   const out = [];
   let i = 0;
-  for (const el of document.querySelectorAll(SEL)) {
+  // ORDER IS LOAD-BEARING. The dedupe rule below drops an element that already has
+  // a marked ANCESTOR, and a <tr>/<li> precedes its own buttons in document order.
+  // Iterating one combined query would therefore mark the row first and suppress
+  // the Edit/Delete buttons inside it — the highest-value controls on a list page.
+  // Definitionally-interactive controls claim their slot first; cell-like
+  // containers only pick up what is left.
+  const primary = [...document.querySelectorAll(SEL)];
+  const cells = [...document.querySelectorAll(SEL_CELL)]
+    .filter(el => !el.matches(SEL) && presentsAsClickable(el));
+  // PAGE CHROME GOES LAST. The badge budget below is a hard 60, and it used to be
+  // spent in document order — where nav, sidebar and header come first. Measured
+  // on /settings/users: 118 visible affordances, 60 badges, so 58 were never
+  // offered, and always the SAME 58, because document order does not change
+  // between cycles. Those 58 are the main content: the table rows, the row
+  // actions, the create button. That is a far bigger constraint on coverage than
+  // any selector gap, and it explains a rig that renders pages without operating
+  // them. Landmarks are generic ARIA, so this stays app-agnostic.
+  //
+  // But chrome must NOT be starved to zero. Ranking it strictly last did exactly
+  // that: on a 97-affordance page all 60 badges went to content and the sidebar
+  // got none, so the explorer could no longer navigate AWAY from that page. That
+  // trades breadth for depth, and breadth is the scarcer resource here — across
+  // 41 cycles it discovered 13 of the app's 73 routes. So reserve a slice of the
+  // budget for navigation: content gets first call on most slots, chrome keeps
+  // enough to always offer a way out.
+  const isChrome = el => !!el.closest('nav,aside,header,footer,[role=navigation],[role=banner],[role=complementary],[role=contentinfo]');
+  const CHROME_RESERVE = 15;
+  const split = list => [list.filter(el => !isChrome(el)), list.filter(isChrome)];
+  const [pc, pch] = split(primary);
+  const [cc, cch] = split(cells);
+  const content = [...pc, ...cc];
+  const chrome = [...pch, ...cch];
+  const ordered = [
+    ...content.slice(0, Math.max(0, 60 - Math.min(CHROME_RESERVE, chrome.length))),
+    ...chrome.slice(0, CHROME_RESERVE),
+    ...content.slice(Math.max(0, 60 - Math.min(CHROME_RESERVE, chrome.length))),
+    ...chrome.slice(CHROME_RESERVE),
+  ];
+  for (const el of ordered) {
     if (!vis(el)) continue;
     // skip an element whose interactive ancestor is already marked (avoid dupes)
     if (el.closest('[data-explore-marked]') && el.closest('[data-explore-marked]') !== el) continue;
@@ -198,7 +296,10 @@ const MARK_SCRIPT = `(() => {
       href: el.getAttribute('href') || null,
     });
     const b = document.createElement('div');
-    b.setAttribute('data-explore-mark', '1');
+    // Store the badge INDEX, not a constant flag: callers need to find one badge
+    // by number (to recolour it). Teardown matches the bare attribute, so it is
+    // unaffected by the value.
+    b.setAttribute('data-explore-mark', String(i));
     b.textContent = String(i);
     b.style.cssText = [
       'position:fixed', 'z-index:2147483647', 'pointer-events:none',
@@ -251,7 +352,7 @@ async function decide(ctx, shotB64) {
     messages: [{
       role: 'user',
       content: [
-        { type: 'text', text: `${SYSTEM}\n\n--- CURRENT STATE ---\nurl: ${ctx.url}\ntitle: ${ctx.title}\nstep ${ctx.step} of ${STEPS}\n\nrecently tried (avoid repeating):\n${ctx.history || '(nothing yet)'}\n\nelements you can CLICK:\n${JSON.stringify(ctx.elements.filter(e => !e.editable))}\n\nelements you can TYPE into (only these accept "type" — typing into anything else does nothing):\n${JSON.stringify(ctx.elements.filter(e => e.editable))}\n\nlinks this page offers for "goto":\n${JSON.stringify(ctx.hrefs)}\n\nareas you have explored LEAST across all previous sessions (prefer these when you see a way to reach one):\n${JSON.stringify(ctx.leastVisited)}` },
+        { type: 'text', text: `${SYSTEM}\n\n--- CURRENT STATE ---\nurl: ${ctx.url}\ntitle: ${ctx.title}\nstep ${ctx.step} of ${STEPS}\n\nrecently tried (avoid repeating):\n${ctx.history || '(nothing yet)'}\n\nelements you can CLICK:\n${JSON.stringify(ctx.elements.filter(e => !e.editable))}\n\nelements you can TYPE into (only these accept "type" — typing into anything else does nothing):\n${JSON.stringify(ctx.elements.filter(e => e.editable))}\n\nlinks this page offers for "goto":\n${JSON.stringify(ctx.hrefs)}\n\nareas you have explored LEAST across all previous sessions (prefer these when you see a way to reach one):\n${JSON.stringify(ctx.leastVisited)}\n\nbadges you have NEVER used before, in any session — these are drawn GREEN in the screenshot, everything else is red. Strongly prefer one of these:\n${JSON.stringify(ctx.fresh || [])}` },
         { type: 'image_url', image_url: { url: `data:image/png;base64,${shotB64}` } },
       ],
     }],
@@ -291,8 +392,11 @@ const page = await context.newPage()
 
 // Per-step event buffers. Cleared after each step so an event is attributed to
 // the action that caused it, not to the whole run.
-let bus = { console: [], pageerror: [], reqfail: [], http5xx: [], dialog: [], filechooser: [] }
-const clearBus = () => { bus = { console: [], pageerror: [], reqfail: [], http5xx: [], dialog: [], filechooser: [] } }
+// http4xx is reset per step like everything else: it is the "did the server
+// deliberately refuse THIS action" signal, so it must not leak across steps or
+// it would quiet console errors belonging to a later, unrelated action.
+let bus = { console: [], pageerror: [], reqfail: [], http4xx: [], http5xx: [], dialog: [], filechooser: [] }
+const clearBus = () => { bus = { console: [], pageerror: [], reqfail: [], http4xx: [], http5xx: [], dialog: [], filechooser: [] } }
 const NOISE = /favicon|\/@vite\/|__vite|sockjs|hot-update|ERR_ABORTED.*\.map/i
 // A long-lived stream aborted by NAVIGATION is the browser working, not the app
 // failing. Measured: 6 of 14 findings in cycle 1 were this one non-event. Scoped
@@ -315,7 +419,24 @@ page.on('request', r => {
   const key = `${r.method()} ${templatize(u)}`
   apiHits.set(key, (apiHits.get(key) || 0) + 1)
 })
-page.on('response', r => { if (r.status() >= 500) bus.http5xx.push(`${r.status()} ${r.request().method()} ${r.url().slice(0, 160)}`) })
+page.on('response', r => {
+  const s = r.status()
+  const u = r.url()
+  if (/\/api\//.test(u)) {
+    // Coverage counted on `request` answers "did the UI ever call this?" — which
+    // is NOT the same as "does this work". An endpoint that only ever 404s or
+    // 403s reads as covered. Recording the OUTCOME separates the two, so a
+    // coverage number can be read as reached-and-worked rather than attempted.
+    const key = `${r.request().method()} ${templatize(u)}`
+    const o = apiOutcomes.get(key) || { ok: 0, c4: 0, c5: 0 }
+    if (s < 400) o.ok++; else if (s < 500) o.c4++; else o.c5++
+    apiOutcomes.set(key, o)
+    // A 4xx in this step EXPLAINS a console error in the same step (see the
+    // console-error classification below).
+    if (s >= 400 && s < 500) bus.http4xx.push(`${s} ${r.request().method()} ${templatize(u)}`)
+  }
+  if (s >= 500) bus.http5xx.push(`${s} ${r.request().method()} ${u.slice(0, 160)}`)
+})
 // A native dialog blocks everything; accept so exploration continues, but record it.
 page.on('dialog', async d => { bus.dialog.push(`${d.type()}: ${d.message().slice(0, 200)}`); await d.accept().catch(() => {}) })
 
@@ -371,7 +492,10 @@ try {
   // Start where we have been LEAST, not always at "/". This is what turns
   // per-cycle coverage from "whatever is nearest" into a sweep, without any
   // hardcoded route list — every candidate here was discovered by an earlier run.
-  const known = Object.entries(coverage).filter(([r]) => r !== '/' && !r.includes(':id'))
+  // Never START inside a known sink — that spends the opening steps of a cycle on
+  // ground already proven barren.
+  const known = Object.entries(coverage)
+    .filter(([r]) => r !== '/' && !r.includes(':id') && !isSink(r))
   if (known.length) {
     known.sort((a, b) => a[1] - b[1])
     const target = known[0][0]
@@ -382,12 +506,62 @@ try {
   clearBus()
 
   const history = []
+  let sinkStreak = 0
   for (let i = 1; i <= STEPS; i++) {
+    // SINK ESCAPE. A route with a long history of consuming steps and revealing
+    // nothing gets a hard bound on how long this cycle may linger. Persuasion in
+    // the prompt does not work here — the model cannot feel a cost paid across
+    // previous cycles, so the harness enforces it.
+    {
+      const here = routeOf(page.url())
+      sinkStreak = isSink(here) ? sinkStreak + 1 : 0
+      if (sinkStreak > 5) {
+        const escape = Object.entries(coverage)
+          .filter(([r]) => r !== '/' && !r.includes(':id') && !isSink(r))
+          .sort((a, b) => a[1] - b[1])[0]
+        if (escape) {
+          log(`SINK ESCAPE: ${here} has consumed ${sinks[here].steps} steps across cycles and revealed no new route — leaving for ${escape[0]}`)
+          await page.goto(BASE + escape[0], { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => {})
+          await page.waitForTimeout(2500)
+          sinkStreak = 0
+          // Bounced straight back? Then the APP is forcing this navigation, which
+          // is a defect worth reporting rather than a quirk to route around.
+          if (routeOf(page.url()) === here) {
+            record('forced-redirect', 'HIGH',
+              `app redirected back to ${here} after an explicit navigation to ${escape[0]} — an authenticated user cannot leave this route`,
+              { i, url: page.url() }, 'detector')
+          }
+        }
+      }
+    }
     let ctx = null
     try { ctx = await page.evaluate(MARK_SCRIPT) }
     catch (e) { log(`step ${i}: evaluate FAILED — ${String(e).split('\n')[0].slice(0, 200)}`) }
     if (!ctx) { await page.goBack().catch(() => {}); await page.waitForTimeout(1500); continue }
-    for (const h of ctx.hrefs || []) discoveredRoutes.add(routeOf(h))
+    // Credit any genuinely-new route to the page that revealed it. A route that
+    // never reveals anything is what the sink test is looking for.
+    {
+      const here = routeOf(ctx.url)
+      sinks[here] = sinks[here] || { steps: 0, newRoutes: 0 }
+      for (const h of ctx.hrefs || []) {
+        const r = routeOf(h)
+        if (!discoveredRoutes.has(r) && !(r in coverage)) sinks[here].newRoutes++
+        discoveredRoutes.add(r)
+      }
+    }
+
+    // Which of the offered controls has this rig NEVER operated, in any cycle?
+    // Recolour those badges before the screenshot so the signal reaches the model
+    // through the same channel it already uses to choose — the picture.
+    const fresh = ctx.elements.filter(e => !tried[sigOf(ctx.url, e)]).map(e => e.n)
+    if (fresh.length) {
+      await page.evaluate(ns => {
+        for (const n of ns) {
+          const b = document.querySelector(`[data-explore-mark="${n}"]`)
+          if (b) { b.style.background = '#15803d'; b.style.outline = '2px solid #86efac' }
+        }
+      }, fresh).catch(() => {})
+    }
     const shotPath = join(OUT, 'shots', `step-${String(i).padStart(3, '0')}.png`)
     const buf = await page.screenshot({ path: shotPath })
     await page.evaluate(unmark).catch(() => {})
@@ -407,7 +581,7 @@ try {
     let act
     try {
       act = await decide({
-        ...ctx, step: i, leastVisited: leastVisited(),
+        ...ctx, step: i, leastVisited: leastVisited(), fresh,
         history: history.slice(-6).join('\n') +
           (stuck ? `\n\nSTOP. You have done "${recent[0]}" three times with no effect. It does not work. Choose a DIFFERENT element, or navigate somewhere you have not been.` : ''),
       }, buf.toString('base64'))
@@ -421,6 +595,14 @@ try {
     const desc = `${act.action}${target ? ` [${target.n}:${target.tag}${target.label ? ' "' + target.label + '"' : ''}]` : ''}${act.text ? ` "${String(act.text).slice(0, 30)}"` : ''}`
     log(`step ${i}/${STEPS} @${ctx.url.replace(BASE, '') || '/'} → ${desc}  (${act.reason || ''})`)
     history.push(`${desc} @ ${ctx.url.replace(BASE, '')}`)
+    // Remember the control itself, so a later cycle knows it is no longer new.
+    if (target) tried[sigOf(ctx.url, target)] = (tried[sigOf(ctx.url, target)] || 0) + 1
+    // Charge the step to the route it happened on, for the sink ledger.
+    {
+      const r = routeOf(ctx.url)
+      sinks[r] = sinks[r] || { steps: 0, newRoutes: 0 }
+      sinks[r].steps++
+    }
 
     // the model's own visual judgement — kept separate from detector findings
     if (act.broken && String(act.broken).trim()) {
@@ -496,7 +678,24 @@ try {
     // ---- deterministic detectors, attributed to THIS action
     for (const t of bus.pageerror) record('uncaught-exception', 'HIGH', t, step, 'detector')
     for (const t of bus.http5xx) record('server-5xx', 'HIGH', t, step, 'detector')
-    for (const t of bus.console) record('console-error', 'MEDIUM', t, step, 'detector')
+    // A console error is only a DEFECT if nothing legitimately explains it.
+    //
+    // Measured over the first 22 cycles, 26 of 26 ledger entries were the app
+    // behaving CORRECTLY: a wrong password rejected 401, a duplicate knowledge
+    // base 409, "Username must be 3-100 characters" 400. The explorer types
+    // garbage on purpose, so a well-built app produces a steady stream of these.
+    // Filing them as MEDIUM defects buries the real ones — the same
+    // volume-is-not-signal failure that made 458 findings out of one harness bug.
+    //
+    // The discriminator is STATE, not message text: did the server deliberately
+    // answer 4xx in this same step? Matching on wording would silently miss the
+    // next phrasing (and there is always a next phrasing). The tradeoff is that a
+    // genuine console error CO-OCCURRING with an unrelated 4xx is quieted; that
+    // errs toward silence, which is the right side to err on here. 5xx and
+    // uncaught exceptions are unaffected and still HIGH.
+    const explained = bus.http4xx.length ? ` [expected: app returned ${bus.http4xx[0]}]` : ''
+    for (const t of bus.console)
+      record('console-error', explained ? 'LOW' : 'MEDIUM', t + explained, step, 'detector')
     for (const t of bus.reqfail) record('request-failed', 'MEDIUM', t, step, 'detector')
     for (const t of bus.dialog) record('native-dialog', 'LOW', t, step, 'detector')
     for (const t of bus.filechooser) log(`  ${t}`)
@@ -524,10 +723,27 @@ try {
   try { apiCov = JSON.parse(readFileSync(API_COVERAGE, 'utf8')) } catch {}
   for (const [k, v] of apiHits) apiCov[k] = (apiCov[k] || 0) + v
   try { writeFileSync(API_COVERAGE, JSON.stringify(apiCov, null, 1)) } catch {}
+  // Durable outcome tally, written beside the hit tally rather than replacing it
+  // so an existing api-coverage.json stays readable by the old reporter.
+  const OUTCOMES = API_COVERAGE.replace(/\.json$/, '') + '-outcomes.json'
+  let apiOut = {}
+  try { apiOut = JSON.parse(readFileSync(OUTCOMES, 'utf8')) } catch {}
+  for (const [k, o] of apiOutcomes) {
+    const p = apiOut[k] || { ok: 0, c4: 0, c5: 0 }
+    apiOut[k] = { ok: p.ok + o.ok, c4: p.c4 + o.c4, c5: p.c5 + o.c5 }
+  }
+  try { writeFileSync(OUTCOMES, JSON.stringify(apiOut, null, 1)) } catch {}
   summaryApi = { thisRun: apiHits.size, cumulative: Object.keys(apiCov).length }
   for (const s2 of steps) coverage[routeOf(s2.url)] = (coverage[routeOf(s2.url)] || 0) + 1
   for (const h of discoveredRoutes) if (!(h in coverage)) coverage[h] = 0   // seen but never visited
   try { writeFileSync(COVERAGE, JSON.stringify(coverage, null, 1)) } catch {}
+  // Both novelty ledgers are cumulative and only useful across cycles — a control
+  // tried this run must still read as tried next run, or the green badges reset
+  // every cycle and the signal means nothing.
+  try { writeFileSync(AFFORDANCES, JSON.stringify(tried, null, 1)) } catch {}
+  try { writeFileSync(SINKS, JSON.stringify(sinks, null, 1)) } catch {}
+  const sinkList = Object.keys(sinks).filter(isSink)
+  log(`affordances known: ${Object.keys(tried).length}; sinks: ${sinkList.join(', ') || 'none'}`)
   writeFileSync(join(OUT, 'result.json'), JSON.stringify(summary, null, 2))
   const bySev = s => findings.filter(f => f.severity === s).length
   const det = findings.filter(f => f.verifiedBy === 'detector').length

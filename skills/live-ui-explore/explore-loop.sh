@@ -105,8 +105,22 @@ start_backend() {
   # "target/debug/ziee" would take down any other ziee binary on the box — and a
   # `-f` pattern can also match the killer's own command line (that self-match
   # bit this session four separate times).
+  #
+  # SIGTERM first, SIGKILL only as a fallback. The server installs a graceful
+  # shutdown handler (main.rs `shutdown_signal`), and SIGKILL denies it: pending
+  # work is dropped, and a coverage-instrumented build never flushes its .profraw
+  # (LLVM writes the profile at normal exit), so every cycle's coverage would be
+  # silently lost. Escalate only if it does not go down on its own.
   for pid in $(fuser -n tcp "$BACKEND_PORT" 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+$'); do
-    kill -9 "$pid" 2>/dev/null
+    kill -TERM "$pid" 2>/dev/null
+  done
+  for _ in $(seq 1 10); do
+    still=$(fuser -n tcp "$BACKEND_PORT" 2>/dev/null | tr ' ' '\n' | grep -cE '^[0-9]+$')
+    [ "${still:-0}" -eq 0 ] && break
+    sleep 1
+  done
+  for pid in $(fuser -n tcp "$BACKEND_PORT" 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+$'); do
+    kill -KILL "$pid" 2>/dev/null
   done
   sleep 3
   ( cd "$RIG/src-app/server" && CONFIG_FILE="$CONFIG" setsid nohup ../target/debug/ziee \

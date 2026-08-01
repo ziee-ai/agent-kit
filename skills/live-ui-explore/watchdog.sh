@@ -125,6 +125,37 @@ PY
     [ "$alerts" -gt 0 ] && echo "**$alerts alert(s)**" || echo "_healthy_"
     echo
   } >> "$REPORT"
+
+  # Append a COVERAGE TIMESERIES row. A single reading says nothing — the useful
+  # question is whether coverage is still climbing or has plateaued, and that is
+  # only visible over time. Recorded unconditionally so the trend survives
+  # whether or not anyone is watching.
+  python3 - "$STATE" "$(dirname "${BASH_SOURCE[0]}")" <<'PY' >> "$STATE/coverage-timeseries.csv"
+import json, os, sys, subprocess, datetime
+st, skill = sys.argv[1], sys.argv[2]
+def load(n, d):
+    try: return json.load(open(os.path.join(st, n)))
+    except Exception: return d
+cycles = sum(1 for _ in open(os.path.join(st, 'cycles.log'))) if os.path.exists(os.path.join(st, 'cycles.log')) else 0
+cov, aff, sinks = load('coverage.json', {}), load('affordances.json', {}), load('sinks.json', {})
+hits = load('api-coverage.json', {})
+declared = 0
+try:
+    out = subprocess.run(['node', os.path.join(skill, 'api-coverage.mjs')],
+                         capture_output=True, text=True, timeout=60).stdout
+    for line in out.splitlines():
+        if line.startswith('- spec:'): declared = int(line.split()[2])
+except Exception: pass
+shape = lambda s: __import__('re').sub(r'\{[^}]+\}', '{}', s)
+endpoints = len({shape(k) for k in hits})
+pct = f"{endpoints/declared*100:.1f}" if declared else ""
+nsink = sum(1 for v in sinks.values() if v.get('steps', 0) >= 40 and not v.get('newRoutes'))
+if not os.path.exists(os.path.join(st, 'coverage-timeseries.csv')) or \
+   os.path.getsize(os.path.join(st, 'coverage-timeseries.csv')) == 0:
+    print('ts,cycles,routes,endpoints,declared,pct,affordances,sinks')
+print(f"{datetime.datetime.now().isoformat(timespec='seconds')},{cycles},{len(cov)},"
+      f"{endpoints},{declared},{pct},{len(aff)},{nsink}")
+PY
   tail -30 "$REPORT"
 }
 

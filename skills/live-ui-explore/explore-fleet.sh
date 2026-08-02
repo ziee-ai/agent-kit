@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# explore-fleet.sh — run N explorers concurrently against ONE stack.
+#
+# Why: coverage is rate-limited, not ceiling-limited. Measured on ziee, 231 of
+# the 267 untouched endpoints were plausibly UI-reachable, at ~0.25 new endpoints
+# per ~168s cycle — about 43 hours of single-explorer runtime, and the rate
+# decays. A single explorer is one browser taking one action at a time; nothing
+# about the problem is serial.
+#
+# One STACK, N EXPLORERS — deliberately, over N private stacks:
+#   - no extra backends, databases or ports to provision;
+#   - the shared ledgers make the fleet cooperate. An endpoint one explorer has
+#     already reached stops being novel for all of them, so they spread out
+#     instead of racing down the same path;
+#   - concurrent users on one deployment is a realistic shape, and the
+#     interference it produces (one deleting what another is mid-way through) is
+#     a bug class a single explorer can never find.
+#
+# The cost is that they share credentials, so one renaming the admin locks out
+# the whole fleet. explore.mjs now detects that and exits 3, and the caller's
+# recovery restores access — which is why this refuses to start without an
+# identity snapshot to recover from.
+#
+#   bash explore-fleet.sh [--n 4] [--steps 45]
+set -u
+
+N=4; STEPS=45
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --n) N=$2; shift 2;;
+    --steps) STEPS=$2; shift 2;;
+    *) echo "unknown arg $1" >&2; exit 2;;
+  esac
+done
+
+STATE=${STATE:-/data/pbya/ziee/tmp/live-ui-explore}
+RIG=${RIG:-/data/pbya/ziee/tmp/live-rig-wt}
+BASE=${EXPLORE_URL:-http://127.0.0.1:1520}
+SKILL="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+IDENTITY=${IDENTITY_FILE:-$STATE/admin-identity.txt}
+PG=${PG_CONTAINER:-ziee-showcase-pg}
+DB=${DB_NAME:-ziee_rig}
+USER_=${RIG_USER:-admin}
+PASS=${RIG_PASS:-password123}
+
+[ -f "$IDENTITY" ] || { echo "fleet: no identity snapshot at $IDENTITY — refusing to start."; exit 1; }
+[ "$(curl -s -o /dev/null -w '%{http_code}' -m 8 "$BASE/api/health")" = "200" ] || {
+  echo "fleet: stack not healthy at $BASE"; exit 1; }
+
+mkdir -p "$STATE"
+echo "fleet: $N explorers, $STEPS steps each, against $BASE"
+
+recover() {
+  local uid uname hash
+  IFS='|' read -r uid uname hash < "$IDENTITY"
+  [ -n "${uid:-}" ] || return 1
+  docker exec "$PG" psql -U postgres -d "$DB" -c \
+    "UPDATE users SET username='$uname', password_hash='$hash', is_active=true WHERE id='$uid';" \
+    >/dev/null 2>&1
+}
+
+# One worker: explore, then loop. Each has its own OUT dir but SHARES the
+# ledgers, which is what makes the fleet divide the work rather than duplicate it.
+worker() {
+  local id=$1
+  while true; do
+    local out="$STATE/fleet$id-$(date +%Y%m%d-%H%M%S)"
+    ( cd "$RIG/src-app/ui" && timeout 3600 node "$SKILL/explore.mjs" \
+        --url="$BASE" --user="$USER_" --password="$PASS" \
+        --steps="$STEPS" --out="$out" ) > "$out.stdout" 2>&1
+    local rc=$?
+    echo "$(date '+%F %T') worker=$id rc=$rc out=$out" >> "$STATE/fleet.log"
+    # exit 3 is explore.mjs's locked-out signal. Recover ONCE, serialised by a
+    # crude lock so four workers do not all rewrite the same row at once.
+    if [ "$rc" = "3" ]; then
+      if mkdir "$STATE/.recover.lock" 2>/dev/null; then
+        recover && echo "$(date '+%F %T') worker=$id CREDENTIAL-RECOVERY" >> "$STATE/fleet.log"
+        sleep 5; rmdir "$STATE/.recover.lock" 2>/dev/null
+      else
+        sleep 20   # another worker is recovering; wait it out
+      fi
+    fi
+    sleep 5
+  done
+}
+
+for i in $(seq 1 "$N"); do
+  worker "$i" &
+  echo "  worker $i started (pid $!)"
+  sleep 3    # stagger, so N browsers do not cold-start into the same instant
+done
+wait

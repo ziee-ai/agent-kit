@@ -102,6 +102,18 @@ mkdirSync(OUT, { recursive: true })
 mkdirSync(join(OUT, 'shots'), { recursive: true })
 const findings = []
 const steps = []
+// Feature areas of the app whose API the rig has NEVER exercised, named in the
+// app's own vocabulary (the resource segment of its own OpenAPI paths), ranked by
+// how much is left untouched. This says WHAT is unexplored, never how to get
+// there — the explorer still has to find the way by looking.
+const untouchedAreas = () => {
+  const out = []
+  for (const [g, eps] of declaredGroups) {
+    const miss = [...eps].filter(e => !apiSeen.has(e)).length
+    if (miss) out.push([g.replace(/^\/api\//, ''), miss])
+  }
+  return out.sort((a, b) => b[1] - a[1]).slice(0, 8).map(([g, n]) => `${g} (${n} unused)`)
+}
 const leastVisited = () => Object.entries(coverage)
   .filter(([r]) => r !== '/' && !r.includes(':id'))
   .sort((a, b) => a[1] - b[1]).slice(0, 8).map(([r]) => r)
@@ -124,6 +136,8 @@ const discoveredRoutes = new Set()
 const AFFORDANCES = arg('affordances', '/data/pbya/ziee/tmp/live-ui-explore/affordances.json')
 let tried = {}
 try { tried = JSON.parse(readFileSync(AFFORDANCES, 'utf8')) } catch { tried = {} }
+// Only THIS run's increments, so the merge below adds rather than overwrites.
+const triedDelta = {}
 const sigOf = (url, el) =>
   `${routeOf(url)}|${(el.tag || '?').toLowerCase()}${el.role ? ':' + el.role : ''}|${(el.label || '').trim().slice(0, 40).toLowerCase()}`
 
@@ -134,6 +148,34 @@ const sigOf = (url, el) =>
 // discovery sat at 13. A route that expensive and that unproductive is a trap,
 // and no amount of prompt encouragement escapes it, because the model does not
 // experience the cost across cycles — only the ledger does.
+// ---------------------------------------------------------------------------
+// ENDPOINT GRADIENT — the objective, fed back to the agent.
+//
+// Measured over 103 cycles: +3.41 new CONTROLS per cycle but only +0.25 new
+// ENDPOINTS. The novelty memory works exactly as designed and is optimising the
+// wrong quantity — new buttons on pages whose API surface is already exhausted.
+// Nothing in the loop ever told the explorer what "new ground" actually means.
+//
+// This is NOT the predecessor's hardcoded route list. That was a human writing
+// down where to go, which is why it only ever tested the chat composer. This is
+// derived at runtime from the app's OWN OpenAPI spec intersected with the rig's
+// OWN history, it updates itself as coverage moves, and it names only WHAT is
+// untouched — never how to reach it. The explorer still has to find the path by
+// looking, which is the property worth protecting.
+const OPENAPI = arg('openapi', '/data/pbya/ziee/tmp/live-rig-wt/src-app/ui/openapi/openapi.json')
+let declaredGroups = new Map()   // "/api/voice" -> Set of "METHOD /api/x/{}"
+try {
+  const spec = JSON.parse(readFileSync(OPENAPI, 'utf8'))
+  for (const [p, ops] of Object.entries(spec.paths || {})) {
+    for (const m of Object.keys(ops)) {
+      if (!['get', 'post', 'put', 'patch', 'delete'].includes(m)) continue
+      const g = p.split('/').slice(0, 3).join('/')
+      if (!declaredGroups.has(g)) declaredGroups.set(g, new Set())
+      declaredGroups.get(g).add(`${m.toUpperCase()} ${p.replace(/\{[^}]+\}/g, '{}')}`)
+    }
+  }
+} catch { /* no spec → the hint degrades to nothing, the rig still explores */ }
+
 const SINKS = arg('sinks', '/data/pbya/ziee/tmp/live-ui-explore/sinks.json')
 let sinks = {}
 try { sinks = JSON.parse(readFileSync(SINKS, 'utf8')) } catch { sinks = {} }
@@ -159,9 +201,18 @@ const isSink = (r) => (sinks[r]?.barren || 0) >= SINK_MIN_STEPS
 // can be diffed against the spec. Route coverage is a weak proxy for what the
 // app actually exercises — two pages can look "visited" while never triggering a
 // write. This is the real coverage number.
+let newEndpointsThisStep = 0   // reset per step; drives the payout signal
 const apiHits = new Map()   // "METHOD /api/x/{id}" -> count (attempted)
 const apiOutcomes = new Map() // "METHOD /api/x/{id}" -> {ok, c4, c5} (what came back)
 const API_COVERAGE = arg('api-coverage', '/data/pbya/ziee/tmp/live-ui-explore/api-coverage.json')
+// Cumulative endpoint history, loaded at START (it was previously only read at
+// the end, to merge). The explorer needs to know what PRIOR cycles reached, or
+// every cycle re-derives the same gradient from an empty set.
+let apiSeen = new Set()
+try {
+  for (const k of Object.keys(JSON.parse(readFileSync(API_COVERAGE, 'utf8'))))
+    apiSeen.add(k.replace(/\{[^}]+\}/g, '{}'))
+} catch { /* first run */ }
 const templatize = u => {
   const path = String(u).replace(/^https?:\/\/[^/]+/, '').split('?')[0]
   return path.split('/').map(seg =>
@@ -368,7 +419,7 @@ async function decide(ctx, shotB64) {
     messages: [{
       role: 'user',
       content: [
-        { type: 'text', text: `${SYSTEM}\n\n--- CURRENT STATE ---\nurl: ${ctx.url}\ntitle: ${ctx.title}\nstep ${ctx.step} of ${STEPS}\n\nrecently tried (avoid repeating):\n${ctx.history || '(nothing yet)'}\n\nelements you can CLICK:\n${JSON.stringify(ctx.elements.filter(e => !e.editable))}\n\nelements you can TYPE into (only these accept "type" — typing into anything else does nothing):\n${JSON.stringify(ctx.elements.filter(e => e.editable))}\n\nlinks this page offers for "goto":\n${JSON.stringify(ctx.hrefs)}\n\nareas you have explored LEAST across all previous sessions (prefer these when you see a way to reach one):\n${JSON.stringify(ctx.leastVisited)}\n\nbadges you have NEVER used before, in any session — these are drawn GREEN in the screenshot, everything else is red. Strongly prefer one of these:\n${JSON.stringify(ctx.fresh || [])}` },
+        { type: 'text', text: `${SYSTEM}\n\n--- CURRENT STATE ---\nurl: ${ctx.url}\ntitle: ${ctx.title}\nstep ${ctx.step} of ${STEPS}\n\nrecently tried (avoid repeating):\n${ctx.history || '(nothing yet)'}\n\nelements you can CLICK:\n${JSON.stringify(ctx.elements.filter(e => !e.editable))}\n\nelements you can TYPE into (only these accept "type" — typing into anything else does nothing):\n${JSON.stringify(ctx.elements.filter(e => e.editable))}\n\nlinks this page offers for "goto":\n${JSON.stringify(ctx.hrefs)}\n\nareas you have explored LEAST across all previous sessions (prefer these when you see a way to reach one):\n${JSON.stringify(ctx.leastVisited)}\n\nbadges you have NEVER used before, in any session — these are drawn GREEN in the screenshot, everything else is red. Strongly prefer one of these:\n${JSON.stringify(ctx.fresh || [])}\n\nFEATURE AREAS of this app you have NEVER exercised, worst first. Clicking new buttons on pages you already know teaches us nothing; REACHING these areas is the goal. If you can see any way toward one, take it:\n${JSON.stringify(ctx.untouchedAreas || [])}` },
         { type: 'image_url', image_url: { url: `data:image/png;base64,${shotB64}` } },
       ],
     }],
@@ -434,6 +485,9 @@ page.on('request', r => {
   if (!/\/api\//.test(u)) return
   const key = `${r.method()} ${templatize(u)}`
   apiHits.set(key, (apiHits.get(key) || 0) + 1)
+  // Did THIS request reach ground no cycle has ever reached? That is the actual
+  // objective, so it is what the harness must reward.
+  if (!apiSeen.has(key)) { apiSeen.add(key); newEndpointsThisStep++ }
 })
 page.on('response', r => {
   const s = r.status()
@@ -545,6 +599,8 @@ try {
 
   const history = []
   let sinkStreak = 0
+  let untriedHere = 0      // untried controls on the current page
+  let routePayout = 0      // new routes this page revealed this step
   for (let i = 1; i <= STEPS; i++) {
     // SINK ESCAPE. A route with a long history of consuming steps and revealing
     // nothing gets a hard bound on how long this cycle may linger. Persuasion in
@@ -588,10 +644,8 @@ try {
         if (!discoveredRoutes.has(r) && !(r in coverage)) paidOut++
         discoveredRoutes.add(r)
       }
-      // Untried controls are productive ground too — a settings page that links
-      // nowhere new is still worth operating.
-      paidOut += ctx.elements.filter(e => !tried[sigOf(ctx.url, e)]).length
-      sinks[here].barren = paidOut ? 0 : sinks[here].barren + 1
+      untriedHere = ctx.elements.filter(e => !tried[sigOf(ctx.url, e)]).length
+      routePayout = paidOut
     }
 
     // Which of the offered controls has this rig NEVER operated, in any cycle?
@@ -625,7 +679,7 @@ try {
     let act
     try {
       act = await decide({
-        ...ctx, step: i, leastVisited: leastVisited(), fresh,
+        ...ctx, step: i, leastVisited: leastVisited(), fresh, untouchedAreas: untouchedAreas(),
         history: history.slice(-6).join('\n') +
           (stuck ? `\n\nSTOP. You have done "${recent[0]}" three times with no effect. It does not work. Choose a DIFFERENT element, or navigate somewhere you have not been.` : ''),
       }, buf.toString('base64'))
@@ -640,12 +694,26 @@ try {
     log(`step ${i}/${STEPS} @${ctx.url.replace(BASE, '') || '/'} → ${desc}  (${act.reason || ''})`)
     history.push(`${desc} @ ${ctx.url.replace(BASE, '')}`)
     // Remember the control itself, so a later cycle knows it is no longer new.
-    if (target) tried[sigOf(ctx.url, target)] = (tried[sigOf(ctx.url, target)] || 0) + 1
+    if (target) {
+      const sg = sigOf(ctx.url, target)
+      tried[sg] = (tried[sg] || 0) + 1          // in-memory: drives green badges now
+      triedDelta[sg] = (triedDelta[sg] || 0) + 1 // on-disk: merged additively at exit
+    }
     // Charge the step to the route it happened on, for the sink ledger.
     {
       const r = routeOf(ctx.url)
       sinks[r] = sinks[r] || { steps: 0, barren: 0 }
       sinks[r].steps++
+      // Judged HERE, after the action ran, because the requests it triggered
+      // arrive during execution — evaluating payout before the click always
+      // reads zero. Three tiers, in order of what we actually want:
+      //   a new ENDPOINT (the objective) or a new ROUTE -> full reset
+      //   untried controls only                         -> half decay
+      //   nothing at all                                -> full decay
+      if (newEndpointsThisStep > 0 || routePayout > 0) sinks[r].barren = 0
+      else sinks[r].barren += untriedHere ? 0.5 : 1
+      if (newEndpointsThisStep > 0) log(`  +${newEndpointsThisStep} new endpoint(s)`)
+      newEndpointsThisStep = 0
     }
 
     // the model's own visual judgement — kept separate from detector findings
@@ -778,14 +846,43 @@ try {
   }
   try { writeFileSync(OUTCOMES, JSON.stringify(apiOut, null, 1)) } catch {}
   summaryApi = { thisRun: apiHits.size, cumulative: Object.keys(apiCov).length }
-  for (const s2 of steps) coverage[routeOf(s2.url)] = (coverage[routeOf(s2.url)] || 0) + 1
-  for (const h of discoveredRoutes) if (!(h in coverage)) coverage[h] = 0   // seen but never visited
-  try { writeFileSync(COVERAGE, JSON.stringify(coverage, null, 1)) } catch {}
+  // MERGE-ON-WRITE, so several explorers can share one set of ledgers.
+  //
+  // These three were read at start and written wholesale at the end: correct for
+  // one explorer, silently lossy for N, because the last writer wipes everyone
+  // else's cycle. Re-reading at write time and applying only THIS run's delta
+  // makes concurrent explorers additive instead.
+  //
+  // The read-modify-write is not atomic, so a collision inside the same
+  // millisecond can still drop one cycle's increment. That window is ~1ms out of
+  // a ~168s cycle and the data is an approximate coverage tally, so the trade is
+  // worth it; a lock file would serialise every explorer's shutdown.
+  const mergeWrite = (path, delta, combine) => {
+    try {
+      let disk = {}
+      try { disk = JSON.parse(readFileSync(path, 'utf8')) } catch {}
+      for (const [k, v] of Object.entries(delta)) disk[k] = combine(disk[k], v)
+      writeFileSync(path, JSON.stringify(disk, null, 1))
+    } catch {}
+  }
+  const visitDelta = {}
+  for (const s2 of steps) {
+    const r = routeOf(s2.url); visitDelta[r] = (visitDelta[r] || 0) + 1
+  }
+  for (const h of discoveredRoutes) if (!(h in visitDelta)) visitDelta[h] = 0  // seen, never visited
+  mergeWrite(COVERAGE, visitDelta, (a, b) => (a || 0) + b)
   // Both novelty ledgers are cumulative and only useful across cycles — a control
   // tried this run must still read as tried next run, or the green badges reset
   // every cycle and the signal means nothing.
-  try { writeFileSync(AFFORDANCES, JSON.stringify(tried, null, 1)) } catch {}
-  try { writeFileSync(SINKS, JSON.stringify(sinks, null, 1)) } catch {}
+  mergeWrite(AFFORDANCES, triedDelta, (a, b) => (a || 0) + b)
+  // `barren` is a per-explorer STREAK, not a total: two explorers on one route are
+  // independent observations, so keep the LOWER streak. That is the conservative
+  // direction — it delays declaring a sink rather than risking abandoning a route
+  // that is still paying out for somebody else.
+  mergeWrite(SINKS, sinks, (a, b) => ({
+    steps: Math.max(a?.steps || 0, b.steps || 0),
+    barren: a ? Math.min(a.barren ?? 0, b.barren ?? 0) : (b.barren ?? 0),
+  }))
   const sinkList = Object.keys(sinks).filter(isSink)
   log(`affordances known: ${Object.keys(tried).length}; sinks: ${sinkList.join(', ') || 'none'}`)
   writeFileSync(join(OUT, 'result.json'), JSON.stringify(summary, null, 2))

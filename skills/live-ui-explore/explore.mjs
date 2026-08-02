@@ -89,6 +89,24 @@ const HEADED = process.argv.includes('--headed')
 // file is written by this script and read by the next run; the routes in it are
 // ones the app itself offered, never a hardcoded list.
 const COVERAGE = arg('coverage', '/data/pbya/ziee/tmp/live-ui-explore/coverage.json')
+// Is this URL part of the app we are auditing, or somewhere else entirely?
+//
+// This check was missing, and it saturated the whole rig. The explorer follows
+// links like a user does, so it eventually clicked an outbound one (a GitHub
+// readme link, an IANA reference) and landed on a third-party site. routeOf()
+// strips the origin, so EVERY link on that foreign page was recorded as a ziee
+// route: 132 of 167 ledger entries turned out to be iana.org paths.
+//
+// The damage is not the junk itself, it is that leastVisited() sorts ASCENDING,
+// so freshly-discovered foreign routes (0 visits) outranked every real one. All
+// eight "areas you have explored LEAST - prefer these" slots were foreign, and
+// 17 of 20 cycles opened at /go/rfc2606. The SPA fallback answers 200 for any
+// unknown path, so nothing ever surfaced the mistake: those pages simply had no
+// app on them, and therefore no endpoints to reach.
+const sameOrigin = (u) => {
+  try { return new URL(String(u), BASE).origin === new URL(BASE).origin }
+  catch { return false }
+}
 const routeOf = u => {
   const path = String(u).replace(/^https?:\/\/[^/]+/, '') || '/'
   const seg = path.split('?')[0].split('/').filter(Boolean)
@@ -682,6 +700,7 @@ try {
       if (sinks[here].barren === undefined) sinks[here].barren = 0
       let paidOut = 0
       for (const h of ctx.hrefs || []) {
+        if (!sameOrigin(h)) continue            // an outbound link is not a route of ours
         const r = routeOf(h)
         if (!discoveredRoutes.has(r) && !(r in coverage)) paidOut++
         discoveredRoutes.add(r)
@@ -909,6 +928,7 @@ try {
   }
   const visitDelta = {}
   for (const s2 of steps) {
+    if (!sameOrigin(s2.url)) continue          // steps spent off-site are not coverage
     const r = routeOf(s2.url); visitDelta[r] = (visitDelta[r] || 0) + 1
   }
   for (const h of discoveredRoutes) if (!(h in visitDelta)) visitDelta[h] = 0  // seen, never visited

@@ -424,13 +424,30 @@ async function decide(ctx, shotB64) {
       ],
     }],
   }
-  const r = await fetch(LLM, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...(process.env.EXPLORE_LLM_KEY ? { Authorization: `Bearer ${process.env.EXPLORE_LLM_KEY}` } : {}) },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(180_000),
-  })
-  if (!r.ok) throw new Error(`model HTTP ${r.status}: ${(await r.text()).slice(0, 200)}`)
+  // RETRY with backoff. Under a fleet of concurrent explorers the shared vLLM
+  // bridge returns a burst of 400s reading "TextEncodeInput must be
+  // Union[TextInputSequence...]" — a tokenizer TYPE error, not a capacity or
+  // rate-limit response, so it is a concurrency bug upstream rather than a
+  // signal to back off permanently. Measured at 6 workers it ate 21% of all
+  // steps; without a retry every one of those is a step of exploration thrown
+  // away. Jittered, so N workers that collide do not all retry in lockstep.
+  let r, lastErr
+  for (let attempt = 0; attempt < 4; attempt++) {
+    if (attempt) await new Promise(res => setTimeout(res, 400 * 2 ** attempt + Math.floor(Math.random() * 400)))
+    try {
+      r = await fetch(LLM, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(process.env.EXPLORE_LLM_KEY ? { Authorization: `Bearer ${process.env.EXPLORE_LLM_KEY}` } : {}) },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(180_000),
+      })
+    } catch (e) { lastErr = e; continue }             // network/timeout
+    if (r.ok) break
+    lastErr = new Error(`model HTTP ${r.status}: ${(await r.text()).slice(0, 200)}`)
+    if (r.status !== 400 && r.status !== 429 && r.status < 500) break   // a real client error: do not hammer
+    r = undefined
+  }
+  if (!r || !r.ok) throw lastErr || new Error('model call failed')
   const j = await r.json()
   const msg = j.choices?.[0]?.message ?? {}
   // A reasoning model can exhaust max_tokens inside `reasoning_content` and

@@ -103,8 +103,12 @@ const COVERAGE = arg('coverage', '/data/pbya/ziee/tmp/live-ui-explore/coverage.j
 // 17 of 20 cycles opened at /go/rfc2606. The SPA fallback answers 200 for any
 // unknown path, so nothing ever surfaced the mistake: those pages simply had no
 // app on them, and therefore no endpoints to reach.
-const sameOrigin = (u) => {
-  try { return new URL(String(u), BASE).origin === new URL(BASE).origin }
+const sameOrigin = (u) => sameOriginOf(u, BASE)
+// Resolve `u` against `base` and ask whether the result is still OUR origin.
+// The base matters: a relative href must be resolved against the page currently
+// showing it, not against BASE, or every foreign site's nav bar reads as ours.
+const sameOriginOf = (u, base) => {
+  try { return new URL(String(u), base).origin === new URL(BASE).origin }
   catch { return false }
 }
 const routeOf = u => {
@@ -688,6 +692,15 @@ try {
         }
       }
     }
+    // Wandered off the app? Come back. Following an outbound link is realistic
+    // user behaviour, but every step spent on a third-party site is a step not
+    // spent auditing ziee — and it was how the route ledger got poisoned in the
+    // first place.
+    if (!sameOrigin(page.url())) {
+      log(`off-site at ${page.url().slice(0, 60)} — returning to the app`)
+      await page.goto(BASE, { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => {})
+      await page.waitForTimeout(2000)
+    }
     let ctx = null
     try { ctx = await page.evaluate(MARK_SCRIPT) }
     catch (e) { log(`step ${i}: evaluate FAILED — ${String(e).split('\n')[0].slice(0, 200)}`) }
@@ -699,11 +712,22 @@ try {
       sinks[here] = sinks[here] || { steps: 0, barren: 0 }
       if (sinks[here].barren === undefined) sinks[here].barren = 0
       let paidOut = 0
-      for (const h of ctx.hrefs || []) {
-        if (!sameOrigin(h)) continue            // an outbound link is not a route of ours
-        const r = routeOf(h)
-        if (!discoveredRoutes.has(r) && !(r in coverage)) paidOut++
-        discoveredRoutes.add(r)
+      // Trust NOTHING from a page that is not ours.
+      //
+      // The first version of this guard checked each href against BASE and was
+      // useless for the case it existed to stop: MARK_SCRIPT collects only
+      // RELATIVE hrefs (a[href^="/"]), and a relative href on iana.org resolves
+      // against BASE just fine, so all 69 of its paths sailed through and the
+      // ledger re-polluted from 36 back to 129 routes within the hour. A relative
+      // link belongs to the origin of the page SHOWING it, so that is what has to
+      // be checked first.
+      if (sameOrigin(ctx.url)) {
+        for (const h of ctx.hrefs || []) {
+          if (!sameOriginOf(h, ctx.url)) continue   // resolve against the CURRENT page
+          const r = routeOf(h)
+          if (!discoveredRoutes.has(r) && !(r in coverage)) paidOut++
+          discoveredRoutes.add(r)
+        }
       }
       untriedHere = ctx.elements.filter(e => !tried[sigOf(ctx.url, e)]).length
       routePayout = paidOut

@@ -406,6 +406,25 @@ Reply with ONLY a JSON object, no prose, no code fence:
 
 Set "broken" only when you can SEE something wrong: an error message, a spinner that never finishes, empty space where content belongs, text spilling out of its container, a dialog with no way to close it, a control that does nothing when used. Otherwise leave it as "".`
 
+// Strip UNPAIRED UTF-16 surrogates before any text reaches the model.
+//
+// A lone surrogate makes the bridge's tokenizer reject the WHOLE request with
+// `TextEncodeInput must be Union[TextInputSequence...]` — a 400, so the step is
+// lost, and deterministic, so retrying cannot help (measured: 47 of 49 retrying
+// calls exhausted all four attempts). It cost 17.5% of every step.
+//
+// Two sources, and the second is ours:
+//   - the explorer types garbage BY DESIGN, the app stores it, and it comes back
+//     as an element label in the very next prompt;
+//   - `.slice(0, 60)` on a label truncates by UTF-16 CODE UNIT, so a label with
+//     an emoji near the cut is severed mid-pair. We manufacture the bad input
+//     ourselves, which is why this grew with the app's accumulated state.
+//
+// Applied at the single point where the prompt is assembled, so no future caller
+// can route around it.
+const stripLoneSurrogates = (t) =>
+  String(t).replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '\uFFFD')
+
 const retryStats = { calls: 0, callsNeedingRetry: 0, transient: 0, hardFail: 0 }
 async function decide(ctx, shotB64) {
   const body = {
@@ -420,18 +439,19 @@ async function decide(ctx, shotB64) {
     messages: [{
       role: 'user',
       content: [
-        { type: 'text', text: `${SYSTEM}\n\n--- CURRENT STATE ---\nurl: ${ctx.url}\ntitle: ${ctx.title}\nstep ${ctx.step} of ${STEPS}\n\nrecently tried (avoid repeating):\n${ctx.history || '(nothing yet)'}\n\nelements you can CLICK:\n${JSON.stringify(ctx.elements.filter(e => !e.editable))}\n\nelements you can TYPE into (only these accept "type" — typing into anything else does nothing):\n${JSON.stringify(ctx.elements.filter(e => e.editable))}\n\nlinks this page offers for "goto":\n${JSON.stringify(ctx.hrefs)}\n\nareas you have explored LEAST across all previous sessions (prefer these when you see a way to reach one):\n${JSON.stringify(ctx.leastVisited)}\n\nbadges you have NEVER used before, in any session — these are drawn GREEN in the screenshot, everything else is red. Strongly prefer one of these:\n${JSON.stringify(ctx.fresh || [])}\n\nFEATURE AREAS of this app you have NEVER exercised, worst first. Clicking new buttons on pages you already know teaches us nothing; REACHING these areas is the goal. If you can see any way toward one, take it:\n${JSON.stringify(ctx.untouchedAreas || [])}` },
+        { type: 'text', text: stripLoneSurrogates(`${SYSTEM}\n\n--- CURRENT STATE ---\nurl: ${ctx.url}\ntitle: ${ctx.title}\nstep ${ctx.step} of ${STEPS}\n\nrecently tried (avoid repeating):\n${ctx.history || '(nothing yet)'}\n\nelements you can CLICK:\n${JSON.stringify(ctx.elements.filter(e => !e.editable))}\n\nelements you can TYPE into (only these accept "type" — typing into anything else does nothing):\n${JSON.stringify(ctx.elements.filter(e => e.editable))}\n\nlinks this page offers for "goto":\n${JSON.stringify(ctx.hrefs)}\n\nareas you have explored LEAST across all previous sessions (prefer these when you see a way to reach one):\n${JSON.stringify(ctx.leastVisited)}\n\nbadges you have NEVER used before, in any session — these are drawn GREEN in the screenshot, everything else is red. Strongly prefer one of these:\n${JSON.stringify(ctx.fresh || [])}\n\nFEATURE AREAS of this app you have NEVER exercised, worst first. Clicking new buttons on pages you already know teaches us nothing; REACHING these areas is the goal. If you can see any way toward one, take it:\n${JSON.stringify(ctx.untouchedAreas || [])}`) },
         { type: 'image_url', image_url: { url: `data:image/png;base64,${shotB64}` } },
       ],
     }],
   }
-  // RETRY with backoff. Under a fleet of concurrent explorers the shared vLLM
-  // bridge returns a burst of 400s reading "TextEncodeInput must be
-  // Union[TextInputSequence...]" — a tokenizer TYPE error, not a capacity or
-  // rate-limit response, so it is a concurrency bug upstream rather than a
-  // signal to back off permanently. Measured at 6 workers it ate 21% of all
-  // steps; without a retry every one of those is a step of exploration thrown
-  // away. Jittered, so N workers that collide do not all retry in lockstep.
+  // RETRY with backoff, for genuinely transient failures only.
+  //
+  // NOTE: the 400 burst this was originally written for was NOT transient and NOT
+  // concurrency — it was a lone surrogate in the prompt (see stripLoneSurrogates
+  // above), which is deterministic, so 47 of 49 retrying calls exhausted all four
+  // attempts and retrying bought nothing. Keep this for real transients (5xx,
+  // 429, dropped connections); it is not a substitute for valid input.
+  // Jittered, so N workers that collide do not retry in lockstep.
   let r, lastErr
   let attemptedHere = 0
   for (let attempt = 0; attempt < 4; attempt++) {

@@ -406,6 +406,7 @@ Reply with ONLY a JSON object, no prose, no code fence:
 
 Set "broken" only when you can SEE something wrong: an error message, a spinner that never finishes, empty space where content belongs, text spilling out of its container, a dialog with no way to close it, a control that does nothing when used. Otherwise leave it as "".`
 
+const retryStats = { calls: 0, callsNeedingRetry: 0, transient: 0, hardFail: 0 }
 async function decide(ctx, shotB64) {
   const body = {
     model: MODEL,
@@ -432,8 +433,9 @@ async function decide(ctx, shotB64) {
   // steps; without a retry every one of those is a step of exploration thrown
   // away. Jittered, so N workers that collide do not all retry in lockstep.
   let r, lastErr
+  let attemptedHere = 0
   for (let attempt = 0; attempt < 4; attempt++) {
-    if (attempt) await new Promise(res => setTimeout(res, 400 * 2 ** attempt + Math.floor(Math.random() * 400)))
+    if (attempt) { attemptedHere++; await new Promise(res => setTimeout(res, 400 * 2 ** attempt + Math.floor(Math.random() * 400))) }
     try {
       r = await fetch(LLM, {
         method: 'POST',
@@ -444,10 +446,13 @@ async function decide(ctx, shotB64) {
     } catch (e) { lastErr = e; continue }             // network/timeout
     if (r.ok) break
     lastErr = new Error(`model HTTP ${r.status}: ${(await r.text()).slice(0, 200)}`)
+    retryStats.transient++
     if (r.status !== 400 && r.status !== 429 && r.status < 500) break   // a real client error: do not hammer
     r = undefined
   }
-  if (!r || !r.ok) throw lastErr || new Error('model call failed')
+  if (attemptedHere) retryStats.callsNeedingRetry++
+  retryStats.calls++
+  if (!r || !r.ok) { retryStats.hardFail++; throw lastErr || new Error('model call failed') }
   const j = await r.json()
   const msg = j.choices?.[0]?.message ?? {}
   // A reasoning model can exhaust max_tokens inside `reasoning_content` and
@@ -902,6 +907,7 @@ try {
   }))
   const sinkList = Object.keys(sinks).filter(isSink)
   log(`affordances known: ${Object.keys(tried).length}; sinks: ${sinkList.join(', ') || 'none'}`)
+  log(`model calls: ${retryStats.calls}, needed a retry: ${retryStats.callsNeedingRetry}, transient 4xx/5xx: ${retryStats.transient}, hard failures: ${retryStats.hardFail}`)
   writeFileSync(join(OUT, 'result.json'), JSON.stringify(summary, null, 2))
   const bySev = s => findings.filter(f => f.severity === s).length
   const det = findings.filter(f => f.verifiedBy === 'detector').length

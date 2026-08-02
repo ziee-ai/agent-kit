@@ -83,10 +83,15 @@ s = re.sub(r'(server:\n(?:.*\n)*?\s+port:\s*)\d+', rf'\g<1>{be_port}', s, count=
 s = re.sub(r'(secret:\s*)".*"', lambda m: m.group(1) + '"' + secrets.token_urlsafe(36) + '"', s, count=1)
 # An audit loop hammers loopback endpoints from one IP; the limiter would 429
 # the rig against itself and every finding would be a false 'server error'.
-if re.search(r'^rate_limit:', s, re.M):
-    s = re.sub(r'(^rate_limit:\n(?:\s+.*\n)*?\s+enabled:\s*)\w+', r'\g<1>false', s, flags=re.M)
-else:
-    s += "\nrate_limit:\n  enabled: false\n"
+# The flag lives at server.rate_limit.enabled. Writing a TOP-LEVEL rate_limit
+# block (what this did originally) is dead config the server never reads, so the
+# rig ran rate-limited for its whole life and a 6-explorer fleet tripped 429 on
+# /api/health and /api/auth/login. Target the nested key, and verify.
+s2 = re.sub(r'(\n  rate_limit:\n(?:    .*\n)*?    enabled:\s*)\w+', r'\g<1>false', s, count=1)
+if s2 == s:
+    raise SystemExit("setup-rig: could not disable server.rate_limit.enabled - "
+                     "the config schema changed; fix this rather than shipping a rig that self-429s")
+s = s2
 open(out, 'w').write(s)
 print("   written")
 PY

@@ -50,13 +50,43 @@ PASS=${RIG_PASS:-password123}
 mkdir -p "$STATE"
 echo "fleet: $N explorers, $STEPS steps each, against $BASE"
 
+# Restore ACCESS to the id-keyed account, under a name that is actually FREE.
+#
+# The original version renamed it back to the snapshot's username unconditionally.
+# That worked 17 times and then wedged the fleet for seven hours: the explorer had
+# renamed its own account AND registered a new user called 'admin', so the restore
+# collided with the UNIQUE INDEX on users.username and failed on every attempt.
+# It failed SILENTLY, because the caller only logged on success — every liveness
+# check passed while nothing was explored.
+#
+# So: walk candidate names until one is free, keyed on the account id (never on a
+# username, which is the mutable thing), and publish the winner so the next cycle
+# logs in with it. Deleting the impostor would be the other option; it is not
+# taken, because destroying app state is exactly what this rig exists not to do.
 recover() {
-  local uid uname hash
+  local uid uname hash cand out
   IFS='|' read -r uid uname hash < "$IDENTITY"
-  [ -n "${uid:-}" ] || return 1
-  docker exec "$PG" psql -U postgres -d "$DB" -c \
-    "UPDATE users SET username='$uname', password_hash='$hash', is_active=true WHERE id='$uid';" \
-    >/dev/null 2>&1
+  if [ -z "${uid:-}" ] || [ -z "${hash:-}" ]; then
+    echo "$(date '+%F %T') RECOVERY-FAILED: identity file $IDENTITY is unusable" >> "$STATE/fleet.log"
+    return 1
+  fi
+  for cand in "$uname" "${uname}_rig1" "${uname}_rig2" "${uname}_rig3" "${uname}_rig$$"; do
+    # Free if nobody else holds it (the account itself may already hold it).
+    local taken
+    taken=$(docker exec "$PG" psql -U postgres -d "$DB" -tAc \
+      "SELECT count(*) FROM users WHERE username='$cand' AND id<>'$uid';" 2>/dev/null)
+    [ "${taken:-1}" = "0" ] || continue
+    out=$(docker exec "$PG" psql -U postgres -d "$DB" -c \
+      "UPDATE users SET username='$cand', password_hash='$hash', is_active=true WHERE id='$uid';" 2>&1)
+    if printf '%s' "$out" | grep -q 'UPDATE 1'; then
+      printf '%s' "$cand" > "$STATE/rig-user.txt"      # next cycle logs in as this
+      echo "$(date '+%F %T') CREDENTIAL-RECOVERY as '$cand'" >> "$STATE/fleet.log"
+      return 0
+    fi
+    echo "$(date '+%F %T') RECOVERY-ATTEMPT '$cand' failed: $(printf '%s' "$out" | head -1)" >> "$STATE/fleet.log"
+  done
+  echo "$(date '+%F %T') RECOVERY-FAILED: no free username for account $uid — fleet is locked out" >> "$STATE/fleet.log"
+  return 1
 }
 
 # One worker: explore, then loop. Each has its own OUT dir but SHARES the
@@ -65,16 +95,30 @@ worker() {
   local id=$1
   while true; do
     local out="$STATE/fleet$id-$(date +%Y%m%d-%H%M%S)"
+    # Read the username fresh each cycle: recovery may have had to move the
+    # account to a different name, and a value captured at fleet start would send
+    # every worker back to a login that can no longer succeed.
+    local user_="$USER_"
+    [ -s "$STATE/rig-user.txt" ] && user_=$(cat "$STATE/rig-user.txt")
     ( cd "$RIG/src-app/ui" && timeout 3600 node "$SKILL/explore.mjs" \
-        --url="$BASE" --user="$USER_" --password="$PASS" \
+        --url="$BASE" --user="$user_" --password="$PASS" \
         --steps="$STEPS" --out="$out" ) > "$out.stdout" 2>&1
     local rc=$?
     echo "$(date '+%F %T') worker=$id rc=$rc out=$out" >> "$STATE/fleet.log"
     # exit 3 is explore.mjs's locked-out signal. Recover ONCE, serialised by a
     # crude lock so four workers do not all rewrite the same row at once.
     if [ "$rc" = "3" ]; then
+      # Break a STALE lock. A worker killed between mkdir and rmdir would
+      # otherwise wedge every future recovery forever — the same silent-permanent
+      # -wedge shape as the collision bug above, and not worth leaving latent.
+      # Recovery takes ~1s, so anything older than 120s is abandoned.
+      if [ -d "$STATE/.recover.lock" ] && \
+         [ $(( $(date +%s) - $(stat -c %Y "$STATE/.recover.lock" 2>/dev/null || date +%s) )) -gt 120 ]; then
+        echo "$(date '+%F %T') breaking stale recover lock" >> "$STATE/fleet.log"
+        rmdir "$STATE/.recover.lock" 2>/dev/null
+      fi
       if mkdir "$STATE/.recover.lock" 2>/dev/null; then
-        recover && echo "$(date '+%F %T') worker=$id CREDENTIAL-RECOVERY" >> "$STATE/fleet.log"
+        recover || true          # recover() logs its own outcome, success or failure
         sleep 5; rmdir "$STATE/.recover.lock" 2>/dev/null
       else
         sleep 20   # another worker is recovering; wait it out

@@ -831,6 +831,11 @@ try {
     const target = ctx.elements.find(e => e.n === Number(act.n))
     const desc = `${act.action}${target ? ` [${target.n}:${target.tag}${target.label ? ' "' + target.label + '"' : ''}]` : ''}${act.text ? ` "${String(act.text).slice(0, 30)}"` : ''}`
     log(`step ${i}/${STEPS} @${ctx.url.replace(BASE, '') || '/'} → ${desc}  (${act.reason || ''})`)
+    // Make the follow-through state OBSERVABLE. The nudge lives in the prompt,
+    // which is never echoed, so "did it fire?" was unanswerable from the logs —
+    // I checked for it by grepping stdout and got a confident, meaningless zero.
+    if (created.length && i % 10 === 0)
+      log(`  created=${created.length} usedExisting=${usedExisting.length}${created.length > usedExisting.length * 3 ? ' — FOLLOW-THROUGH NUDGE ACTIVE' : ''}`)
     history.push(`${desc} @ ${ctx.url.replace(BASE, '')}`)
     // Remember the control itself, so a later cycle knows it is no longer new.
     if (target) {

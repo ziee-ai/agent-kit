@@ -224,6 +224,17 @@ const isSink = (r) => (sinks[r]?.barren || 0) >= SINK_MIN_STEPS
 // app actually exercises — two pages can look "visited" while never triggering a
 // write. This is the real coverage number.
 let newEndpointsThisStep = 0   // reset per step; drives the payout signal
+// FOLLOW-THROUGH. Measured across 226 untouched endpoints, the largest class (71)
+// is "parent entity + second-step action" — and the rig had created 132 knowledge
+// bases and uploaded 94 files while never once putting a file INTO a base. It
+// reliably finds the entry action of a feature and stops there, because creating
+// is easy to discover and using is one affordance deeper.
+//
+// So count what it makes versus what it then does with it, and say so. This is a
+// statement about its own behaviour, not about ziee: "you keep making things and
+// never using them" needs no knowledge of what the things are.
+const created = []          // {kind, at} — successful creating POSTs this cycle
+const usedExisting = []     // successful writes against an EXISTING entity
 const apiHits = new Map()   // "METHOD /api/x/{id}" -> count (attempted)
 const apiOutcomes = new Map() // "METHOD /api/x/{id}" -> {ok, c4, c5} (what came back)
 const API_COVERAGE = arg('api-coverage', '/data/pbya/ziee/tmp/live-ui-explore/api-coverage.json')
@@ -461,7 +472,10 @@ async function decide(ctx, shotB64) {
     messages: [{
       role: 'user',
       content: [
-        { type: 'text', text: stripLoneSurrogates(`${SYSTEM}\n\n--- CURRENT STATE ---\nurl: ${ctx.url}\ntitle: ${ctx.title}\nstep ${ctx.step} of ${STEPS}\n\nrecently tried (avoid repeating):\n${ctx.history || '(nothing yet)'}\n\nelements you can CLICK:\n${JSON.stringify(ctx.elements.filter(e => !e.editable))}\n\nelements you can TYPE into (only these accept "type" — typing into anything else does nothing):\n${JSON.stringify(ctx.elements.filter(e => e.editable))}\n\nlinks this page offers for "goto":\n${JSON.stringify(ctx.hrefs)}\n\nareas you have explored LEAST across all previous sessions (prefer these when you see a way to reach one):\n${JSON.stringify(ctx.leastVisited)}\n\nbadges you have NEVER used before, in any session — these are drawn GREEN in the screenshot, everything else is red. Strongly prefer one of these:\n${JSON.stringify(ctx.fresh || [])}\n\nFEATURE AREAS of this app you have NEVER exercised, worst first. Clicking new buttons on pages you already know teaches us nothing; REACHING these areas is the goal. If you can see any way toward one, take it:\n${JSON.stringify(ctx.untouchedAreas || [])}`) },
+        { type: 'text', text: stripLoneSurrogates(`${SYSTEM}\n\n--- CURRENT STATE ---\nurl: ${ctx.url}\ntitle: ${ctx.title}\nstep ${ctx.step} of ${STEPS}\n\nrecently tried (avoid repeating):\n${ctx.history || '(nothing yet)'}\n\nelements you can CLICK:\n${JSON.stringify(ctx.elements.filter(e => !e.editable))}\n\nelements you can TYPE into (only these accept "type" — typing into anything else does nothing):\n${JSON.stringify(ctx.elements.filter(e => e.editable))}\n\nlinks this page offers for "goto":\n${JSON.stringify(ctx.hrefs)}\n\nareas you have explored LEAST across all previous sessions (prefer these when you see a way to reach one):\n${JSON.stringify(ctx.leastVisited)}\n\nbadges you have NEVER used before, in any session — these are drawn GREEN in the screenshot, everything else is red. Strongly prefer one of these:\n${JSON.stringify(ctx.fresh || [])}\n\nFEATURE AREAS of this app you have NEVER exercised, worst first. Clicking new buttons on pages you already know teaches us nothing; REACHING these areas is the goal. If you can see any way toward one, take it:\n${JSON.stringify(ctx.untouchedAreas || [])}${ctx.followThrough ? `
+
+FINISH WHAT YOU START. This session you have CREATED ${ctx.created.length} thing(s) but only acted on an existing one ${ctx.usedExisting.length} time(s). Making something is the easy half and teaches us almost nothing. A thing you just made is only interesting once you PUT SOMETHING IN IT, CONFIGURE IT, RUN IT, RENAME IT or DELETE IT. Before creating anything else, go back to something you already made and use it properly.
+recently created: ${JSON.stringify(ctx.created)}` : ''}`) },
         { type: 'image_url', image_url: { url: `data:image/png;base64,${shotB64}` } },
       ],
     }],
@@ -564,6 +578,15 @@ page.on('response', r => {
     const key = `${r.request().method()} ${templatize(u)}`
     const o = apiOutcomes.get(key) || { ok: 0, c4: 0, c5: 0 }
     if (s < 400) o.ok++; else if (s < 500) o.c4++; else o.c5++
+    if (s < 400 && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(r.request().method())) {
+      // A write to a COLLECTION makes something new; a write to a path that
+      // already names an entity ({id} in it) acts on something that exists. The
+      // second is the one that reaches the deep endpoints.
+      const t = templatize(u)
+      const isSecondStep = /\{id\}/.test(t)
+      const bucket = isSecondStep ? usedExisting : created
+      bucket.push(t.replace(/^\/api\//, ''))
+    }
     apiOutcomes.set(key, o)
     // A 4xx in this step EXPLAINS a console error in the same step (see the
     // console-error classification below).
@@ -578,11 +601,40 @@ page.on('dialog', async d => { bus.dialog.push(`${d.type()}: ${d.message().slice
 // the click look like a no-op and the explorer retries it forever. Answer every
 // chooser with a small generated file: app-agnostic, and it is the only way the
 // upload paths get exercised at all.
-const FIXTURE = '/tmp/live-ui-explore-fixture.txt'
-try { writeFileSync(FIXTURE, 'live-ui-explore upload fixture\n' + 'lorem ipsum dolor sit amet\n'.repeat(40)) } catch {}
+// A POOL of fixtures, not one file.
+//
+// Every upload used to be the same 1.1 KB text file, so 94 uploads exercised
+// exactly one code path. Real ingest branches on type: a PDF goes to the text
+// extractor, an image to a different renderer, an empty file to the validator, a
+// large one to the size limit. Rotating the fixture per upload gets those
+// branches for free — no app knowledge, just varied input, which is what a
+// curious user with a Downloads folder would produce anyway.
+const FIXTURE_DIR = '/tmp/live-ui-explore-fixtures'
+try { mkdirSync(FIXTURE_DIR, { recursive: true }) } catch {}
+const FIXTURES = []
+const addFixture = (name, data) => {
+  const f = join(FIXTURE_DIR, name)
+  try { writeFileSync(f, data); FIXTURES.push(f) } catch {}
+}
+addFixture('notes.txt', 'live-ui-explore fixture\n' + 'lorem ipsum dolor sit amet\n'.repeat(40))
+addFixture('data.csv', 'id,name,score\n' + Array.from({ length: 200 }, (_, i) => `${i},row-${i},${i * 7 % 101}`).join('\n') + '\n')
+addFixture('config.json', JSON.stringify({ fixture: true, nested: { a: [1, 2, 3] }, note: 'live-ui-explore' }, null, 2))
+addFixture('readme.md', '# Fixture\n\nA markdown fixture with a [link](https://example.invalid) and `code`.\n\n- one\n- two\n')
+addFixture('empty.txt', '')                                    // zero-byte: validator path
+addFixture('big.txt', 'x'.repeat(3 * 1024 * 1024))             // 3 MB: size-limit path
+// Minimal valid PNG (1x1) and PDF — binary paths, not just text.
+addFixture('pixel.png', Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64'))
+addFixture('doc.pdf', Buffer.from(
+  '%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n' +
+  '3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]/Contents 4 0 R>>endobj\n' +
+  '4 0 obj<</Length 44>>stream\nBT /F1 12 Tf 20 100 Td (fixture pdf) Tj ET\nendstream endobj\n' +
+  'trailer<</Root 1 0 R>>\n%%EOF\n', 'latin1'))
+let fixtureTurn = 0
 page.on('filechooser', async fc => {
-  bus.filechooser.push(`filechooser (multiple=${fc.isMultiple()}) answered with a text fixture`)
-  await fc.setFiles(FIXTURE).catch(() => {})
+  const pick = FIXTURES.length ? FIXTURES[fixtureTurn++ % FIXTURES.length] : null
+  bus.filechooser.push(`filechooser (multiple=${fc.isMultiple()}) answered with ${pick ? pick.split('/').pop() : 'nothing'}`)
+  if (pick) await fc.setFiles(pick).catch(() => {})
 })
 
 // Stable key for cross-cycle dedup. Normalises ONLY volatile identifiers —
@@ -765,6 +817,8 @@ try {
     try {
       act = await decide({
         ...ctx, step: i, leastVisited: leastVisited(), fresh, untouchedAreas: untouchedAreas(),
+        created: created.slice(-6), usedExisting: usedExisting.slice(-6),
+        followThrough: created.length && usedExisting.length * 3 < created.length,
         history: history.slice(-6).join('\n') +
           (stuck ? `\n\nSTOP. You have done "${recent[0]}" three times with no effect. It does not work. Choose a DIFFERENT element, or navigate somewhere you have not been.` : ''),
       }, buf.toString('base64'))

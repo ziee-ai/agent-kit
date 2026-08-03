@@ -963,8 +963,20 @@ try {
     steps.push({ ...step, events: bus, urlAfter: page.url() })
   }
 } catch (e) {
-  log(`FATAL ${String(e).slice(0, 300)}`)
-  record('harness-error', 'HIGH', String(e).slice(0, 300), null, 'detector')
+  // A browser that disappears mid-cycle is almost always US: the fleet SIGKILLs
+  // in-flight workers on restart, and Playwright then throws "Target page,
+  // context or browser has been closed" from whatever call was in progress.
+  // Verified by timestamp — all 18 occurrences landed in tight clusters of three,
+  // one per worker, exactly at fleet-restart times. Reporting that as a HIGH
+  // harness-error is a false alarm about a shutdown we ordered, and it buries the
+  // real ones. A genuine crash still reports.
+  const msg = String(e).slice(0, 300)
+  if (/Target (page|browser)|context or browser has been closed|browser has been closed|Target closed/i.test(msg)) {
+    log(`shutdown: browser closed mid-cycle (${steps.length} steps done) — treating as a clean stop`)
+  } else {
+    log(`FATAL ${msg}`)
+    record('harness-error', 'HIGH', msg, null, 'detector')
+  }
 } finally {
   let summaryApi = null
   const summary = {

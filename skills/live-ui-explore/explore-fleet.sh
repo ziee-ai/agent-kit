@@ -128,6 +128,24 @@ worker() {
   done
 }
 
+# Stop cleanly on TERM/INT: let the current cycles finish rather than killing
+# browsers out from under them. A SIGKILLed worker throws mid-Playwright-call and
+# loses the whole cycle's ledger merge, which is why restarts used to cost three
+# partial cycles each. Give them a grace period, then insist.
+STOPPING=0
+shutdown() {
+  STOPPING=1
+  echo "fleet: stopping — letting in-flight cycles finish (up to 90s)" >&2
+  for p in $(jobs -p); do kill -TERM "$p" 2>/dev/null; done
+  for _ in $(seq 1 90); do
+    pgrep -P $$ >/dev/null 2>&1 || break
+    sleep 1
+  done
+  for p in $(jobs -p); do kill -KILL "$p" 2>/dev/null; done
+  exit 0
+}
+trap shutdown TERM INT
+
 for i in $(seq 1 "$N"); do
   worker "$i" &
   echo "  worker $i started (pid $!)"

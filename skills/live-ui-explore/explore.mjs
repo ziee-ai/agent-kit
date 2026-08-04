@@ -143,20 +143,44 @@ const steps = []
 // scripted-journey mistake in a new costume).
 const stems = (s) => new Set(String(s).toLowerCase().split(/[^a-z0-9]+/)
   .filter(w => w.length > 3).map(w => w.replace(/(ies|es|s)$/, '')))
-const untouchedHere = (url) => {
-  const routeStems = stems(routeOf(url))
+// RANKED and ROTATED, because a fixed top-10 is a permanent blind spot.
+//
+// Measured: 28 routes match more untouched endpoints than fit — /settings/llm-runtime
+// matches 51, /settings/workflows 45 — and taking the first 10 in map order meant
+// the same ten were offered forever while the rest could never be seen. Score by
+// how specifically the endpoint belongs to this route, then rotate the window per
+// cycle so everything surfaces eventually rather than a lucky prefix.
+const untouchedHere = (url, rotate = 0) => {
+  const route = routeOf(url)
+  const routeStems = stems(route)
   if (!routeStems.size) return []
-  const out = []
+  const scored = []
   for (const [, eps] of declaredGroups) {
     for (const e of eps) {
       if (apiSeen.has(e)) continue
-      const epStems = stems(e.split(' ')[1])
+      const path = e.split(' ')[1]
+      const epStems = stems(path)
+      let score = 0
       for (const w of routeStems) {
-        if ([...epStems].some(x => x.startsWith(w) || w.startsWith(x))) { out.push(e); break }
+        for (const x of epStems) {
+          if (x === w) score += 3                              // exact resource match
+          else if (x.startsWith(w) || w.startsWith(x)) score += 1  // stem overlap
+        }
       }
+      if (!score) continue
+      // A second-step call (an id in the path) is the class we most want reached.
+      if (/\{\}\//.test(path)) score += 2
+      scored.push([score, e])
     }
   }
-  return [...new Set(out)].slice(0, 10)
+  scored.sort((a, b) => b[0] - a[0] || a[1].localeCompare(b[1]))
+  const uniq = [...new Map(scored.map(([sc, e]) => [e, sc])).keys()]
+  if (uniq.length <= 10) return uniq
+  // Keep the 4 best-matching pinned, rotate the remaining slots through the tail.
+  const head = uniq.slice(0, 4)
+  const tail = uniq.slice(4)
+  const off = (rotate % tail.length + tail.length) % tail.length
+  return head.concat(Array.from({ length: 6 }, (_, k) => tail[(off + k) % tail.length]))
 }
 const untouchedAreas = () => {
   const out = []
@@ -856,7 +880,7 @@ try {
     try {
       act = await decide({
         ...ctx, step: i, leastVisited: leastVisited(), fresh, untouchedAreas: untouchedAreas(),
-        untouchedHere: ENDPOINT_HINTS === 'off' ? [] : untouchedHere(ctx.url),
+        untouchedHere: ENDPOINT_HINTS === 'off' ? [] : untouchedHere(ctx.url, i),
         created: created.slice(-6), usedExisting: usedExisting.slice(-6),
         followThrough: created.length && usedExisting.length * 3 < created.length,
         history: history.slice(-6).join('\n') +

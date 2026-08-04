@@ -228,6 +228,37 @@ const neverFailed = (url, limit = 6) => {
   }
   return out.slice(0, limit)
 }
+// MISSION MODE — one untouched endpoint per cycle, pursued until it fires.
+//
+// A hint is advice the model may ignore; this is an objective it is measured
+// against. 189 endpoints have never been called ONCE, and naming them passively
+// alongside everything else has not moved them. Instead: pick one at the start of
+// the cycle, tell the explorer to go cause it, and record whether it managed.
+//
+// The valuable artifact is the FAILURE list. An endpoint the explorer actively
+// hunted for and could not trigger through any control is either a dead API with
+// no UI behind it, or a UI path so buried a determined user would not find it.
+// Both are real findings, and neither is visible from a coverage percentage.
+const MISSIONS = arg('missions', '/data/pbya/ziee/tmp/live-ui-explore/missions.json')
+let missionLog = {}
+try { missionLog = JSON.parse(readFileSync(MISSIONS, 'utf8')) } catch {}
+const pickMission = () => {
+  const cand = []
+  for (const [, eps] of declaredGroups) {
+    for (const e of eps) {
+      if (apiSeen.has(e)) continue
+      const m = missionLog[e] || { attempts: 0, hit: false }
+      if (m.hit) continue
+      // Structurally unreachable from a browser — never assign these.
+      if (/\/mcp$|subscribe|\/stream$|\/events$|oauth|callback|link-account/.test(e)) continue
+      cand.push([m.attempts, e])
+    }
+  }
+  if (!cand.length) return null
+  // Fewest attempts first, so every endpoint gets tried before any gets a retry.
+  cand.sort((a, b) => a[0] - b[0] || a[1].localeCompare(b[1]))
+  return cand[Math.floor(Math.random() * Math.min(5, cand.length))][1]
+}
 const untouchedAreas = () => {
   const out = []
   for (const [g, eps] of declaredGroups) {
@@ -330,6 +361,8 @@ const isSink = (r) => (sinks[r]?.barren || 0) >= SINK_MIN_STEPS
 // app actually exercises — two pages can look "visited" while never triggering a
 // write. This is the real coverage number.
 let newEndpointsThisStep = 0   // reset per step; drives the payout signal
+let missionKey = null          // the endpoint this cycle is hunting
+let missionHit = false
 // FOLLOW-THROUGH. Measured across 226 untouched endpoints, the largest class (71)
 // is "parent entity + second-step action" — and the rig had created 132 knowledge
 // bases and uploaded 94 files while never once putting a file INTO a base. It
@@ -586,7 +619,12 @@ async function decide(ctx, shotB64) {
     messages: [{
       role: 'user',
       content: [
-        { type: 'text', text: stripLoneSurrogates(`${SYSTEM}\n\n--- CURRENT STATE ---\nurl: ${ctx.url}\ntitle: ${ctx.title}\nstep ${ctx.step} of ${STEPS}\n\nrecently tried (avoid repeating):\n${ctx.history || '(nothing yet)'}\n\nelements you can CLICK:\n${JSON.stringify(ctx.elements.filter(e => !e.editable))}\n\nelements you can TYPE into (only these accept "type" — typing into anything else does nothing):\n${JSON.stringify(ctx.elements.filter(e => e.editable))}\n\nlinks this page offers for "goto":\n${JSON.stringify(ctx.hrefs)}\n\nareas you have explored LEAST across all previous sessions (prefer these when you see a way to reach one):\n${JSON.stringify(ctx.leastVisited)}\n\nbadges you have NEVER used before, in any session — these are drawn GREEN in the screenshot, everything else is red. Strongly prefer one of these:\n${JSON.stringify(ctx.fresh || [])}\n\nFEATURE AREAS of this app you have NEVER exercised, worst first. Clicking new buttons on pages you already know teaches us nothing; REACHING these areas is the goal. If you can see any way toward one, take it:\n${JSON.stringify(ctx.untouchedAreas || [])}${(ctx.neverOpened || []).length ? `
+        { type: 'text', text: stripLoneSurrogates(`${SYSTEM}${ctx.mission && !ctx.missionHit ? `
+
+=== YOUR MISSION THIS SESSION ===
+Make the app perform this request: ${ctx.mission}
+You cannot call it yourself. Find the SCREEN it belongs to and the CONTROL that causes it, and use that control for real. A POST usually needs an Add/New/Upload/Save action; a PUT needs editing something and saving; a DELETE needs a remove action, often behind a row menu or a confirm dialog. Navigate wherever you must. This matters more than anything else you could do — if you see a way toward it, take it.
+=================================` : ''}\n\n--- CURRENT STATE ---\nurl: ${ctx.url}\ntitle: ${ctx.title}\nstep ${ctx.step} of ${STEPS}\n\nrecently tried (avoid repeating):\n${ctx.history || '(nothing yet)'}\n\nelements you can CLICK:\n${JSON.stringify(ctx.elements.filter(e => !e.editable))}\n\nelements you can TYPE into (only these accept "type" — typing into anything else does nothing):\n${JSON.stringify(ctx.elements.filter(e => e.editable))}\n\nlinks this page offers for "goto":\n${JSON.stringify(ctx.hrefs)}\n\nareas you have explored LEAST across all previous sessions (prefer these when you see a way to reach one):\n${JSON.stringify(ctx.leastVisited)}\n\nbadges you have NEVER used before, in any session — these are drawn GREEN in the screenshot, everything else is red. Strongly prefer one of these:\n${JSON.stringify(ctx.fresh || [])}\n\nFEATURE AREAS of this app you have NEVER exercised, worst first. Clicking new buttons on pages you already know teaches us nothing; REACHING these areas is the goal. If you can see any way toward one, take it:\n${JSON.stringify(ctx.untouchedAreas || [])}${(ctx.neverOpened || []).length ? `
 
 PAGES OF THIS APP YOU HAVE NEVER ONCE OPENED. Every one is a whole screen you have not seen, so it is worth far more than another button on a page you know. Use "goto" to visit one:
 ${(ctx.neverOpened || []).map(r => '  ' + r).join('\n')}` : ''}${(ctx.untouchedHere || []).length ? `
@@ -689,6 +727,7 @@ page.on('request', r => {
   // Did THIS request reach ground no cycle has ever reached? That is the actual
   // objective, so it is what the harness must reward.
   if (!apiSeen.has(key)) { apiSeen.add(key); newEndpointsThisStep++ }
+  if (missionKey && key === missionKey) missionHit = true
 })
 page.on('response', r => {
   const s = r.status()
@@ -836,6 +875,8 @@ try {
   }
   clearBus()
 
+  const MISSION = ENDPOINT_HINTS === 'off' ? null : pickMission()
+  if (MISSION) { missionKey = MISSION; log(`mission: cause ${MISSION} to fire (attempt ${(missionLog[MISSION]?.attempts || 0) + 1})`) }
   const history = []
   let sinkStreak = 0
   let untriedHere = 0      // untried controls on the current page
@@ -941,7 +982,7 @@ try {
       act = await decide({
         ...ctx, step: i, leastVisited: leastVisited(), fresh, untouchedAreas: untouchedAreas(),
         untouchedHere: ENDPOINT_HINTS === 'off' ? [] : untouchedHere(ctx.url, i),
-        neverOpened: neverOpened(),
+        neverOpened: neverOpened(), mission: MISSION, missionHit,
         neverFailed: ENDPOINT_HINTS === 'off' ? [] : neverFailed(ctx.url),
         created: created.slice(-6), usedExisting: usedExisting.slice(-6),
         followThrough: created.length && usedExisting.length * 3 < created.length,
@@ -1166,6 +1207,25 @@ try {
     steps: Math.max(a?.steps || 0, b.steps || 0),
     barren: a ? Math.min(a.barren ?? 0, b.barren ?? 0) : (b.barren ?? 0),
   }))
+  if (missionKey) {
+    try {
+      let disk = {}
+      try { disk = JSON.parse(readFileSync(MISSIONS, 'utf8')) } catch {}
+      const prev = disk[missionKey] || { attempts: 0, hit: false }
+      const rec = { attempts: prev.attempts + 1, hit: prev.hit || missionHit }
+      if (rec.hit) rec.hitAt = prev.hitAt || new Date().toISOString()
+      disk[missionKey] = rec
+      writeFileSync(MISSIONS, JSON.stringify(disk, null, 1))
+      log(`mission ${missionHit ? 'ACCOMPLISHED' : 'failed'}: ${missionKey} (attempt ${rec.attempts})`)
+      // Hunted deliberately across several sessions and still never triggered:
+      // either no control exists for it, or it is buried past what a determined
+      // user would find. Both are findings a coverage number cannot show.
+      if (!rec.hit && rec.attempts >= 5)
+        record('no-ui-path', 'MEDIUM',
+          `${missionKey} was hunted deliberately in ${rec.attempts} sessions and never fired — no reachable control appears to exist`,
+          null, 'detector')
+    } catch {}
+  }
   const sinkList = Object.keys(sinks).filter(isSink)
   log(`affordances known: ${Object.keys(tried).length}; sinks: ${sinkList.join(', ') || 'none'}`)
   log(`model calls: ${retryStats.calls}, needed a retry: ${retryStats.callsNeedingRetry}, transient 4xx/5xx: ${retryStats.transient}, hard failures: ${retryStats.hardFail}`)

@@ -128,6 +128,36 @@ const steps = []
 // app's own vocabulary (the resource segment of its own OpenAPI paths), ranked by
 // how much is left untouched. This says WHAT is unexplored, never how to get
 // there — the explorer still has to find the way by looking.
+// Untouched endpoints that plausibly belong to the page we are ON.
+//
+// `untouchedAreas` names whole feature areas, which is a weak signal once you are
+// already inside one: on /knowledge it says "knowledge (12 unused)" and the model
+// still has to guess which control it has not pressed. Naming the specific calls
+// that have never fired FROM HERE turns it into a translation task the model is
+// good at — "POST /api/knowledge-bases/{}/documents has never happened" reads as
+// "find the Add-documents control", which is exactly the second-step class that
+// makes up 71 of the untouched endpoints.
+//
+// Matching is a loose stem match between the route and the API path, so it needs
+// no hand-written route->endpoint table (that would rot, and would be the
+// scripted-journey mistake in a new costume).
+const stems = (s) => new Set(String(s).toLowerCase().split(/[^a-z0-9]+/)
+  .filter(w => w.length > 3).map(w => w.replace(/(ies|es|s)$/, '')))
+const untouchedHere = (url) => {
+  const routeStems = stems(routeOf(url))
+  if (!routeStems.size) return []
+  const out = []
+  for (const [, eps] of declaredGroups) {
+    for (const e of eps) {
+      if (apiSeen.has(e)) continue
+      const epStems = stems(e.split(' ')[1])
+      for (const w of routeStems) {
+        if ([...epStems].some(x => x.startsWith(w) || w.startsWith(x))) { out.push(e); break }
+      }
+    }
+  }
+  return [...new Set(out)].slice(0, 10)
+}
 const untouchedAreas = () => {
   const out = []
   for (const [g, eps] of declaredGroups) {
@@ -185,6 +215,12 @@ const sigOf = (url, el) =>
 // untouched — never how to reach it. The explorer still has to find the path by
 // looking, which is the property worth protecting.
 const OPENAPI = arg('openapi', '/data/pbya/ziee/tmp/live-rig-wt/src-app/ui/openapi/openapi.json')
+// 'paths' names the specific untouched calls for the current page; 'off' reverts
+// to area-level hints only. Kept as a switch because naming endpoints is the most
+// app-knowledge this rig has ever been given, and the whole premise is that a
+// clueless explorer finds what a scripted one cannot — so it must be possible to
+// measure with it and without it.
+const ENDPOINT_HINTS = arg('endpoint-hints', process.env.EXPLORE_ENDPOINT_HINTS || 'paths')
 let declaredGroups = new Map()   // "/api/voice" -> Set of "METHOD /api/x/{}"
 try {
   const spec = JSON.parse(readFileSync(OPENAPI, 'utf8'))
@@ -472,7 +508,10 @@ async function decide(ctx, shotB64) {
     messages: [{
       role: 'user',
       content: [
-        { type: 'text', text: stripLoneSurrogates(`${SYSTEM}\n\n--- CURRENT STATE ---\nurl: ${ctx.url}\ntitle: ${ctx.title}\nstep ${ctx.step} of ${STEPS}\n\nrecently tried (avoid repeating):\n${ctx.history || '(nothing yet)'}\n\nelements you can CLICK:\n${JSON.stringify(ctx.elements.filter(e => !e.editable))}\n\nelements you can TYPE into (only these accept "type" — typing into anything else does nothing):\n${JSON.stringify(ctx.elements.filter(e => e.editable))}\n\nlinks this page offers for "goto":\n${JSON.stringify(ctx.hrefs)}\n\nareas you have explored LEAST across all previous sessions (prefer these when you see a way to reach one):\n${JSON.stringify(ctx.leastVisited)}\n\nbadges you have NEVER used before, in any session — these are drawn GREEN in the screenshot, everything else is red. Strongly prefer one of these:\n${JSON.stringify(ctx.fresh || [])}\n\nFEATURE AREAS of this app you have NEVER exercised, worst first. Clicking new buttons on pages you already know teaches us nothing; REACHING these areas is the goal. If you can see any way toward one, take it:\n${JSON.stringify(ctx.untouchedAreas || [])}${ctx.followThrough ? `
+        { type: 'text', text: stripLoneSurrogates(`${SYSTEM}\n\n--- CURRENT STATE ---\nurl: ${ctx.url}\ntitle: ${ctx.title}\nstep ${ctx.step} of ${STEPS}\n\nrecently tried (avoid repeating):\n${ctx.history || '(nothing yet)'}\n\nelements you can CLICK:\n${JSON.stringify(ctx.elements.filter(e => !e.editable))}\n\nelements you can TYPE into (only these accept "type" — typing into anything else does nothing):\n${JSON.stringify(ctx.elements.filter(e => e.editable))}\n\nlinks this page offers for "goto":\n${JSON.stringify(ctx.hrefs)}\n\nareas you have explored LEAST across all previous sessions (prefer these when you see a way to reach one):\n${JSON.stringify(ctx.leastVisited)}\n\nbadges you have NEVER used before, in any session — these are drawn GREEN in the screenshot, everything else is red. Strongly prefer one of these:\n${JSON.stringify(ctx.fresh || [])}\n\nFEATURE AREAS of this app you have NEVER exercised, worst first. Clicking new buttons on pages you already know teaches us nothing; REACHING these areas is the goal. If you can see any way toward one, take it:\n${JSON.stringify(ctx.untouchedAreas || [])}${(ctx.untouchedHere || []).length ? `
+
+CALLS THIS PAGE CAN MAKE THAT HAVE NEVER HAPPENED. Each line is a server request the app is capable of but nobody has ever triggered. You cannot call these directly — find and use the CONTROL on this page that would cause one. A create/POST usually means an "Add"/"New"/"Upload" control; a PUT means editing and saving; a DELETE means a remove/trash control, often behind a row menu:
+${(ctx.untouchedHere || []).map(e => '  ' + e).join('\n')}` : ''}${ctx.followThrough ? `
 
 FINISH WHAT YOU START. This session you have CREATED ${ctx.created.length} thing(s) but only acted on an existing one ${ctx.usedExisting.length} time(s). Making something is the easy half and teaches us almost nothing. A thing you just made is only interesting once you PUT SOMETHING IN IT, CONFIGURE IT, RUN IT, RENAME IT or DELETE IT. Before creating anything else, go back to something you already made and use it properly.
 recently created: ${JSON.stringify(ctx.created)}` : ''}`) },
@@ -817,6 +856,7 @@ try {
     try {
       act = await decide({
         ...ctx, step: i, leastVisited: leastVisited(), fresh, untouchedAreas: untouchedAreas(),
+        untouchedHere: ENDPOINT_HINTS === 'off' ? [] : untouchedHere(ctx.url),
         created: created.slice(-6), usedExisting: usedExisting.slice(-6),
         followThrough: created.length && usedExisting.length * 3 < created.length,
         history: history.slice(-6).join('\n') +

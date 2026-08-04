@@ -203,6 +203,31 @@ const neverOpened = () => declaredRoutes
   .filter(r => !(r in coverage) || coverage[r] === 0)
   .filter(r => !r.includes(':'))          // a parameterised route needs an id we may not have
   .slice(0, 10)
+// Endpoints reachable from this page that have NEVER been seen to fail.
+//
+// Volume is not the gap: 613,926 calls across 259 endpoints, mean 2,370 each, and
+// GET /api/conversations alone has been called 41,178 times — all of it producing
+// four real findings. Forcing "call each endpoint 100 times" is already satisfied
+// for half of them and would only reward re-treading.
+//
+// The real hole the ledger exposes is that 181 of 259 endpoints have ONLY ever
+// returned 2xx. Their error handling has never run: not the validator, not the
+// permission check, not the not-found branch. That is where defects live, and it
+// is what this explorer is actually for — it is supposed to be trying to break
+// things, and a call that has never failed is a call it has never really tested.
+const neverFailed = (url, limit = 6) => {
+  const routeStems = stems(routeOf(url))
+  if (!routeStems.size) return []
+  const out = []
+  for (const [k, v] of apiOutcomesCum) {
+    if (!v.ok || v.c4 || v.c5) continue          // never succeeded, or already seen to fail
+    const epStems = stems(k.split(' ')[1])
+    for (const w of routeStems) {
+      if ([...epStems].some(x => x.startsWith(w) || w.startsWith(x))) { out.push(`${k} (${v.ok} ok, 0 errors)`); break }
+    }
+  }
+  return out.slice(0, limit)
+}
 const untouchedAreas = () => {
   const out = []
   for (const [g, eps] of declaredGroups) {
@@ -322,6 +347,14 @@ const API_COVERAGE = arg('api-coverage', '/data/pbya/ziee/tmp/live-ui-explore/ap
 // Cumulative endpoint history, loaded at START (it was previously only read at
 // the end, to merge). The explorer needs to know what PRIOR cycles reached, or
 // every cycle re-derives the same gradient from an empty set.
+// The outcome ledger was write-only; read it at start so a hint can be built from
+// what EVERY prior cycle observed, not just this one.
+let apiOutcomesCum = new Map()
+try {
+  const f = arg('api-coverage', '/data/pbya/ziee/tmp/live-ui-explore/api-coverage.json')
+    .replace(/\.json$/, '') + '-outcomes.json'
+  for (const [k, v] of Object.entries(JSON.parse(readFileSync(f, 'utf8')))) apiOutcomesCum.set(k, v)
+} catch { /* first run */ }
 let apiSeen = new Set()
 try {
   for (const k of Object.keys(JSON.parse(readFileSync(API_COVERAGE, 'utf8'))))
@@ -559,7 +592,10 @@ PAGES OF THIS APP YOU HAVE NEVER ONCE OPENED. Every one is a whole screen you ha
 ${(ctx.neverOpened || []).map(r => '  ' + r).join('\n')}` : ''}${(ctx.untouchedHere || []).length ? `
 
 CALLS THIS PAGE CAN MAKE THAT HAVE NEVER HAPPENED. Each line is a server request the app is capable of but nobody has ever triggered. You cannot call these directly — find and use the CONTROL on this page that would cause one. A create/POST usually means an "Add"/"New"/"Upload" control; a PUT means editing and saving; a DELETE means a remove/trash control, often behind a row menu:
-${(ctx.untouchedHere || []).map(e => '  ' + e).join('\n')}` : ''}${ctx.followThrough ? `
+${(ctx.untouchedHere || []).map(e => '  ' + e).join('\n')}` : ''}${(ctx.neverFailed || []).length ? `
+
+CALLS FROM THIS PAGE THAT HAVE NEVER FAILED. Each has only ever succeeded, so the app's error handling behind it has never run — no validation, no permission check, no not-found branch. Your job is to break things, and a control that has only ever worked has not really been tested. Try: submit it empty, paste something absurdly long or with strange characters, submit while a required field is blank, delete something that is in use, or double-submit:
+${(ctx.neverFailed || []).map(e => '  ' + e).join('\n')}` : ''}${ctx.followThrough ? `
 
 FINISH WHAT YOU START. This session you have CREATED ${ctx.created.length} thing(s) but only acted on an existing one ${ctx.usedExisting.length} time(s). Making something is the easy half and teaches us almost nothing. A thing you just made is only interesting once you PUT SOMETHING IN IT, CONFIGURE IT, RUN IT, RENAME IT or DELETE IT. Before creating anything else, go back to something you already made and use it properly.
 recently created: ${JSON.stringify(ctx.created)}` : ''}`) },
@@ -906,6 +942,7 @@ try {
         ...ctx, step: i, leastVisited: leastVisited(), fresh, untouchedAreas: untouchedAreas(),
         untouchedHere: ENDPOINT_HINTS === 'off' ? [] : untouchedHere(ctx.url, i),
         neverOpened: neverOpened(),
+        neverFailed: ENDPOINT_HINTS === 'off' ? [] : neverFailed(ctx.url),
         created: created.slice(-6), usedExisting: usedExisting.slice(-6),
         followThrough: created.length && usedExisting.length * 3 < created.length,
         history: history.slice(-6).join('\n') +

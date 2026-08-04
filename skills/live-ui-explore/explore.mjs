@@ -182,6 +182,27 @@ const untouchedHere = (url, rotate = 0) => {
   const off = (rotate % tail.length + tail.length) % tail.length
   return head.concat(Array.from({ length: 6 }, (_, k) => tail[(off + k) % tail.length]))
 }
+// PAGES the app declares that the rig has never opened.
+//
+// Listing every untouched ENDPOINT was the obvious next step and is the wrong
+// one: 202 lines / ~1700 tokens per step, almost all of it about pages the model
+// is not on, and it cannot act on an endpoint from the wrong page. The evidence
+// says the binding constraint is reaching pages at all — coverage sat at 54% for
+// 17 hours, then jumped 17 endpoints in one interval the moment the explorer
+// first opened /settings/voice. Knowing /api/voice/models existed the whole time
+// bought nothing until it stood on a voice page.
+//
+// A route is also less inside knowledge than an API path: it is the address of a
+// screen the app's own navigation would eventually reveal, not an internal
+// contract. Sourced from the same OpenAPI-adjacent discovery the rig already
+// does, minus what it has already seen.
+const UNVISITED_ROUTES = arg('unvisited-routes', '')
+const declaredRoutes = UNVISITED_ROUTES
+  ? UNVISITED_ROUTES.split(',').map(x => x.trim()).filter(Boolean) : []
+const neverOpened = () => declaredRoutes
+  .filter(r => !(r in coverage) || coverage[r] === 0)
+  .filter(r => !r.includes(':'))          // a parameterised route needs an id we may not have
+  .slice(0, 10)
 const untouchedAreas = () => {
   const out = []
   for (const [g, eps] of declaredGroups) {
@@ -532,7 +553,10 @@ async function decide(ctx, shotB64) {
     messages: [{
       role: 'user',
       content: [
-        { type: 'text', text: stripLoneSurrogates(`${SYSTEM}\n\n--- CURRENT STATE ---\nurl: ${ctx.url}\ntitle: ${ctx.title}\nstep ${ctx.step} of ${STEPS}\n\nrecently tried (avoid repeating):\n${ctx.history || '(nothing yet)'}\n\nelements you can CLICK:\n${JSON.stringify(ctx.elements.filter(e => !e.editable))}\n\nelements you can TYPE into (only these accept "type" — typing into anything else does nothing):\n${JSON.stringify(ctx.elements.filter(e => e.editable))}\n\nlinks this page offers for "goto":\n${JSON.stringify(ctx.hrefs)}\n\nareas you have explored LEAST across all previous sessions (prefer these when you see a way to reach one):\n${JSON.stringify(ctx.leastVisited)}\n\nbadges you have NEVER used before, in any session — these are drawn GREEN in the screenshot, everything else is red. Strongly prefer one of these:\n${JSON.stringify(ctx.fresh || [])}\n\nFEATURE AREAS of this app you have NEVER exercised, worst first. Clicking new buttons on pages you already know teaches us nothing; REACHING these areas is the goal. If you can see any way toward one, take it:\n${JSON.stringify(ctx.untouchedAreas || [])}${(ctx.untouchedHere || []).length ? `
+        { type: 'text', text: stripLoneSurrogates(`${SYSTEM}\n\n--- CURRENT STATE ---\nurl: ${ctx.url}\ntitle: ${ctx.title}\nstep ${ctx.step} of ${STEPS}\n\nrecently tried (avoid repeating):\n${ctx.history || '(nothing yet)'}\n\nelements you can CLICK:\n${JSON.stringify(ctx.elements.filter(e => !e.editable))}\n\nelements you can TYPE into (only these accept "type" — typing into anything else does nothing):\n${JSON.stringify(ctx.elements.filter(e => e.editable))}\n\nlinks this page offers for "goto":\n${JSON.stringify(ctx.hrefs)}\n\nareas you have explored LEAST across all previous sessions (prefer these when you see a way to reach one):\n${JSON.stringify(ctx.leastVisited)}\n\nbadges you have NEVER used before, in any session — these are drawn GREEN in the screenshot, everything else is red. Strongly prefer one of these:\n${JSON.stringify(ctx.fresh || [])}\n\nFEATURE AREAS of this app you have NEVER exercised, worst first. Clicking new buttons on pages you already know teaches us nothing; REACHING these areas is the goal. If you can see any way toward one, take it:\n${JSON.stringify(ctx.untouchedAreas || [])}${(ctx.neverOpened || []).length ? `
+
+PAGES OF THIS APP YOU HAVE NEVER ONCE OPENED. Every one is a whole screen you have not seen, so it is worth far more than another button on a page you know. Use "goto" to visit one:
+${(ctx.neverOpened || []).map(r => '  ' + r).join('\n')}` : ''}${(ctx.untouchedHere || []).length ? `
 
 CALLS THIS PAGE CAN MAKE THAT HAVE NEVER HAPPENED. Each line is a server request the app is capable of but nobody has ever triggered. You cannot call these directly — find and use the CONTROL on this page that would cause one. A create/POST usually means an "Add"/"New"/"Upload" control; a PUT means editing and saving; a DELETE means a remove/trash control, often behind a row menu:
 ${(ctx.untouchedHere || []).map(e => '  ' + e).join('\n')}` : ''}${ctx.followThrough ? `
@@ -881,6 +905,7 @@ try {
       act = await decide({
         ...ctx, step: i, leastVisited: leastVisited(), fresh, untouchedAreas: untouchedAreas(),
         untouchedHere: ENDPOINT_HINTS === 'off' ? [] : untouchedHere(ctx.url, i),
+        neverOpened: neverOpened(),
         created: created.slice(-6), usedExisting: usedExisting.slice(-6),
         followThrough: created.length && usedExisting.length * 3 < created.length,
         history: history.slice(-6).join('\n') +

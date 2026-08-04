@@ -100,8 +100,13 @@ worker() {
     # every worker back to a login that can no longer succeed.
     local user_="$USER_"
     [ -s "$STATE/rig-user.txt" ] && user_=$(cat "$STATE/rig-user.txt")
+    # Concrete routes the app declares, so the explorer can be told which whole
+    # SCREENS it has never opened — the constraint that actually gated coverage.
+    local routes=""
+    [ -s /data/pbya/ziee/tmp/declared-routes.txt ] && routes=$(cat /data/pbya/ziee/tmp/declared-routes.txt)
     ( cd "$RIG/src-app/ui" && timeout 3600 node "$SKILL/explore.mjs" \
         --url="$BASE" --user="$user_" --password="$PASS" \
+        --unvisited-routes="$routes" \
         --steps="$STEPS" --out="$out" ) > "$out.stdout" 2>&1
     local rc=$?
     echo "$(date '+%F %T') worker=$id rc=$rc out=$out" >> "$STATE/fleet.log"

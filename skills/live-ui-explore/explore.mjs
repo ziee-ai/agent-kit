@@ -395,9 +395,18 @@ try {
 } catch { /* first run */ }
 const templatize = u => {
   const path = String(u).replace(/^https?:\/\/[^/]+/, '').split('?')[0]
+  // Placeholder MUST be '{}', matching the shape derived from the OpenAPI spec
+  // (path.replace(/\{[^}]+\}/g,'{}')). It used to emit '{id}', so every
+  // comparison against a spec-derived key silently failed:
+  //   - mission detection could never match  -> 124 missions, 0 recorded hits,
+  //     which I twice mis-attributed to the explorer failing to find controls;
+  //   - apiSeen.has(key) was always false     -> every request counted as a NEW
+  //     endpoint, which is the bogus "+9 new endpoint(s)" in the logs and a
+  //     permanently-firing payout signal in the sink metric.
+  // One shape, one source, or the two halves drift apart invisibly.
   return path.split('/').map(seg =>
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(seg) ? '{id}'
-    : /^\d+$/.test(seg) ? '{id}' : seg).join('/')
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(seg) ? '{}'
+    : /^\d+$/.test(seg) ? '{}' : seg).join('/')
 }
 const log = m => {
   const line = `${new Date().toISOString().slice(11, 19)} ${m}`

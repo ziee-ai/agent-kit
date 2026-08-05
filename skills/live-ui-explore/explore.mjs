@@ -619,24 +619,30 @@ async function decide(ctx, shotB64) {
     messages: [{
       role: 'user',
       content: [
-        { type: 'text', text: stripLoneSurrogates(`${SYSTEM}${ctx.mission && !ctx.missionHit ? `
+        { type: 'text', text: stripLoneSurrogates(`${SYSTEM}
 
-=== YOUR MISSION THIS SESSION ===
-Make the app perform this request: ${ctx.mission}
-You cannot call it yourself. Find the SCREEN it belongs to and the CONTROL that causes it, and use that control for real. A POST usually needs an Add/New/Upload/Save action; a PUT needs editing something and saving; a DELETE needs a remove action, often behind a row menu or a confirm dialog. Navigate wherever you must. This matters more than anything else you could do — if you see a way toward it, take it.
-=================================` : ''}\n\n--- CURRENT STATE ---\nurl: ${ctx.url}\ntitle: ${ctx.title}\nstep ${ctx.step} of ${STEPS}\n\nrecently tried (avoid repeating):\n${ctx.history || '(nothing yet)'}\n\nelements you can CLICK:\n${JSON.stringify(ctx.elements.filter(e => !e.editable))}\n\nelements you can TYPE into (only these accept "type" — typing into anything else does nothing):\n${JSON.stringify(ctx.elements.filter(e => e.editable))}\n\nlinks this page offers for "goto":\n${JSON.stringify(ctx.hrefs)}\n\nareas you have explored LEAST across all previous sessions (prefer these when you see a way to reach one):\n${JSON.stringify(ctx.leastVisited)}\n\nbadges you have NEVER used before, in any session — these are drawn GREEN in the screenshot, everything else is red. Strongly prefer one of these:\n${JSON.stringify(ctx.fresh || [])}\n\nFEATURE AREAS of this app you have NEVER exercised, worst first. Clicking new buttons on pages you already know teaches us nothing; REACHING these areas is the goal. If you can see any way toward one, take it:\n${JSON.stringify(ctx.untouchedAreas || [])}${(ctx.neverOpened || []).length ? `
+=== YOUR ONE OBJECTIVE RIGHT NOW ===
+${ctx.objective}
+====================================
 
-PAGES OF THIS APP YOU HAVE NEVER ONCE OPENED. Every one is a whole screen you have not seen, so it is worth far more than another button on a page you know. Use "goto" to visit one:
-${(ctx.neverOpened || []).map(r => '  ' + r).join('\n')}` : ''}${(ctx.untouchedHere || []).length ? `
+--- CURRENT STATE ---
+url: ${ctx.url}
+title: ${ctx.title}
+step ${ctx.step} of ${STEPS}
 
-CALLS THIS PAGE CAN MAKE THAT HAVE NEVER HAPPENED. Each line is a server request the app is capable of but nobody has ever triggered. You cannot call these directly — find and use the CONTROL on this page that would cause one. A create/POST usually means an "Add"/"New"/"Upload" control; a PUT means editing and saving; a DELETE means a remove/trash control, often behind a row menu:
-${(ctx.untouchedHere || []).map(e => '  ' + e).join('\n')}` : ''}${(ctx.neverFailed || []).length ? `
+recently tried (avoid repeating):
+${ctx.history || '(nothing yet)'}
 
-CALLS FROM THIS PAGE THAT HAVE NEVER FAILED. Each has only ever succeeded, so the app's error handling behind it has never run — no validation, no permission check, no not-found branch. Your job is to break things, and a control that has only ever worked has not really been tested. Try: submit it empty, paste something absurdly long or with strange characters, submit while a required field is blank, delete something that is in use, or double-submit:
-${(ctx.neverFailed || []).map(e => '  ' + e).join('\n')}` : ''}${ctx.followThrough ? `
+elements you can CLICK:
+${JSON.stringify(ctx.elements.filter(e => !e.editable))}
 
-FINISH WHAT YOU START. This session you have CREATED ${ctx.created.length} thing(s) but only acted on an existing one ${ctx.usedExisting.length} time(s). Making something is the easy half and teaches us almost nothing. A thing you just made is only interesting once you PUT SOMETHING IN IT, CONFIGURE IT, RUN IT, RENAME IT or DELETE IT. Before creating anything else, go back to something you already made and use it properly.
-recently created: ${JSON.stringify(ctx.created)}` : ''}`) },
+elements you can TYPE into (only these accept "type" — typing into anything else does nothing):
+${JSON.stringify(ctx.elements.filter(e => e.editable))}
+
+links this page offers for "goto":
+${JSON.stringify(ctx.hrefs)}
+
+badges you have never used before are drawn GREEN in the screenshot; red ones you have used: ${JSON.stringify(ctx.fresh || [])}`) },
         { type: 'image_url', image_url: { url: `data:image/png;base64,${shotB64}` } },
       ],
     }],
@@ -979,8 +985,39 @@ try {
     const stuck = recent.length === 3 && new Set(recent).size === 1
     let act
     try {
+      // ONE objective per step, chosen here rather than eight competing blocks in
+      // the prompt.
+      //
+      // Each hint was added separately to close a real gap, and the assembled
+      // result was seven directives that each claimed to matter most: the mission
+      // said "more than anything else", unopened pages said "far more than another
+      // button", feature areas said "REACHING these is the goal", follow-through
+      // said "before creating anything else", green badges said "strongly prefer".
+      // That is not guidance, it is noise, and it is the most likely reason mission
+      // mode went 0-for-64 while every individual hint had looked reasonable alone.
+      //
+      // Priority order, most specific first: a concrete assigned target beats a
+      // whole unseen screen, which beats an untriggered call here, which beats
+      // breaking something that has only ever worked, which beats generic novelty.
+      const objective = (() => {
+        if (MISSION && !missionHit)
+          return `Make the app perform this request: ${MISSION}\nYou cannot call it yourself — find the SCREEN it belongs to and the CONTROL that causes it, and use it for real. A POST usually needs an Add/New/Upload/Save action; a PUT needs editing something and saving; a DELETE needs a remove action, often behind a row menu or a confirm dialog. Navigate wherever you must.`
+        const pages = neverOpened()
+        if (pages.length)
+          return `Open a screen you have never seen. Use "goto" for one of: ${pages.slice(0, 5).join(', ')}\nA whole unseen screen is worth more than another button on a page you know.`
+        const here = ENDPOINT_HINTS === 'off' ? [] : untouchedHere(ctx.url, i)
+        if (here.length)
+          return `This page can make requests nobody has ever triggered. Find the control that causes one:\n${here.slice(0, 6).map(e => '  ' + e).join('\n')}`
+        const nf = ENDPOINT_HINTS === 'off' ? [] : neverFailed(ctx.url, 4)
+        if (nf.length)
+          return `These calls from this page have ONLY ever succeeded, so the app's validation and error handling behind them has never run. Break one — submit empty, paste something absurdly long or with strange characters, leave a required field blank, delete something in use, or double-submit:\n${nf.map(e => '  ' + e).join('\n')}`
+        if (created.length && usedExisting.length * 3 < created.length)
+          return `You have created ${created.length} thing(s) this session but only acted on an existing one ${usedExisting.length} time(s). Making something is the easy half. Go back to something you already made and USE it — put something in it, configure it, run it, rename it, delete it.`
+        const la = leastVisited()
+        return `Explore somewhere you have barely been${la.length ? ': ' + la.slice(0, 5).join(', ') : ''}. Prefer a green (never-used) badge over a red one.`
+      })()
       act = await decide({
-        ...ctx, step: i, leastVisited: leastVisited(), fresh, untouchedAreas: untouchedAreas(),
+        ...ctx, step: i, fresh, objective,
         untouchedHere: ENDPOINT_HINTS === 'off' ? [] : untouchedHere(ctx.url, i),
         neverOpened: neverOpened(), mission: MISSION, missionHit,
         neverFailed: ENDPOINT_HINTS === 'off' ? [] : neverFailed(ctx.url),

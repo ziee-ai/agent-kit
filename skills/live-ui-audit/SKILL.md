@@ -21,7 +21,7 @@ description: Drive the LIVE running app like a human and produce an EVIDENCE-BAS
 
 Points an **objective** check battery at a **running** app and produces a ranked,
 deduped, evidence-backed finding report. It is the live-app sibling of
-`src-app/ui/scripts/runtime-health.mjs` (which runs the same class of checks
+`sdk/packages/gallery/scripts/runtime-health.mjs` (which runs the same class of checks
 against the mock-API **gallery**); this skill drives the **real** app mid-flow as
 a logged-in user and adds the checks only a live app can surface (network,
 cross-user leaks, real data states).
@@ -341,7 +341,7 @@ shards run = self-induced, report as noise. Never report either without the prob
 ## Relationship to existing infra
 
 - **Reuses** the color/contrast/a11y/grid helpers + severity model from
-  `src-app/ui/scripts/runtime-health.mjs`.
+  `sdk/packages/gallery/scripts/runtime-health.mjs`.
 - **Anchors** color + consistency to `DESIGN_SYSTEM.md` — but reads the SHIPPED
   token values from the app's own computed CSS custom properties at runtime, so
   it never hardcodes what `index.css` already owns.

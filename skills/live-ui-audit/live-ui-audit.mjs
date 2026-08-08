@@ -1,7 +1,7 @@
 /**
  * LIVE-UI-AUDIT — objective, evidence-based audit of a RUNNING app.
  *
- * This is the sibling of `src-app/ui/scripts/runtime-health.mjs`. runtime-health
+ * This is the sibling of `sdk/packages/gallery/scripts/runtime-health.mjs`. runtime-health
  * points the browser-diagnostics + contrast/a11y/grid battery at the mock-API
  * GALLERY (isolated surfaces). THIS script points the SAME battery — plus a set
  * of live-only checks (overflow, collision, clipping, broken images, dead-end

@@ -65,7 +65,7 @@
  */
 
 import { chromium } from 'playwright'
-import { mkdirSync, writeFileSync, appendFileSync, readFileSync } from 'node:fs'
+import { mkdirSync, writeFileSync, appendFileSync, readFileSync, renameSync, existsSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 
 // ---------------------------------------------------------------------------
@@ -1227,11 +1227,35 @@ try {
   // a ~168s cycle and the data is an approximate coverage tally, so the trade is
   // worth it; a lock file would serialise every explorer's shutdown.
   const mergeWrite = (path, delta, combine) => {
+    // ATOMIC, and an unreadable file is NEVER treated as empty.
+    //
+    // The first version did `try { disk = JSON.parse(read(path)) } catch {}` and
+    // then wrote `disk`. With three workers sharing a 1.4 MB file and a
+    // non-atomic writeFileSync, one worker reads while another is mid-write, gets
+    // truncated JSON, falls into the catch with `disk = {}`, and writes ONLY its
+    // own delta. That destroyed 25,959 affordance entries in a single cycle —
+    // silently, because every worker reported rc=0.
+    //
+    // Two fixes, both needed. Write to a temp file and rename() (atomic within a
+    // filesystem, so a reader sees either the old file or the new one, never a
+    // torn one). And on a parse failure, ABORT the merge rather than starting
+    // from {} — losing this cycle's delta is a rounding error; losing the ledger
+    // is days of exploration.
     try {
-      let disk = {}
-      try { disk = JSON.parse(readFileSync(path, 'utf8')) } catch {}
+      let disk
+      try {
+        disk = JSON.parse(readFileSync(path, 'utf8'))
+      } catch (e) {
+        if (existsSync(path) && statSync(path).size > 0) {
+          log(`  ledger ${path.split('/').pop()} unreadable — skipping this merge rather than overwriting it`)
+          return
+        }
+        disk = {}   // genuinely absent or empty: a first run
+      }
       for (const [k, v] of Object.entries(delta)) disk[k] = combine(disk[k], v)
-      writeFileSync(path, JSON.stringify(disk, null, 1))
+      const tmp = `${path}.tmp.${process.pid}`
+      writeFileSync(tmp, JSON.stringify(disk, null, 1))
+      renameSync(tmp, path)
     } catch {}
   }
   const visitDelta = {}

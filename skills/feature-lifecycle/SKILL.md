@@ -569,9 +569,9 @@ NOT hand them your reasoning. The roster the two angles are SELECTED from (a
 roster to choose from, not a count to satisfy):
 
 `correctness · security · error-handling · concurrency · perms/authz ·
-api-contract · state-management · a11y · patterns-conformance · tests-quality ·
-perf · i18n/copy · modularity · extensibility · maintainability · api-friendliness ·
-design-conformance`
+api-contract · state-management · stale-snapshot · a11y · patterns-conformance ·
+tests-quality · perf · i18n/copy · modularity · extensibility · maintainability ·
+api-friendliness · design-conformance`
 
 **`design-conformance` is a REQUIRED angle (FB-19), and it — plus any explicit
 conformance pass — audits against the DESIGN + its `## Invariants`, NOT against
@@ -604,6 +604,27 @@ the qualities a reusable platform lives or dies on):
   they do, errors that tell the caller how to fix them, no required-arg soup, no
   "call these three things in the right order or it breaks." Distinct from
   api-contract (which checks the contract is CORRECT); this checks it's ERGONOMIC.
+- **stale-snapshot state** (FB-8) — state captured at time T and consulted at time
+  T+n is a defect generator whenever the user (or another writer) can change the
+  underlying thing in between. Prefer reading the live source at the moment of use.
+  If something genuinely must be remembered, capture it at the moment it is known
+  to be true, and keep whatever *pairs* with it captured at that same moment —
+  decoupling a remembered value from the thing it describes is what turns a stale
+  read into corruption.
+  **Instance:** voice dictation remembered the caret at record-start to decide where
+  to write, so a decode landing after the user moved the caret wrote to the old
+  position — and once the restore payload was captured separately from the span it
+  restored, cancelling spliced seconds-old text over what the user had since typed.
+  Five successive rounds each added a staleness guard; none could work, because for
+  a bare caret the remembered text is `''` and `value.slice(n,n) === ''` for ANY
+  in-range `n` — the guard was **vacuous, not merely weak**. It ended only when the
+  snapshot was deleted and the one genuinely-remembered value moved to first-write
+  time, where it pairs with its span by construction.
+  **Diff tells:** a field captured in `init`/`start`/`mount` and read in a later
+  `tick`/`stop`/`cancel`; two fields describing the same thing captured at different
+  moments (an offset and the text at it; an id and its resolved object); a staleness
+  guard — ask what it compares when the snapshot is empty or zero-length; and the
+  behavioural tell, **two consecutive fix rounds landing in the same function**.
 
 **UI surfaces additionally require these angles** (harvested from human review —
 each traces to real rework that shipped despite a green gate):

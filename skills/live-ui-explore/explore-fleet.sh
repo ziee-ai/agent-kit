@@ -110,6 +110,12 @@ worker() {
         --steps="$STEPS" --out="$out" ) > "$out.stdout" 2>&1
     local rc=$?
     echo "$(date '+%F %T') worker=$id rc=$rc out=$out" >> "$STATE/fleet.log"
+    # Fold this run's findings into the deduped ledger. Omitting this is how the
+    # fleet threw away 12,956 findings over four days - including 1,965 server-5xx
+    # and 26 uncaught-exception - while every status check reported "no new HIGH
+    # findings", because the ledger could not change. Shared script, so the two
+    # runners cannot drift apart again.
+    node "$SKILL/merge-findings.mjs" "$out" --state "$STATE" >> "$STATE/fleet.log" 2>&1
     # exit 3 is explore.mjs's locked-out signal. Recover ONCE, serialised by a
     # crude lock so four workers do not all rewrite the same row at once.
     if [ "$rc" = "3" ]; then

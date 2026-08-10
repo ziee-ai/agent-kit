@@ -1169,9 +1169,42 @@ try {
     for (const t of bus.dialog) record('native-dialog', 'LOW', t, step, 'detector')
     for (const t of bus.filechooser) log(`  ${t}`)
 
-    // blank page after an action = something navigated into nothing
-    const bodyLen = await page.evaluate(() => document.body?.innerText?.trim().length ?? 0).catch(() => -1)
-    if (bodyLen === 0) record('blank-page', 'HIGH', `body empty after ${desc} (was ${before})`, step, 'detector')
+    // Blank page after an action = something navigated into nothing.
+    //
+    // This MUST re-check after a settle. The first read lands immediately after the
+    // action, so a route transition or lazy chunk still in flight reads as an empty
+    // body — the detector was sampling mid-navigation and calling it a defect.
+    //
+    // The evidence was the SHAPE of the findings, not any one of them: 19 distinct
+    // blank-page findings, 18 of them a single occurrence, spread across unrelated
+    // triggers (a theme selector, a search box, a model card, a Close button). A
+    // real blank page repeats on its trigger; a race does not.
+    //
+    // So read, and if empty give the app time to render and read again. Only a body
+    // STILL empty after settling is recorded — and that one reproduces, because the
+    // transition has finished by the time we judge it.
+    const readBody = () =>
+      page.evaluate(() => document.body?.innerText?.trim().length ?? 0).catch(() => -1)
+    let bodyLen = await readBody()
+    if (bodyLen === 0) {
+      // networkidle rather than a bare sleep: a slow route is the usual cause, so
+      // waiting on the real signal avoids both flakiness and a fixed tax on every
+      // step. The timeout is a ceiling, not the normal cost.
+      await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {})
+      bodyLen = await readBody()
+      if (bodyLen === 0) {
+        await page.waitForTimeout(750)
+        bodyLen = await readBody()
+      }
+    }
+    if (bodyLen === 0)
+      record(
+        'blank-page',
+        'HIGH',
+        `body still empty after ${desc} + networkidle + 750ms settle (was ${before})`,
+        step,
+        'detector',
+      )
 
     steps.push({ ...step, events: bus, urlAfter: page.url() })
   }

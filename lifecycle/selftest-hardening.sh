@@ -882,6 +882,67 @@ fi
 unset GIT_ALLOW_PROTOCOL
 
 # ---------------------------------------------------------------------------
+# C3 parity is DERIVED, not declared: a generated file the merge resolved by
+# TAKING A SIDE must fail even when MERGE_GENERATED does not name it. This is
+# the cytoanalyst defect — `just openapi-regen` wrote five files against a
+# two-entry list, and C3 scoped its diff TO the list, so the other three were
+# silently exempt from the whole point of the gate.
+# Fixture: regen.sh writes declared.txt AND undeclared.txt; the branch commits a
+# side-taken (wrong) undeclared.txt. ONLY an unscoped parity diff catches it.
+# ---------------------------------------------------------------------------
+mk_regen_repo() {   # $1 = content committed for undeclared.txt on the branch
+  local R; R="$(new_repo)"; mkdir -p "$R/.claude"
+  cat > "$R/regen.sh" <<'EOF'
+#!/usr/bin/env bash
+# stands in for `just openapi-regen`: TWO outputs, one of them undeclared.
+printf 'declared-canonical\n'   > declared.txt
+printf 'undeclared-canonical\n' > undeclared.txt
+exit 0
+EOF
+  chmod +x "$R/regen.sh"
+  printf 'MERGE_REGEN_CMD=./regen.sh\nMERGE_GENERATED=declared.txt\n' > "$R/.claude/app.config"
+  printf 'declared-canonical\n'   > "$R/declared.txt"
+  printf 'undeclared-canonical\n' > "$R/undeclared.txt"
+  git -C "$R" add -A && git -C "$R" commit -qm base-regen
+  git -C "$R" checkout -q -b feat/regen
+  printf '%s\n' "$1" > "$R/undeclared.txt"
+  echo work > "$R/w.txt"
+  git -C "$R" add -A && git -C "$R" commit -qm work-regen
+  echo "$R"
+}
+
+# (1) side-taken UNDECLARED generated file ⇒ C3 must FAIL (exit 1).
+R="$(mk_regen_repo 'took-one-side-instead-of-regenerating')"; CLEANUP+=("$R")
+SIDEOUT="$(node "$MG" feat/regen --repo "$R" --base main --no-fetch 2>&1 || true)"
+if printf '%s' "$SIDEOUT" | grep -qE "C3 .*regen-parity .*FAIL" \
+   && printf '%s' "$SIDEOUT" | grep -q "undeclared.txt"; then
+  PASS=$((PASS+1)); printf '  \033[32mok  \033[0m %s\n' "merge-gate C3: a side-taken generated file NOT in MERGE_GENERATED still FAILs (parity is derived from git)"
+else
+  FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "merge-gate C3: an UNDECLARED side-taken generated file slipped through"
+  printf '%s\n' "$SIDEOUT" | sed 's/^/        | /'
+fi
+
+# (2) C6 generated-coverage: even with parity CLEAN, a regen output the config
+# does not name must be reported LOUDLY — so the next omission cannot be silent.
+R="$(mk_regen_repo 'undeclared-canonical')"; CLEANUP+=("$R")
+COVOUT="$(node "$MG" feat/regen --repo "$R" --base main --no-fetch 2>&1 || true)"
+if printf '%s' "$COVOUT" | grep -qE "C3 .*regen-parity .*PASS" \
+   && printf '%s' "$COVOUT" | grep -qE "C6 .*generated-coverage .*FAIL" \
+   && printf '%s' "$COVOUT" | grep -q "undeclared.txt"; then
+  PASS=$((PASS+1)); printf '  \033[32mok  \033[0m %s\n' "merge-gate C6: a regen output missing from MERGE_GENERATED FAILs even when parity is clean"
+else
+  FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "merge-gate C6: an omission from MERGE_GENERATED was not reported"
+  printf '%s\n' "$COVOUT" | sed 's/^/        | /'
+fi
+
+# (3) negative control: with BOTH outputs declared, the same tree is fully green
+# (C6 must not be a check that can only fail).
+R="$(mk_regen_repo 'undeclared-canonical')"; CLEANUP+=("$R")
+printf 'MERGE_REGEN_CMD=./regen.sh\nMERGE_GENERATED=declared.txt undeclared.txt\n' > "$R/.claude/app.config"
+assert_exit_cmd 0 "merge-gate C3+C6: a COMPLETE MERGE_GENERATED list on a correctly-regenerated merge is green" -- \
+  node "$MG" feat/regen --repo "$R" --base main --no-fetch
+
+# ---------------------------------------------------------------------------
 echo "-- Part C: preflight.sh (env gate) --"
 # ---------------------------------------------------------------------------
 # good: hub-seed + pgvector + node_modules present (+ ziee-shaped app.config so

@@ -28,7 +28,7 @@
 // child_process.
 
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, cpSync, rmSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, cpSync, rmSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -119,7 +119,15 @@ const CARGO_PACKAGE = APP.MERGE_CARGO_PACKAGE || null;         // C1
 const CARGO_DESKTOP_PACKAGE = APP.MERGE_CARGO_DESKTOP_PACKAGE || null; // C1 (optional)
 const DESKTOP_TOUCH_PREFIX = APP.MERGE_DESKTOP_TOUCH_PREFIX || null;   // C1 (optional)
 const REGEN_CMD = APP.MERGE_REGEN_CMD || null;                 // C3
-const GENERATED = (APP.MERGE_GENERATED || '').split(/\s+/).filter(Boolean); // C3
+// C3/C6: the EXPECTED generated set. C3 parity no longer scopes its diff to this
+// list (see gateC3) — the list is documentation, and C6 audits it against what
+// the regen actually writes so an omission cannot stay silent.
+const GENERATED = (APP.MERGE_GENERATED || '').split(/\s+/).filter(Boolean); // C3/C6
+// C3/C6: repo-relative paths/dirs the regen is ALLOWED to dirty without failing
+// parity (a lockfile a build legitimately refreshes, say). Empty by default —
+// every exemption must be declared, so the default posture is "any file the
+// regen touches is a generated file the gate is responsible for".
+const REGEN_IGNORE = (APP.MERGE_REGEN_IGNORE || '').split(/\s+/).filter(Boolean); // C3/C6
 // staging PROVISIONING (see provisionStaging below)
 const STAGING_SUBMODULES = (APP.MERGE_STAGING_SUBMODULES || '1').trim() !== '0';
 const STAGING_COPY_FILES = (APP.MERGE_STAGING_COPY_FILES || '').split(/\s+/).filter(Boolean);
@@ -493,38 +501,125 @@ function gateMergeAndP2C5() {
 }
 
 // ===========================================================================
-// C3 — full regen from the MERGED backend, both workspaces, no dropped types.
-// The recurring bug: desktop/ui/ has a SEPARATE api-client/types.ts that gets
+// C3 — full regen from the MERGED backend, EVERY generated output, no dropped
+// types. The recurring bug: a workspace has a SEPARATE generated file that gets
 // left stale (or the whole regen dropped) at merge. After regen, the committed
-// generated files MUST equal a fresh regen (empty diff) — else a regen was
-// dropped and a merged feature's types are missing from a client.
+// tree MUST equal a fresh regen (empty diff) — else a regen was dropped and a
+// merged feature's types are missing from a client.
+//
+// THE SET IS DERIVED, NOT DECLARED. The parity diff is taken over the WHOLE
+// merged tree, not over MERGE_GENERATED: a hand-maintained list of generated
+// paths has exactly the failure mode this gate exists to prevent — someone adds
+// a sixth output and nobody updates the list, so the guarantee silently lapses
+// for it (cytoanalyst shipped 5 openapi outputs against a 2-entry list). Scoping
+// the diff to the list made an unlisted merged-outputs file PASS.
+//
+// MERGE_GENERATED is now only DOCUMENTATION of the expected set, and C6 below
+// audits it against what the regen actually wrote, so an omission is LOUD.
 // (Heavy: needs a backend build + build-DB. Skippable.)
 // ===========================================================================
 // GENERATED + REGEN_CMD are resolved from app.config near the top.
+
+// stat-stamp every TRACKED file (mtime+size). Diffing two snapshots across the
+// regen yields the set of paths the regen WROTE — including the ones whose
+// content did not change, which no content diff can reveal. Submodules are not
+// recursed (git ls-files lists the gitlink only), so this stays cheap.
+function stampTracked(dir) {
+  const stamps = new Map();
+  const ls = gitTry(dir, 'ls-files', '-z');
+  if (!ls.ok) return stamps;
+  for (const rel of ls.out.split('\0')) {
+    if (!rel) continue;
+    try {
+      const s = statSync(join(dir, rel));
+      // gitlink entries stat as directories — a submodule is not app codegen output.
+      if (!s.isFile()) continue;
+      stamps.set(rel, `${s.mtimeMs}:${s.size}`);
+    } catch { /* deleted/unreadable — absence is itself a stable stamp */ }
+  }
+  return stamps;
+}
+// Paths the regen dirtied, DERIVED from git: tracked files whose content changed
+// + files it newly created that are not gitignored. Gitignored build output
+// (target/, node_modules/) is invisible to `git status` by design.
+function regenDirtied(dir) {
+  // --ignore-submodules=all: a submodule's own working tree (checked out by
+  // provisionStaging) is not this app's generated output; a dirty gitlink would
+  // otherwise read as a regen-dirtied path.
+  const changed = gitTry(dir, 'diff', '--name-only', '--ignore-submodules=all').out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  const created = gitTry(dir, 'status', '--porcelain', '--untracked-files=all', '--ignore-submodules=all')
+    .out.split(/\r?\n/).filter((l) => l.startsWith('?? '))
+    .map((l) => l.slice(3).trim()).filter(Boolean);
+  const all = [...new Set([...changed, ...created])];
+  return all.filter((p) => !REGEN_IGNORE.some((ig) => p === ig || p.startsWith(ig.endsWith('/') ? ig : `${ig}/`)));
+}
+
 function gateC3() {
-  if (SKIP_HEAVY) { record('C3', 'regen-parity', 'SKIP', '--skip-heavy'); return; }
-  if (!REGEN_CMD || GENERATED.length === 0) { record('C3', 'regen-parity', 'SKIP', 'MERGE_REGEN_CMD/MERGE_GENERATED unset (no regen configured)'); return; }
+  if (SKIP_HEAVY) {
+    record('C3', 'regen-parity', 'SKIP', '--skip-heavy');
+    record('C6', 'generated-coverage', 'SKIP', '--skip-heavy');
+    return;
+  }
+  if (!REGEN_CMD) {
+    record('C3', 'regen-parity', 'SKIP', 'MERGE_REGEN_CMD unset (no regen configured)');
+    record('C6', 'generated-coverage', 'SKIP', 'MERGE_REGEN_CMD unset (no regen configured)');
+    return;
+  }
   const [regenCmd, ...regenArgs] = REGEN_CMD.split(/\s+/);
+  const beforeStamps = stampTracked(staging);
   const r = spawnSync(regenCmd, regenArgs, { cwd: staging, encoding: 'utf8', stdio: 'pipe', maxBuffer: 256 * 1024 * 1024 });
   // A missing binary / spawn failure returns status null + undefined stdout — guard
   // it, else `(r.stdout + r.stderr).split()` throws instead of recording a FAIL.
   if (r.error || r.status === null) {
     record('C3', 'regen-parity', 'FAIL', `${REGEN_CMD} could not run: ${r.error ? r.error.message : 'process did not exit normally'} (is "${regenCmd}" installed?)`);
+    record('C6', 'generated-coverage', 'SKIP', 'regen did not run');
     return;
   }
   if (r.status !== 0) {
     record('C3', 'regen-parity', 'FAIL', `${REGEN_CMD} failed (exit ${r.status}). Tail:\n${((r.stdout || '') + (r.stderr || '')).split(/\n/).slice(-12).join('\n')}`);
+    record('C6', 'generated-coverage', 'SKIP', 'regen did not run');
     return;
   }
-  // After a correct regen against the merged backend, the committed generated
-  // files should be byte-identical → empty diff. A NON-empty diff means the
-  // merge shipped stale/dropped generated output for at least one workspace.
-  const diff = gitTry(staging, 'diff', '--stat', '--', ...GENERATED).out.trim();
-  if (diff) {
+  // --- C3 parity, over the WHOLE merged tree. After a correct regen every
+  // generated file should be byte-identical → empty diff. A NON-empty diff means
+  // the merge shipped stale, dropped, or side-taken generated output — and
+  // because the diff is unscoped, that holds for outputs nobody declared.
+  const dirty = regenDirtied(staging);
+  if (dirty.length) {
+    const annotated = dirty.map((p) => `  ${p}${GENERATED.includes(p) ? '' : '   [NOT in MERGE_GENERATED — the config is stale too]'}`).join('\n');
     record('C3', 'regen-parity', 'FAIL',
-      `committed generated files do NOT match a fresh regen of the merged backend (a regen was dropped for at least one workspace — for ziee, typically desktop/ui):\n${diff}`);
+      'the merged tree does NOT match a fresh regen of the merged backend — a regen was dropped, or a generated file was resolved by taking a side instead of regenerating '
+      + `(a generated file is a function of its inputs; merging two outputs yields a file that corresponds to no input). ${dirty.length} path(s):\n${annotated}`);
   } else {
-    record('C3', 'regen-parity', 'PASS', `all ${GENERATED.length} generated openapi+types file(s) match the merged backend`);
+    record('C3', 'regen-parity', 'PASS',
+      `the whole merged tree matches a fresh regen (${REGEN_CMD}); parity is derived from git, not from MERGE_GENERATED`);
+  }
+
+  // --- C6 generated-coverage: keep MERGE_GENERATED honest. The regen's writes
+  // are derived by stat-stamp diff, so an output the config does not name is a
+  // LOUD failure the next time anyone runs the gate — instead of a guarantee
+  // that silently never applied to it.
+  const afterStamps = stampTracked(staging);
+  const written = [...afterStamps.keys()]
+    .filter((p) => beforeStamps.get(p) !== afterStamps.get(p))
+    .filter((p) => !REGEN_IGNORE.some((ig) => p === ig || p.startsWith(ig.endsWith('/') ? ig : `${ig}/`)));
+  const createdNew = dirty.filter((p) => !beforeStamps.has(p));
+  const writtenAll = [...new Set([...written, ...createdNew])].sort();
+  if (writtenAll.length === 0) {
+    record('C6', 'generated-coverage', 'SKIP',
+      `${REGEN_CMD} rewrote no tracked file (write-on-change codegen, or it writes only outside the tracked tree) — the generated set cannot be derived, so MERGE_GENERATED cannot be audited. C3 parity above is unaffected (it is derived from git).`);
+    return;
+  }
+  const undeclared = writtenAll.filter((p) => !GENERATED.includes(p));
+  const stale = GENERATED.filter((p) => !writtenAll.includes(p));
+  if (undeclared.length) {
+    record('C6', 'generated-coverage', 'FAIL',
+      `${REGEN_CMD} writes ${writtenAll.length} generated file(s); ${undeclared.length} of them are NOT named by MERGE_GENERATED in .claude/app.config:\n`
+      + undeclared.map((p) => `  ${p}`).join('\n')
+      + `\nAdd them (the list is documentation + this audit; C3 parity does not depend on it).${stale.length ? `\nAlso stale (declared but never written): ${stale.join(', ')}` : ''}`);
+  } else {
+    record('C6', 'generated-coverage', 'PASS',
+      `all ${writtenAll.length} file(s) the regen writes are named by MERGE_GENERATED${stale.length ? ` (note: declared-but-never-written: ${stale.join(', ')})` : ''}`);
   }
 }
 

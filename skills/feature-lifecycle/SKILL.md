@@ -52,7 +52,7 @@ mkdir -p /data/pbya/ziee/tmp/<slug>-wt/.lifecycle/<feature>
 > HEAVY.
 >
 > LIGHT requires the core artifacts and **ONE audit round**. HEAVY is the full
-> flow. **Every deterministic hardening check (A1–A10, R2-5, FB-7, the invariant ↔
+> flow. **Every deterministic hardening check (A1–A11, R2-5, FB-7, the invariant ↔
 > acceptance-test binding) runs identically in BOTH tiers** — they are nearly free
 > and they are what catch the silent failures, so there is nothing to save by
 > tiering them.
@@ -992,6 +992,23 @@ so budget for them — they are not optional polish:
   its `asserts:` prose): it must also assert the subject page/resource LOADS for
   that restricted user, or "absent" is indistinguishable from "never rendered"
   and the spec passes with the gate deleted.
+- **A11** a `TEST-N: PASS` line must be EARNED BY THIS BRANCH: the ID has to
+  appear in an **added line of `git diff <base>...HEAD`** (`.lifecycle/` is
+  excluded from that diff, so citing it in the artifacts does not count — the
+  citation must be in the test). `TEST-N` is a **per-feature namespace** that
+  every lifecycle restarts from 1, so a bare grep binds an ID to a STRANGER's
+  test in another feature's directory; one repo carried ~1,900 such citations.
+  On a real branch ten IDs inherited a PASS that way and one of them was an
+  `[acceptance]` test — a design invariant recorded as proven by a test that
+  asserted nothing about the feature, with the gate reporting 9/9. Two
+  resolutions and no third: **earn it** (bind the ID to a test this branch added
+  — write it, or add the citation to the test that really asserts the claim —
+  and run it), or **admit it** (`NOT VERIFIED`, with the reason). `NOT VERIFIED`
+  is deliberately NOT a pass: phase 8's all-PASS loop still fails, because a
+  gate that let "nobody ran this" reach 9/9 is the same false certification in a
+  politer font. It polices PASS only — FAIL/SKIP already fail on their own. It
+  cannot catch an ID cited on an added line of a test that asserts the wrong
+  thing; what it removes is the SILENT case.
 - **R2-5** every `/api/` e2e route-mock the diff adds must match a live route in
   `openapi.json` — a renamed route makes the mock a silent no-op that
   false-greens the spec.

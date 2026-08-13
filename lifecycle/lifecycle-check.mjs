@@ -766,6 +766,116 @@ function checkA5() {
 }
 
 // ---------------------------------------------------------------------------
+// A11 — a PASS must be EARNED BY THIS BRANCH.
+// ---------------------------------------------------------------------------
+// The gap this closes, found the expensive way. Phase 8 verified that a result
+// LINE exists for every enumerated TEST-ID and that it reads PASS. It never
+// verified that the ID names a test THIS BRANCH ADDED. And `TEST-N` is a
+// PER-FEATURE namespace that every lifecycle restarts from 1 — one repo carried
+// ~1,900 `TEST-N` citations across other features' directories — so a bare grep
+// binds `TEST-22` to a stranger's spec in an unrelated suite. On a real branch
+// TEN IDs carried a PASS line that way, and one of them was an `[acceptance]`
+// test: a design invariant recorded as PROVEN, by a test that belonged to
+// another feature and asserted nothing about this one.
+//
+// That is worse than a missing test. A missing test is visible; an inherited
+// PASS reads as done, and the gate that exists to prevent exactly this signed
+// it off 9/9.
+//
+// THE RULE. A `TEST-N: PASS` line must be BOUND TO SOMETHING THIS BRANCH WROTE.
+// Two ways to satisfy it, because real branches legitimately do both:
+//
+//   · the ID appears in an ADDED line of `git diff <base>...HEAD` — the branch
+//     wrote the citation, in the test it names; or
+//   · the TESTS.md entry's declared `file:` is itself ADDED or MODIFIED by this
+//     branch — the test lives in a file this branch actually worked on, even if
+//     the author did not write the ID into a comment.
+//
+// `.lifecycle/` is excluded from the diff, so citing the ID in the lifecycle
+// artifacts — where every ID appears by construction — cannot satisfy either arm.
+//
+// Both arms fail for the case that motivated this check: an ID whose declared
+// file the branch never opened, resolving by bare grep to a stranger's test in
+// another feature's directory.
+//
+// TWO legitimate resolutions, and no third:
+//   1. EARN it — bind the ID to a test this branch added (write the test, or add
+//      the citation to the test that really asserts the claim) and run it.
+//   2. ADMIT it — change the line to `NOT VERIFIED` with the reason. That is an
+//      honest gap, and it is DELIBERATELY still not a pass: the all-PASS loop
+//      below will keep phase 8 red. A gate that let "nobody ran this" reach 9/9
+//      would be the same false certification in a politer font.
+//
+// It polices PASS only. A FAIL or SKIP line already fails phase 8 on its own and
+// is not a false claim of proof.
+//
+// Scope note: this cannot catch an ID cited on an added line of a test that
+// asserts the wrong thing. Nothing mechanical can. What it removes is the
+// SILENT case — inheriting a stranger's result without touching a test at all.
+function checkA11(results) {
+  const tests = parseTests();
+  if (!tests || tests.length === 0) return [];
+  if (!results || results.size === 0) return [];
+  let added;
+  try { added = diffAddedLines(); } catch { return []; }
+  // No measurable diff (a fresh branch, a shallow clone) ⇒ say nothing rather
+  // than fail every ID for an environment fact.
+  if (!added || added.length === 0) return [];
+  const cited = new Set();
+  for (const { text } of added) {
+    for (const m of text.matchAll(/\b(TEST-[A-Za-z0-9._-]+)\b/g)) cited.add(m[1]);
+  }
+  // The second arm: files this branch added or modified (repo-relative).
+  let touched = [];
+  try { touched = changedFilePaths(); } catch { touched = []; }
+  const touchedSet = new Set(touched);
+  // The declared path is re-extracted here rather than taken from `parseTests()`:
+  // the shared `RE_TEST_FILE` is non-greedy up to a `-`, so it truncates any path
+  // containing a hyphen (`src-app/...` → `src`). That is harmless for the
+  // presence check phase 3 uses it for, and fatal for a path COMPARISON. The
+  // backtick-quoted form is what the artifact grammar specifies, so it is read
+  // exactly.
+  const declaredPath = new Map();
+  for (const ln of (read('TESTS.md') || '').split(/\r?\n/)) {
+    const m = /\*\*(TEST-[A-Za-z0-9._-]+)\*\*[\s\S]*?\bfile\s*:\s*`([^`]+)`/.exec(ln);
+    if (m) declaredPath.set(m[1], m[2].trim());
+  }
+  const wroteDeclaredFile = (t) => {
+    const f = (declaredPath.get(t.id) || '').trim().replace(/^\.\//, '');
+    if (!f) return false;
+    if (touchedSet.has(f)) return true;
+    // TESTS.md paths are sometimes written relative to a sub-tree (`ui/src/...`
+    // for `src-app/ui/src/...`). A SUFFIX match keeps those honest without
+    // demanding a spelling the artifact grammar never required — and a suffix
+    // still names a real file this branch touched.
+    return touched.some((p) => p === f || p.endsWith(`/${f}`) || f.endsWith(`/${p}`));
+  };
+  const unearned = tests
+    .filter((t) => results.get(t.id) === 'PASS' && !cited.has(t.id) && !wroteDeclaredFile(t))
+    .map((t) => ({ id: t.id, acceptance: !!t.acceptance, invariants: t.invariants ?? [] }));
+  if (unearned.length === 0) return [];
+  const g = [];
+  // Acceptance tests are named separately and FIRST: an unearned acceptance PASS
+  // is a design invariant recorded as proven by nothing, which is the failure
+  // this check was built for.
+  for (const u of unearned.filter((u) => u.acceptance)) {
+    g.push(
+      `A11: acceptance test ${u.id} (design invariant ${u.invariants.join(', ') || '?'}) is recorded PASS but is cited in NO line this branch added — ` +
+      `\`TEST-N\` is a per-feature namespace, so a bare grep binds it to another feature's test. A design invariant is recorded as proven by a test that is not this feature's. ` +
+      `Bind it to a test this branch added — write it, or point the entry at the file that really asserts the claim — and run it; or change the line to "NOT VERIFIED" with the reason.`,
+    );
+  }
+  const rest = unearned.filter((u) => !u.acceptance).map((u) => u.id);
+  if (rest.length) {
+    g.push(
+      `A11: ${rest.length} TEST-ID(s) are recorded PASS but are cited in NO line this branch added (${rest.slice(0, 12).join(', ')}${rest.length > 12 ? ', …' : ''}) — ` +
+      `neither the ID nor its declared \`file:\` was touched by this branch — an inherited PASS from another feature's use of the same \`TEST-N\` namespace. For each: bind it to a test this branch added and RUN that test, or change the line to "NOT VERIFIED" with the reason. Do not leave a PASS nobody earned.`,
+    );
+  }
+  return g;
+}
+
+// ---------------------------------------------------------------------------
 // A7 — boot/runtime canary, BASELINE-CONTROLLED.
 // ---------------------------------------------------------------------------
 // A UI diff must record that the runtime-health/gate:ui pass ran: a non-booting
@@ -1479,6 +1589,7 @@ function phase8() {
     if (m) results.set(m[1], m[2].toUpperCase());
   }
   for (const x of checkA10Passing(results)) g.push(x); // A10: restricted-user e2e must PASS
+  for (const x of checkA11(results)) g.push(x); // A11: a PASS must be earned by THIS branch
   // Every [acceptance] test (a design-invariant proof) must PASS — not merely be
   // enumerated. Named explicitly so a dropped/soft invariant proof is unmissable
   // (redundant with the all-tests-PASS loop, but with a design-fidelity message).

@@ -43,6 +43,19 @@ export function FooPage() {
   );
 }
 EOF
+# The TEST the plan enumerates, CITING its id. A11 requires a `TEST-N: PASS` to be
+# earned by an added line of this branch's diff — so a fixture that records PASS
+# must actually carry the test, exactly as a real branch must.
+cat > "$FE/src-app/ui/src/modules/foo/FooPage.test.tsx" <<'EOF'
+// TEST-1 (ITEM-1, INV-1) — exactly one Save affordance.
+import { render, screen } from '@testing-library/react';
+import { expect, test } from 'vitest';
+import { FooPage } from './FooPage';
+test('exactly one Save affordance', () => {
+  render(<FooPage />);
+  expect(screen.getAllByRole('button', { name: 'Save' })).toHaveLength(1);
+});
+EOF
 # a GENERATED artifact also changes — must NOT count as a real UI touch
 echo '{"openapi":"3.0.0"}' > "$FE/src-app/ui/openapi/openapi.json"
 
@@ -79,6 +92,16 @@ cat > "$FD/TESTS.md" <<'EOF'
 # TESTS — foo
 - **TEST-1** (tier: unit) [acceptance] [invariant: INV-1] [covers: ITEM-1] file: `src-app/ui/src/modules/foo/FooPage.test.tsx` — asserts: FooPage renders exactly one Save button.
 - **TEST-2** (tier: e2e) [covers: ITEM-1] file: `src-app/ui/tests/e2e/foo/foo.spec.ts` — asserts: user opens Foo page and clicks Save.
+EOF
+mkdir -p "$FE/src-app/ui/tests/e2e/foo"
+cat > "$FE/src-app/ui/tests/e2e/foo/foo.spec.ts" <<'EOF'
+// TEST-2 (ITEM-1) — the user journey: open Foo, press Save.
+import { expect, test } from '@playwright/test';
+test('opens Foo and saves', async ({ page }) => {
+  await page.goto('/foo');
+  await page.getByRole('button', { name: 'Save' }).click();
+  await expect(page.getByText('Saved')).toBeVisible();
+});
 EOF
 git -C "$FE" add -A && git -C "$FE" commit -qm tests-e2e
 assert_exit 0 "FE phase 3: UI plan WITH an e2e-tier test passes" -- --phase 3 --repo "$FE" --dir "$FD" --base main
@@ -126,6 +149,15 @@ cat > "$BE/src-app/server/src/modules/bar/repository.rs" <<'EOF'
 pub fn list_bar() -> Vec<String> {
     vec!["a".into(), "b".into()]
 }
+
+#[cfg(test)]
+mod tests {
+    // TEST-1 (ITEM-1, INV-1) — the listing is never silently truncated.
+    #[test]
+    fn list_bar_returns_every_row() {
+        assert_eq!(super::list_bar().len(), 2);
+    }
+}
 EOF
 # regenerated client types — generated, must be excluded from touch detection
 echo 'export type Bar = { id: string };' > "$BE/src-app/ui/src/api-client/types.ts"
@@ -160,6 +192,81 @@ assert_exit 0 "BE phase 3: backend-only + regen-client plan needs NO e2e" -- --p
 assert_exit 0 "BE phase 8: backend-only results need NO npm-run-check line" -- --phase 8 --repo "$BE" --dir "$BD" --base main
 assert_exit 0 "BE --all: backend-only lifecycle is green" -- --all --repo "$BE" --dir "$BD" --base main
 
-rm -rf "$FE" "$BE"
+# ---------------------------------------------------------------------------
+# FIXTURE 3 — A11: an UNEARNED PASS.
+# `TEST-N` is a per-feature namespace, so an ID can be cited only in ANOTHER
+# feature's test and still be grepped up. This fixture records PASS for an
+# acceptance test whose id appears in NO line the branch added — the exact shape
+# that shipped a design invariant as "proven" on a real branch.
+# ---------------------------------------------------------------------------
+UE="$(new_repo)"
+git -C "$UE" checkout -q -b feat/baz
+mkdir -p "$UE/src-app/server/src/modules/baz" "$UE/.lifecycle/baz"
+# The branch adds real code — but nothing cites TEST-1, and the file TESTS.md
+# points at is a PRE-EXISTING one in another module that this branch never opens.
+# A stranger's file already on main carries the id, which is precisely what a bare
+# grep would find.
+mkdir -p "$UE/src-app/server/src/modules/other"
+cat > "$UE/src-app/server/src/modules/other/legacy_test.rs" <<'EOF'
+// TEST-1 — another feature's test, on main long before this branch existed.
+#[test]
+fn unrelated() { assert!(true); }
+EOF
+git -C "$UE" add -A && git -C "$UE" commit -qm pre-existing-stranger
+git -C "$UE" checkout -q main && git -C "$UE" merge -q --ff-only feat/baz && git -C "$UE" checkout -q feat/baz
+cat > "$UE/src-app/server/src/modules/baz/repository.rs" <<'EOF'
+pub fn list_baz() -> Vec<String> {
+    vec!["a".into()]
+}
+EOF
+BZ="$UE/.lifecycle/baz"
+cat > "$BZ/PLAN.md" <<'EOF'
+# PLAN — baz
+## Design source
+- `docs/design/baz.md` §1 "Baz listing" — this plan realizes the read path.
+## Invariants
+- **INV-1**: `list_baz` returns every baz row — the listing is never silently truncated.
+## Items
+- **ITEM-1**: Add list_baz to the baz repository.
+## Files to touch
+- `src-app/server/src/modules/baz/repository.rs` — new fn (ITEM-1).
+## Patterns to follow
+- Mirror an existing server repository module.
+EOF
+write_common "$BZ" "src-app/server/src/modules/baz/repository.rs" 3
+cat > "$BZ/TESTS.md" <<'EOF'
+# TESTS — baz
+- **TEST-1** (tier: unit) [acceptance] [invariant: INV-1] [covers: ITEM-1] file: `src-app/server/src/modules/other/legacy_test.rs` — asserts: list_baz returns every row.
+EOF
+cat > "$BZ/TEST_RESULTS.md" <<'EOF'
+# TEST_RESULTS — baz
+- **TEST-1**: PASS
+EOF
+git -C "$UE" add -A && git -C "$UE" commit -qm feat-baz
+assert_exit 1 "A11: an acceptance PASS cited in NO added line is REFUSED" -- --phase 8 --repo "$UE" --dir "$BZ" --base main
+# …and the message NAMES the check, so the author meets the argument rather than a bare exit code.
+if grep -q "A11" "$LC_SELFTEST_OUT"; then
+  PASS=$((PASS+1)); printf '  \033[32mok  \033[0m %s\n' "A11: the refusal names the check"
+else
+  FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "A11: the refusal names the check"
+  sed 's/^/        | /' "$LC_SELFTEST_OUT"
+fi
+
+# …and it becomes green the moment the branch actually carries the test.
+cat >> "$UE/src-app/server/src/modules/baz/repository.rs" <<'EOF'
+
+#[cfg(test)]
+mod tests {
+    // TEST-1 (ITEM-1, INV-1) — the listing is never silently truncated.
+    #[test]
+    fn list_baz_returns_every_row() {
+        assert_eq!(super::list_baz().len(), 1);
+    }
+}
+EOF
+git -C "$UE" add -A && git -C "$UE" commit -qm earn-test-1
+assert_exit 0 "A11: the SAME PASS is accepted once the branch cites it in a test" -- --phase 8 --repo "$UE" --dir "$BZ" --base main
+
+rm -rf "$FE" "$BE" "$UE"
 echo "== $PASS passed, $FAIL failed =="
 [ "$FAIL" -eq 0 ]

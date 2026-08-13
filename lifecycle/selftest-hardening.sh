@@ -150,6 +150,59 @@ export function FooPage() {
   return <div><h1>Foo</h1><button>Save</button></div>;
 }
 EOF
+# The tests the plan enumerates (A11: a recorded PASS must be bound to something
+# this branch wrote — the id cited in an added line, or the declared `file:` touched).
+mkdir -p "$R/src-app/ui/tests/e2e/foo"
+cat > "$R/src-app/ui/src/modules/foo/FooPage.test.tsx" <<'EOF'
+// TEST-1 (ITEM-1, INV-1) — exactly one Save affordance.
+import { render, screen } from '@testing-library/react';
+import { expect, test } from 'vitest';
+import { FooPage } from './FooPage';
+test('exactly one Save affordance', () => {
+  render(<FooPage />);
+  expect(screen.getAllByRole('button', { name: 'Save' })).toHaveLength(1);
+});
+EOF
+cat > "$R/src-app/ui/tests/e2e/foo/foo.spec.ts" <<'EOF'
+// TEST-2 (ITEM-1) — the user journey: open Foo, press Save.
+import { expect, test } from '@playwright/test';
+test('opens Foo and saves', async ({ page }) => {
+  await page.goto('/foo');
+  await page.getByRole('button', { name: 'Save' }).click();
+  await expect(page.getByText('Saved')).toBeVisible();
+});
+EOF
+  # The TESTS the plan enumerates. A11 requires a `TEST-N: PASS` to be bound to
+  # something this branch wrote — the id cited in an added line, or the declared
+  # `file:` itself touched — so a fixture that records PASS has to carry the
+  # tests, exactly as a real branch does.
+  mkdir -p "$R/src-app/server/tests/foo" "$R/src-app/ui/tests/e2e/foo"
+  cat > "$R/src-app/server/tests/foo/foo.rs" <<'EOF'
+// TEST-2 (ITEM-1, INV-1) — a caller lacking foo::use is refused.
+#[test]
+fn lacking_foo_use_is_forbidden() {
+    assert_eq!(deny_status(), 403);
+}
+EOF
+  cat > "$R/src-app/ui/tests/e2e/foo/foo.spec.ts" <<'EOF'
+// TEST-3 (ITEM-2) — a permitted user opens Foo and saves.
+import { expect, test } from '@playwright/test';
+test('permitted user saves', async ({ page }) => {
+  await page.goto('/foo');
+  await page.getByRole('button', { name: 'Save' }).click();
+  await expect(page.getByText('Saved')).toBeVisible();
+});
+EOF
+  # The RESTRICTED-USER spec several scenarios below enumerate as TEST-4.
+  cat > "$R/src-app/ui/tests/e2e/foo/perm-gating.spec.ts" <<'EOF'
+// TEST-4 (ITEM-2) — the restricted user reaches the app and sees no Foo UI.
+import { expect, test } from '@playwright/test';
+test('restricted user: dashboard loads, Foo is absent', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.getByTestId('dashboard')).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Foo' })).toHaveCount(0);
+});
+EOF
   local D="$R/.lifecycle/foo"
   cat > "$D/PLAN.md" <<'EOF'
 # PLAN — foo
@@ -513,13 +566,19 @@ R="$(build_be)"; D="$R/.lifecycle/bar"
 printf '\nconst PERMISSION: &str = "bar::use";\n' >> "$R/src-app/server/src/modules/bar/repository.rs"
 git -C "$R" commit -qam add-perm
 lc 1 "A9: new permission without a deny/403 test is REFUSED" --phase 8 --repo "$R" --dir "$D" --base main
+mkdir -p "$R/src-app/server/tests/bar"
+cat > "$R/src-app/server/tests/bar/bar.rs" <<'EOF'
+// TEST-2 (ITEM-1) — a caller lacking bar::use is refused.
+#[test]
+fn lacking_bar_use_is_forbidden() { assert_eq!(deny_status(), 403); }
+EOF
 cat >> "$D/TESTS.md" <<'EOF'
 - **TEST-2** (tier: integration) [covers: ITEM-1] file: `src-app/server/tests/bar/bar.rs` — asserts: a user lacking bar::use gets 403 forbidden.
 EOF
 cat >> "$D/TEST_RESULTS.md" <<'EOF'
 - **TEST-2**: PASS
 EOF
-git -C "$R" commit -qam add-deny-test
+git -C "$R" add -A && git -C "$R" commit -qm add-deny-test
 lc 0 "A9: new permission WITH a 403 deny test passes" --phase 8 --repo "$R" --dir "$D" --base main
 
 # --- A10: a new user-facing permission (::use/::read/::manage) needs a
@@ -578,6 +637,22 @@ cat > "$R/src-app/server/migrations/00000000000011_grant_foo.sql" <<'EOF'
 -- grant foo::use to the default Users group (mirrors migration 98)
 UPDATE groups SET permissions = array_append(permissions, 'foo::use') WHERE name = 'Users';
 EOF
+# The tests the plan enumerates (A11).
+mkdir -p "$R/src-app/server/tests/foo" "$R/src-app/ui/tests/e2e/foo"
+cat > "$R/src-app/server/tests/foo/foo.rs" <<'EOF'
+// TEST-1 (ITEM-1, INV-1) — the Users group gains foo::use after migration.
+#[test]
+fn users_group_gains_foo_use() { assert!(users_perms().contains(&"foo::use")); }
+EOF
+cat > "$R/src-app/ui/tests/e2e/foo/perm-gating.spec.ts" <<'EOF'
+// TEST-2 (ITEM-1) — the restricted user reaches the app and sees no Foo UI.
+import { expect, test } from '@playwright/test';
+test('restricted user: dashboard loads, Foo is absent', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.getByTestId('dashboard')).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Foo' })).toHaveCount(0);
+});
+EOF
 D="$R/.lifecycle/foo"
 cat > "$D/PLAN.md" <<'EOF'
 # PLAN — foo
@@ -609,6 +684,8 @@ cat >> "$D/TESTS.md" <<'EOF'
 EOF
 cat >> "$D/TEST_RESULTS.md" <<'EOF'
 - **TEST-2**: PASS
+npm run check (ui): PASS
+gate:ui (ui): PASS
 EOF
 git -C "$R" commit -qam add-negperm-mig
 lc 0 "A10: the migration grant WITH a restricted-user e2e passes (phase 8)" --phase 8 --repo "$R" --dir "$D" --base main
@@ -621,6 +698,28 @@ cat > "$R/src-app/ui/src/modules/foo/FooPage.tsx" <<'EOF'
 export function FooPage() {
   return <div><h1>Foo</h1><button>Save</button></div>;
 }
+EOF
+# The tests the plan enumerates (A11: a recorded PASS must be bound to something
+# this branch wrote — the id cited in an added line, or the declared `file:` touched).
+mkdir -p "$R/src-app/ui/tests/e2e/foo"
+cat > "$R/src-app/ui/src/modules/foo/FooPage.test.tsx" <<'EOF'
+// TEST-1 (ITEM-1, INV-1) — exactly one Save affordance.
+import { render, screen } from '@testing-library/react';
+import { expect, test } from 'vitest';
+import { FooPage } from './FooPage';
+test('exactly one Save affordance', () => {
+  render(<FooPage />);
+  expect(screen.getAllByRole('button', { name: 'Save' })).toHaveLength(1);
+});
+EOF
+cat > "$R/src-app/ui/tests/e2e/foo/foo.spec.ts" <<'EOF'
+// TEST-2 (ITEM-1) — the user journey: open Foo, press Save.
+import { expect, test } from '@playwright/test';
+test('opens Foo and saves', async ({ page }) => {
+  await page.goto('/foo');
+  await page.getByRole('button', { name: 'Save' }).click();
+  await expect(page.getByText('Saved')).toBeVisible();
+});
 EOF
 D="$R/.lifecycle/foo"
 cat > "$D/PLAN.md" <<'EOF'
@@ -1102,11 +1201,32 @@ lc 0 "lifecycle-check: webapp-layout mock of a LIVE /api route passes (app.confi
 # per-workspace `npm run check` line.
 R="$(new_repo)"; CLEANUP+=("$R")
 git -C "$R" checkout -q -b feat/webfe
-mkdir -p "$R/webapp/src"
+mkdir -p "$R/webapp/src" "$R/webapp/tests/e2e/foo"
 cat > "$R/webapp/src/FooPage.tsx" <<'EOF'
 export function FooPage() {
   return (<div><h1>Foo</h1><button>Save</button></div>);
 }
+EOF
+# The tests the plan enumerates (A11: a recorded PASS must be bound to something
+# this branch wrote).
+cat > "$R/webapp/src/FooPage.test.tsx" <<'EOF'
+// TEST-1 (ITEM-1) — the surface renders its Save affordance.
+import { render, screen } from '@testing-library/react';
+import { expect, test } from 'vitest';
+import { FooPage } from './FooPage';
+test('renders Save', () => {
+  render(<FooPage />);
+  expect(screen.getByRole('button', { name: 'Save' })).toBeTruthy();
+});
+EOF
+cat > "$R/webapp/tests/e2e/foo/foo.spec.ts" <<'EOF'
+// TEST-2 (ITEM-1, INV-1) — the journey runs against a route the app serves.
+import { expect, test } from '@playwright/test';
+test('clicks Save against a served route', async ({ page }) => {
+  await page.goto('/foo');
+  await page.getByRole('button', { name: 'Save' }).click();
+  await expect(page.getByText('Saved')).toBeVisible();
+});
 EOF
 D="$(build_webapp_feat "$R" "webapp/src/FooPage.tsx")"
 cat > "$D/TESTS.md" <<'EOF'
@@ -1219,6 +1339,28 @@ build_ui() {
 export function FooPage() {
   return <div><h1>Foo</h1><button>Save</button></div>;
 }
+EOF
+# The tests the plan enumerates (A11: a recorded PASS must be bound to something
+# this branch wrote — the id cited in an added line, or the declared `file:` touched).
+mkdir -p "$R/src-app/ui/tests/e2e/foo"
+cat > "$R/src-app/ui/src/modules/foo/FooPage.test.tsx" <<'EOF'
+// TEST-1 (ITEM-1, INV-1) — exactly one Save affordance.
+import { render, screen } from '@testing-library/react';
+import { expect, test } from 'vitest';
+import { FooPage } from './FooPage';
+test('exactly one Save affordance', () => {
+  render(<FooPage />);
+  expect(screen.getAllByRole('button', { name: 'Save' })).toHaveLength(1);
+});
+EOF
+cat > "$R/src-app/ui/tests/e2e/foo/foo.spec.ts" <<'EOF'
+// TEST-2 (ITEM-1) — the user journey: open Foo, press Save.
+import { expect, test } from '@playwright/test';
+test('opens Foo and saves', async ({ page }) => {
+  await page.goto('/foo');
+  await page.getByRole('button', { name: 'Save' }).click();
+  await expect(page.getByText('Saved')).toBeVisible();
+});
 EOF
   local D="$R/.lifecycle/foo"
   cat > "$D/PLAN.md" <<'EOF'

@@ -53,9 +53,27 @@ MERGE_CARGO_DIR=src-app
 # (optional) a second cargo package checked only when the desktop prefix is touched.
 MERGE_CARGO_DESKTOP_PACKAGE=ziee-desktop
 MERGE_DESKTOP_TOUCH_PREFIX=src-app/desktop/tauri/
-# Codegen regen command + its output files → C3 regen-parity (empty-diff check).
+# Codegen regen command → C3 regen-parity + C6 generated-coverage.
+# C3 runs MERGE_REGEN_CMD in the merged staging tree and then asks GIT what
+# changed — over the WHOLE tree, NOT scoped to MERGE_GENERATED. That is
+# deliberate: scoping the parity diff to a hand-maintained list has exactly the
+# failure mode the gate exists to prevent (cytoanalyst's regen writes five files
+# against a two-entry list, so three generated files could be merged
+# side-taken/stale and still pass). With an unscoped diff the guarantee — a
+# generated file is a function of its inputs, so REGENERATE, never take a side —
+# holds for every output, declared or not.
 MERGE_REGEN_CMD=just openapi-regen
+# The EXPECTED generated set. Now documentation + the C6 audit target, not the
+# scope of C3: C6 derives what the regen actually WROTE (stat-stamp diff across
+# the run) and FAILS when it writes a path this list does not name — so the next
+# added output is loud, not silent. C6 SKIPs (explicitly, never PASSes) when the
+# regen rewrites nothing, i.e. when the set cannot be derived.
 MERGE_GENERATED=src-app/ui/openapi/openapi.json src-app/ui/src/api-client/types.ts src-app/desktop/ui/openapi/openapi.json src-app/desktop/ui/src/api-client/types.ts
+# (optional) paths/dirs the regen may dirty WITHOUT failing C3 parity — e.g. a
+# lockfile a build legitimately refreshes. Space-separated, repo-relative; a dir
+# entry covers everything under it. Empty by default: anything the regen touches
+# is treated as generated output the gate is responsible for.
+#MERGE_REGEN_IGNORE=Cargo.lock
 # STAGING PROVISIONING. `git worktree add` materializes the TRACKED tree ONLY, so
 # the staging tree the heavy gates build from is missing two things the real
 # working tree has — and C1/C3 then fail SPURIOUSLY (a provisioning gap, NOT a

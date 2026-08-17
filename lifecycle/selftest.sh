@@ -267,6 +267,52 @@ EOF
 git -C "$UE" add -A && git -C "$UE" commit -qm earn-test-1
 assert_exit 0 "A11: the SAME PASS is accepted once the branch cites it in a test" -- --phase 8 --repo "$UE" --dir "$BZ" --base main
 
-rm -rf "$FE" "$BE" "$UE"
+# ---------------------------------------------------------------------------
+# phase 5 convergence — EVERY drift file must report 0, including SCOPED ones.
+#
+# The bug this pins: `glob` matched only `^DRIFT-(\d+)\.md$`, so a per-owner file
+# (`DRIFT-stage2-1.md`, the naming a feature split across concurrent owners needs) was
+# invisible; and `phase5` read its count from the HIGHEST-numbered match alone, so even
+# once visible, one converged file decided the verdict for all of them. Observed in the
+# field: a `DRIFT-stage2-1.md` declaring `Unresolved drifts: 1` with `--phase 5` exiting 0.
+#
+# Reserved number ranges per owner would NOT have fixed it — a high-numbered converged file
+# masks a low-numbered unresolved one, which is the same bug in a different convention. So
+# the assertions below cover both halves: the scoped file is SEEN, and a converged sibling
+# does not discharge it.
+DE="$(new_repo)"
+git -C "$DE" checkout -q -b feat/drift
+mkdir -p "$DE/.lifecycle/drift" "$DE/src-app/server/src"
+echo "pub fn a() {}" > "$DE/src-app/server/src/a.rs"
+write_common "$DE/.lifecycle/drift" src-app/server/src/a.rs 1
+git -C "$DE" add -A && git -C "$DE" commit -qm drift-base
+
+drift_file() { printf '# DRIFT\n\n- **DRIFT-%s** — verdict: resolved — x\n\n**Unresolved drifts:** %s\n' "$2" "$3" > "$DE/.lifecycle/drift/$1"; }
+
+# CONTROL — one unscoped, converged file passes. Without this, every FAIL below could be
+# a fixture that never satisfies phase 5 for some unrelated reason.
+drift_file DRIFT-1.md 1.1 0
+assert_exit 0 "phase5: a single converged DRIFT-1.md passes" -- --phase 5 --repo "$DE" --dir "$DE/.lifecycle/drift"
+
+# THE REGRESSION — a SCOPED file with unresolved drift must be seen and must FAIL.
+drift_file DRIFT-stage2-1.md S2-1.1 1
+assert_exit 1 "phase5: a SCOPED drift file with 1 unresolved FAILS (was invisible)" -- --phase 5 --repo "$DE" --dir "$DE/.lifecycle/drift"
+
+# …and a CONVERGED higher-numbered sibling must NOT discharge it. This is the half the
+# regex alone does not fix: both files now match, and the old code read only the last.
+drift_file DRIFT-stage3-9.md S3-9.1 0
+assert_exit 1 "phase5: a converged higher-numbered sibling does NOT mask an unresolved one" -- --phase 5 --repo "$DE" --dir "$DE/.lifecycle/drift"
+
+# All scoped files converged ⇒ green. Proves the FAILs above are about the COUNT and not
+# merely about a scoped filename being present.
+drift_file DRIFT-stage2-1.md S2-1.1 0
+assert_exit 0 "phase5: all drift files converged (scoped included) passes" -- --phase 5 --repo "$DE" --dir "$DE/.lifecycle/drift"
+
+# An EARLIER unscoped round left unresolved is still unresolved — the single-owner case the
+# old "read the last file" logic also got wrong.
+drift_file DRIFT-1.md 1.1 2
+assert_exit 1 "phase5: an earlier unconverged round is not discharged by a later one" -- --phase 5 --repo "$DE" --dir "$DE/.lifecycle/drift"
+
+rm -rf "$FE" "$BE" "$UE" "$DE"
 echo "== $PASS passed, $FAIL failed =="
 [ "$FAIL" -eq 0 ]

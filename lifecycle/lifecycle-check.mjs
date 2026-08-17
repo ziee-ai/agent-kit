@@ -166,14 +166,37 @@ function hasSection(text, ...titles) {
   return false;
 }
 function glob(prefix) {
-  // returns DRIFT-1.md style files sorted by their numeric index ascending
+  // Returns `DRIFT-1.md` / `DRIFT-stage2-1.md` style files, sorted by numeric index
+  // ascending, with the optional `<scope>-` segment captured.
+  //
+  // WHY THE SCOPE SEGMENT EXISTS. When a feature is split across concurrent owners they
+  // need per-owner artifact files or they collide on numbering. The naming that gives them
+  // that (`DRIFT-stage2-1.md`) did not match the old `^PREFIX-(\d+)\.md$` pattern **at
+  // all**, so those files were invisible here — and because `phase5` read its convergence
+  // count from the HIGHEST-numbered match, an unresolved drift in a scoped file left the
+  // gate reading some other file and reporting OK. Observed: a `DRIFT-stage2-1.md`
+  // declaring `Unresolved drifts: 1` with `--phase 5` exiting 0.
+  //
+  // Widening the regex alone does NOT fix that — it only makes the files visible while the
+  // gate still consults one of them. The fix is in `phase5`, which now requires EVERY
+  // matching file to report 0. Both halves are needed; the regex is the cheaper half.
+  //
+  // Numbering is NOT globally unique once scopes exist: `stage1/DRIFT-5` and
+  // `stage3/DRIFT-5` are different rounds of different owners that legitimately share an
+  // index. Anything reading a SEQUENCE out of these files (phase 7's decay profile) must
+  // therefore group by scope first — see `globScopes`.
   return readdirSync(featureDir)
     .map((f) => {
-      const m = new RegExp(`^${prefix}-(\\d+)\\.md$`).exec(f);
-      return m ? { file: f, n: parseInt(m[1], 10) } : null;
+      const m = new RegExp(`^${prefix}-(?:([a-z0-9]+)-)?(\\d+)\\.md$`).exec(f);
+      return m ? { file: f, scope: m[1] ?? '', n: parseInt(m[2], 10) } : null;
     })
     .filter(Boolean)
-    .sort((a, b) => a.n - b.n);
+    .sort((a, b) => (a.scope === b.scope ? a.n - b.n : a.scope < b.scope ? -1 : 1));
+}
+
+/** The distinct scopes present among `glob(prefix)`'s matches (`''` = unscoped). */
+function globScopes(entries) {
+  return [...new Set(entries.map((e) => e.scope))];
 }
 
 // ---------------------------------------------------------------------------
@@ -1271,11 +1294,26 @@ function phase5() {
         g.push(`${d.file}: drift entry missing verdict (plan-wins|impl-wins|none|resolved): "${ln.trim().slice(0, 80)}"`);
     }
   }
-  const last = drifts[drifts.length - 1];
-  const lt = read(last.file);
-  const m = /unresolved drifts\s*:?\s*\*{0,2}\s*(\d+)/i.exec(lt);
-  if (!m) g.push(`${last.file}: cannot read unresolved-drift count`);
-  else if (parseInt(m[1], 10) !== 0) g.push(`${last.file}: convergence not reached — ${m[1]} unresolved drift(s) in the final round`);
+  // CONVERGENCE — every drift file must report 0, not merely the highest-numbered one.
+  //
+  // This used to read `drifts[drifts.length - 1]` alone. That was already fragile for a
+  // single owner (a resolved later round masked an unresolved earlier one) and became a
+  // silent hole the moment a feature was split across concurrent owners: with
+  // `DRIFT-stage1-5.md` and `DRIFT-stage3-2.md` side by side there is no meaningful
+  // "final round", and whichever sorted last decided the verdict for all of them.
+  // Reserved number ranges per owner do NOT fix it — a high-numbered file from one owner
+  // masks a low-numbered unresolved one from another, which is the same bug wearing a
+  // different convention.
+  //
+  // Checking ALL of them is the actual fix. It is also strictly correct for the
+  // single-owner case: an earlier round left unresolved is unresolved, and the round that
+  // followed it says nothing about that.
+  for (const d of drifts) {
+    const m = /unresolved drifts\s*:?\s*\*{0,2}\s*(\d+)/i.exec(read(d.file) || '');
+    if (!m) g.push(`${d.file}: cannot read unresolved-drift count (needs a "**Unresolved drifts:** <N>" summary line)`);
+    else if (parseInt(m[1], 10) !== 0)
+      g.push(`${d.file}: convergence not reached — ${m[1]} unresolved drift(s). EVERY drift file must report 0; a later or higher-numbered round does not discharge an earlier one, and with concurrent owners there is no "final" round at all.`);
+  }
   return { present: true, gaps: g };
 }
 
@@ -1479,6 +1517,23 @@ function phase7() {
   const notes = [];
   const rounds = glob('FIX_ROUND');
   if (rounds.length === 0) return { present: false, gaps: ['no FIX_ROUND-<n>.md files (fix/re-audit loop not started)'] };
+
+  // The widened glob (see `glob`) also matches scoped files like `FIX_ROUND-stage2-1.md`.
+  // Unlike phase 5's convergence check, everything below reads a SEQUENCE — the decay
+  // profile, the round index, the capture-recapture estimate — and interleaving several
+  // owners' rounds into one profile produces a number that describes nobody's work.
+  // Refuse by name rather than compute a meaningless verdict. (Deliberately NOT silently
+  // fixed by picking one scope: which owner's loop the gate is judging is a decision for
+  // whoever split the feature, not for this function.)
+  const scopes = globScopes(rounds);
+  if (scopes.length > 1) {
+    return {
+      present: true,
+      gaps: [
+        `FIX_ROUND files span ${scopes.length} scopes (${scopes.map((s) => s || '<unscoped>').join(', ')}) — phase 7 reads a decay PROFILE, and interleaving several owners' rounds into one sequence yields an estimate that describes nobody's loop. Run the fix loop per owner and gate each separately, or consolidate to one scope.`,
+      ],
+    };
+  }
 
   const profile = [];
   for (const r of rounds) {

@@ -1279,6 +1279,29 @@ function phase4() {
   return { present: true, gaps: g };
 }
 
+//: The `**Unresolved drifts:** <N>` SUMMARY LINE.
+//:
+//: ANCHORED TO LINE START, and that anchor is load-bearing. This used to be applied to the
+//: whole file text with `.exec`, taking the FIRST match anywhere — so a drift ENTRY that
+//: QUOTED the summary phrase decided its own file's verdict. Observed: prose quoting the
+//: phrase with a `1`, above a real summary of `0`, made the gate report 1 unresolved.
+//:
+//: That direction fails SAFE. The mirror is why this is a defect rather than a wart: prose
+//: quoting the phrase with a `0`, above a REAL summary of `2`, reported GREEN with genuine
+//: unresolved drift. A gate that can be spoofed by prose is the same class of bug as a gate
+//: that cannot see a file, and "it happened to fail safe for me" is luck, not design.
+//:
+//: The optional leading whitespace and list marker keep every existing spelling parsing —
+//: `**Unresolved drifts:** 0` and `- **Unresolved drifts:** 0` both match, which the
+//: selftest pins as a control so the anchor cannot become too strict and silently stop
+//: reading real summary lines (that fails CLOSED, but it breaks every consumer).
+//:
+//: Prose is now safe because it sits MID-LINE inside a `- **DRIFT-N.M** — …` entry: after
+//: the anchor consumes an optional marker, the next token must be `unresolved`, and in an
+//: entry it is `DRIFT-…`. A line that genuinely BEGINS with the phrase is still read as a
+//: summary, which is the correct reading of a line that looks exactly like one.
+const RE_UNRESOLVED_DRIFTS = /^[ \t]*(?:[-*+][ \t]+)?\*{0,2}\s*unresolved\s+drifts\s*\*{0,2}\s*:?\s*\*{0,2}\s*(\d+)/im;
+
 function phase5() {
   const g = [];
   const drifts = glob('DRIFT');
@@ -1309,7 +1332,7 @@ function phase5() {
   // single-owner case: an earlier round left unresolved is unresolved, and the round that
   // followed it says nothing about that.
   for (const d of drifts) {
-    const m = /unresolved drifts\s*:?\s*\*{0,2}\s*(\d+)/i.exec(read(d.file) || '');
+    const m = RE_UNRESOLVED_DRIFTS.exec(read(d.file) || '');
     if (!m) g.push(`${d.file}: cannot read unresolved-drift count (needs a "**Unresolved drifts:** <N>" summary line)`);
     else if (parseInt(m[1], 10) !== 0)
       g.push(`${d.file}: convergence not reached — ${m[1]} unresolved drift(s). EVERY drift file must report 0; a later or higher-numbered round does not discharge an earlier one, and with concurrent owners there is no "final" round at all.`);
@@ -1530,7 +1553,7 @@ function phase7() {
     return {
       present: true,
       gaps: [
-        `FIX_ROUND files span ${scopes.length} scopes (${scopes.map((s) => s || '<unscoped>').join(', ')}) — phase 7 reads a decay PROFILE, and interleaving several owners' rounds into one sequence yields an estimate that describes nobody's loop. Run the fix loop per owner and gate each separately, or consolidate to one scope.`,
+        `FIX_ROUND files span ${scopes.length} scopes (${scopes.map((s) => s || '<unscoped>').join(', ')}) — phase 7 reads a decay PROFILE, and a capture-recapture estimate stitched from several owners' loops is a number with no referent. RUN PHASE 7 PER-BRANCH: each stage owner runs phases 6/7 on their OWN branch, where only their own scope's files exist, so the estimator always sees one coherent sequence. The multi-scope case only arises AFTER stages merge, and the answer there is a FRESH audit round on the merged tree — not an attempt to reconcile three interleaved loops.`,
       ],
     };
   }

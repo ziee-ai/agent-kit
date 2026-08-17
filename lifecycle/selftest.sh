@@ -313,6 +313,42 @@ assert_exit 0 "phase5: all drift files converged (scoped included) passes" -- --
 drift_file DRIFT-1.md 1.1 2
 assert_exit 1 "phase5: an earlier unconverged round is not discharged by a later one" -- --phase 5 --repo "$DE" --dir "$DE/.lifecycle/drift"
 
+# ---------------------------------------------------------------------------
+# The count parser must read the SUMMARY LINE, not prose that quotes it.
+#
+# `phase5` extracted the count with a regex applied to the whole file, taking the FIRST
+# match anywhere — so a drift entry that QUOTES the summary phrase decided its own file's
+# verdict. Found by tripping over it: prose quoting the phrase with a `1`, above a real
+# summary of `0`, made the gate report 1. That direction fails SAFE.
+#
+# The dangerous direction is the mirror, and it is what the first scenario below pins:
+# prose quoting the phrase with a `0`, above a REAL summary of `2`, reports GREEN with
+# genuine unresolved drift. A gate that can be spoofed by prose is the same class of bug as
+# a gate that cannot see a file.
+drift_prose() {
+  # $1 file · $2 the number the PROSE quotes · $3 the number the SUMMARY declares
+  printf '# DRIFT\n\n- **DRIFT-9.1** — verdict: none — the report said `Unresolved drifts: %s` and the gate agreed.\n\n**Unresolved drifts:** %s\n' "$2" "$3" > "$DE/.lifecycle/drift/$1"
+}
+
+# Reset to a single clean file so these assertions are about the parser alone.
+rm -f "$DE"/.lifecycle/drift/DRIFT-*.md
+
+# THE ONE THAT MATTERS — prose says 0, the summary says 2. Must be RED.
+drift_prose DRIFT-1.md 0 2
+assert_exit 1 "phase5 parser: prose quoting '0' must NOT mask a real summary of 2" -- --phase 5 --repo "$DE" --dir "$DE/.lifecycle/drift"
+
+# The safe direction actually observed in the field — prose says 1, summary says 0. Green.
+drift_prose DRIFT-1.md 1 0
+assert_exit 0 "phase5 parser: prose quoting '1' does not spoof a real summary of 0" -- --phase 5 --repo "$DE" --dir "$DE/.lifecycle/drift"
+
+# CONTROL — an ordinary artifact with no prose quoting still parses exactly as before, in
+# both the plain and list-marker spellings. Without this the anchor could be too strict and
+# silently stop reading real summary lines, which fails CLOSED but breaks every consumer.
+printf '# DRIFT\n\n- **DRIFT-1.1** — verdict: resolved — x\n\n**Unresolved drifts:** 0\n' > "$DE/.lifecycle/drift/DRIFT-1.md"
+assert_exit 0 "phase5 parser: an ordinary '**Unresolved drifts:** 0' still parses" -- --phase 5 --repo "$DE" --dir "$DE/.lifecycle/drift"
+printf '# DRIFT\n\n- **DRIFT-1.1** — verdict: none — x\n\n- **Unresolved drifts:** 3\n' > "$DE/.lifecycle/drift/DRIFT-1.md"
+assert_exit 1 "phase5 parser: the list-marker spelling '- **Unresolved drifts:** 3' still parses" -- --phase 5 --repo "$DE" --dir "$DE/.lifecycle/drift"
+
 rm -rf "$FE" "$BE" "$UE" "$DE"
 echo "== $PASS passed, $FAIL failed =="
 [ "$FAIL" -eq 0 ]

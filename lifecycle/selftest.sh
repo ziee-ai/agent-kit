@@ -349,6 +349,41 @@ assert_exit 0 "phase5 parser: an ordinary '**Unresolved drifts:** 0' still parse
 printf '# DRIFT\n\n- **DRIFT-1.1** — verdict: none — x\n\n- **Unresolved drifts:** 3\n' > "$DE/.lifecycle/drift/DRIFT-1.md"
 assert_exit 1 "phase5 parser: the list-marker spelling '- **Unresolved drifts:** 3' still parses" -- --phase 5 --repo "$DE" --dir "$DE/.lifecycle/drift"
 
+# ---------------------------------------------------------------------------
+# THE SUMMARY IS THE FILE'S LAST WORD — take the LAST anchored match, not the first.
+#
+# Third instance of ONE BUG FAMILY: *the gate reading something other than the file's actual
+# conclusion*. Naming the family here so the fourth instance is recognised faster.
+#   1. the glob could not SEE scoped files            → fixed: widened + check every file
+#   2. prose QUOTING the phrase was read as the count → fixed: anchored to line start
+#   3. an APPENDED round leaves two summary lines and
+#      the first (stale) one wins                     → this
+#
+# All three are green-when-red. This one was found by hand: an artifact whose real summary
+# said 1 unresolved, with an earlier stale `0` above it, and `--phase 5` exited 0 —
+# certifying convergence that did not exist. Drift files are APPEND-HEAVY by design (a round
+# is added, not rewritten), so extra summary lines are the normal case, not an odd one.
+drift_two_summaries() {
+  # $1 file · $2 the STALE earlier summary · $3 the REAL final summary
+  printf '# DRIFT\n\n## round 1\n\n- **DRIFT-1.1** — verdict: resolved — x\n\n**Unresolved drifts:** %s\n\n## round 2 (appended)\n\n- **DRIFT-1.2** — verdict: none — y\n\n**Unresolved drifts:** %s\n' "$2" "$3" > "$DE/.lifecycle/drift/$1"
+}
+
+rm -f "$DE"/.lifecycle/drift/DRIFT-*.md
+
+# THE ONE THAT MATTERS — stale 0 above a real 1. Must be RED.
+drift_two_summaries DRIFT-1.md 0 1
+assert_exit 1 "phase5 summary: a stale earlier '0' must NOT mask the file's real final '1'" -- --phase 5 --repo "$DE" --dir "$DE/.lifecycle/drift"
+
+# The converse — an earlier 2 must not condemn a file whose final word is 0.
+drift_two_summaries DRIFT-1.md 2 0
+assert_exit 0 "phase5 summary: an earlier '2' does not condemn a file whose last word is 0" -- --phase 5 --repo "$DE" --dir "$DE/.lifecycle/drift"
+
+# CONTROL — a single-summary file is completely unaffected by taking the last match.
+printf '# DRIFT\n\n- **DRIFT-1.1** — verdict: resolved — x\n\n**Unresolved drifts:** 0\n' > "$DE/.lifecycle/drift/DRIFT-1.md"
+assert_exit 0 "phase5 summary: a single-summary file is unaffected (0)" -- --phase 5 --repo "$DE" --dir "$DE/.lifecycle/drift"
+printf '# DRIFT\n\n- **DRIFT-1.1** — verdict: none — x\n\n**Unresolved drifts:** 4\n' > "$DE/.lifecycle/drift/DRIFT-1.md"
+assert_exit 1 "phase5 summary: a single-summary file is unaffected (4)" -- --phase 5 --repo "$DE" --dir "$DE/.lifecycle/drift"
+
 rm -rf "$FE" "$BE" "$UE" "$DE"
 echo "== $PASS passed, $FAIL failed =="
 [ "$FAIL" -eq 0 ]

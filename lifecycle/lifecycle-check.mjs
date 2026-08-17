@@ -1300,7 +1300,31 @@ function phase4() {
 //: the anchor consumes an optional marker, the next token must be `unresolved`, and in an
 //: entry it is `DRIFT-…`. A line that genuinely BEGINS with the phrase is still read as a
 //: summary, which is the correct reading of a line that looks exactly like one.
-const RE_UNRESOLVED_DRIFTS = /^[ \t]*(?:[-*+][ \t]+)?\*{0,2}\s*unresolved\s+drifts\s*\*{0,2}\s*:?\s*\*{0,2}\s*(\d+)/im;
+const RE_UNRESOLVED_DRIFTS = /^[ \t]*(?:[-*+][ \t]+)?\*{0,2}\s*unresolved\s+drifts\s*\*{0,2}\s*:?\s*\*{0,2}\s*(\d+)/gim;
+
+/** The count from a drift file's summary — its LAST anchored summary line, or null.
+ *
+ * THE LAST, not the first, and that is the third fix in one bug FAMILY: *the gate reading
+ * something other than the file's actual conclusion*.
+ *
+ *   1. the glob could not SEE scoped files             → widened, and every file is checked
+ *   2. prose QUOTING the phrase was read as the count  → anchored to line start
+ *   3. an APPENDED round leaves an earlier summary
+ *      above the real one, and the first won           → this
+ *
+ * All three were green-when-red. This one was caught by hand on a real artifact whose final
+ * summary said 1 unresolved while an earlier stale `0` sat above it: `--phase 5` exited 0 and
+ * certified convergence that did not exist.
+ *
+ * Drift files are APPEND-HEAVY by design — a round is ADDED, not rewritten — so a file
+ * carrying several summary lines is the normal case rather than a malformed one, and the
+ * file's conclusion is by construction its last word. Reading the first was never right; it
+ * only looked right while files had exactly one.
+ */
+function unresolvedDriftCount(text) {
+  const all = [...String(text || '').matchAll(RE_UNRESOLVED_DRIFTS)];
+  return all.length === 0 ? null : parseInt(all[all.length - 1][1], 10);
+}
 
 function phase5() {
   const g = [];
@@ -1332,10 +1356,10 @@ function phase5() {
   // single-owner case: an earlier round left unresolved is unresolved, and the round that
   // followed it says nothing about that.
   for (const d of drifts) {
-    const m = RE_UNRESOLVED_DRIFTS.exec(read(d.file) || '');
-    if (!m) g.push(`${d.file}: cannot read unresolved-drift count (needs a "**Unresolved drifts:** <N>" summary line)`);
-    else if (parseInt(m[1], 10) !== 0)
-      g.push(`${d.file}: convergence not reached — ${m[1]} unresolved drift(s). EVERY drift file must report 0; a later or higher-numbered round does not discharge an earlier one, and with concurrent owners there is no "final" round at all.`);
+    const n = unresolvedDriftCount(read(d.file));
+    if (n == null) g.push(`${d.file}: cannot read unresolved-drift count (needs a "**Unresolved drifts:** <N>" summary line)`);
+    else if (n !== 0)
+      g.push(`${d.file}: convergence not reached — ${n} unresolved drift(s). EVERY drift file must report 0; a later or higher-numbered round does not discharge an earlier one, and with concurrent owners there is no "final" round at all.`);
   }
   return { present: true, gaps: g };
 }

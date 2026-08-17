@@ -32,6 +32,23 @@ const phaseArg = opt('--phase');
 const baseArg = opt('--base'); // resolved after repo is known (default: origin/main if it exists)
 let dirArg = opt('--dir');
 let repoArg = opt('--repo');
+// `--scope <name>` — evaluate only THIS owner's scoped artifacts (plus the UNSCOPED ones,
+// which belong to everybody), ignoring other owners'.
+//
+// WHY. Requiring EVERY matching artifact to converge was right for one owner and wrong for
+// three: with concurrent stages sharing one `.lifecycle/<feature>/`, any stage's open round
+// blocked every other stage's push — including stages that had not reached that phase at
+// all. Observed on this feature twice: a stage-3 push refused first by `DRIFT-stage2-1.md`
+// and later by `FIX_ROUND-stage1-2.md`, neither of which stage 3 may edit.
+//
+// The rule is that a stage gates on its OWN artifacts. Unscoped invocation is unchanged, so
+// single-owner lifecycles and the pre-push hook on a finished branch behave exactly as
+// before — the flag adds a narrower question, it does not weaken the default one.
+//
+// UNSCOPED files are deliberately KEPT in a scoped run: `DRIFT-1.md` predates the split and
+// is everyone's, so an owner must still gate on it. Only OTHER owners' scopes are dropped.
+const scopeArg = opt('--scope');
+const SCOPE = typeof scopeArg === 'string' ? scopeArg : null;
 
 // ---------------------------------------------------------------------------
 // locate repo + feature dir
@@ -191,6 +208,10 @@ function glob(prefix) {
       return m ? { file: f, scope: m[1] ?? '', n: parseInt(m[2], 10) } : null;
     })
     .filter(Boolean)
+    // `--scope` narrows to this owner's files + the shared unscoped ones. It is applied HERE,
+    // at the ONE place artifacts are enumerated, so every phase inherits it and none can
+    // disagree about which files it is judging — the same reason `SLICE_READERS` is one table.
+    .filter((e) => SCOPE === null || e.scope === '' || e.scope === SCOPE)
     .sort((a, b) => (a.scope === b.scope ? a.n - b.n : a.scope < b.scope ? -1 : 1));
 }
 

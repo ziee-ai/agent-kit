@@ -279,7 +279,60 @@ const RE_POSCONTROL_PROSE = new RegExp([
   /\b(?:HTTP\s*)?200\b/.source,
 ].join('|'), 'i');
 // DECISION:    ### DEC-1: question   then **Resolution:** ...  **Basis:** ...
+//
+// HEADING-LEVEL AGNOSTIC, AND THE TRAILING COLON IS OPTIONAL. This used to be
+// `/^#{2,6}\s*(DEC-…)\s*:/` — keyed to a colon that real files do not always write. Measured
+// across the live lifecycle population: 1738 headings are `### DEC-N:`, but 29 are
+// `## DEC-N` and 15 are `### DEC-N`, both without a colon, because different owners append
+// at different times and at different depths. One real file carries 22 of the first shape
+// and 8 of the second.
+//
+// Every heading the matcher cannot see reads as a HOLE once contiguity is checked, so a
+// depth/colon-keyed matcher manufactures false positives on correct files. That is worse
+// than the defect it hunts: a push gate that rejects a correct file trains people to bypass
+// it, and then it is not there on the day a decision genuinely goes unrecorded — the same
+// dynamic as the `--all` scaffolding trap.
+//
+// The risk in the other direction is real and bounded deliberately: a matcher relaxed until
+// it matches anything starts counting CITATIONS as records, which inverts the check. So the
+// `#` must be at column 0 (excluding indented code and `> ` blockquoted citations), and
+// fenced code blocks are stripped before scanning (`### DEC-2` and `# DEC-2:` inside a ```sh
+// fence are a shell comment and an example, not declarations). Both halves are pinned by
+// selftest scenarios, including a sensitivity control proving the fence case is not passing
+// merely because the matcher sees nothing at all.
+// TWO MATCHERS, because two different questions are asked of these headings and widening
+// one must not widen the other:
+//
+//   RE_DEC     (narrow, UNCHANGED) — "which entries follow the STRUCTURED decision form?"
+//                Those, and only those, must carry a `**Resolution:**` line.
+//   RE_DEC_ANY (wide)              — "which ids are ON RECORD?" Drives contiguity only.
+//
+// Keeping them separate is not tidiness. Widening RE_DEC itself pulled the prose-style
+// `## DEC-N — <statement>` records that real owners append into the Resolution requirement,
+// and those entries state their decision in the heading and argue it in the body rather than
+// in a `**Resolution:**` line. That failed files which pass today — caught only by running
+// the old matcher and the new one over the same real file and diffing the verdicts, which is
+// the check worth repeating whenever a shared matcher is loosened.
 const RE_DEC = /^#{2,6}\s*(DEC-[A-Za-z0-9._-]+)\s*:/;
+const RE_DEC_ANY = /^#{1,6}[ \t]*(DEC-[A-Za-z0-9._-]+)\b[ \t]*:?/;
+
+/** A document's lines with fenced code blocks blanked out, so a fence cannot declare
+ *  anything. Blanked rather than removed so every line index still maps to the real file. */
+function linesOutsideFences(text) {
+  const out = [];
+  let fence = null; // the opening fence's marker char + length, or null
+  for (const ln of String(text || '').split(/\r?\n/)) {
+    const m = /^[ \t]{0,3}(`{3,}|~{3,})/.exec(ln);
+    if (m) {
+      const mark = m[1][0], len = m[1].length;
+      if (!fence) { fence = { mark, len }; out.push(''); continue; }
+      // a closing fence must use the same char and be at least as long
+      if (mark === fence.mark && len >= fence.len) { fence = null; out.push(''); continue; }
+    }
+    out.push(fence ? '' : ln);
+  }
+  return out;
+}
 // DRIFT entry: - **DRIFT-1.2** — verdict: plan-wins — text
 const RE_DRIFT = /^-\s*\*\*(DRIFT-[A-Za-z0-9._-]+)\*\*.*?verdict\s*:\s*(plan-wins|impl-wins|none|resolved)\b/i;
 // TEST_RESULTS: - **TEST-2**: PASS
@@ -1283,7 +1336,17 @@ function phase4() {
   const t = read('DECISIONS.md');
   if (t == null) return { present: false, gaps: ['DECISIONS.md missing'] };
   const decs = [];
-  const lines = t.split(/\r?\n/);
+  // Fenced code is blanked so an example or a shell comment cannot declare a decision.
+  // Indices still align with the real file, so the forbidden-marker line numbers below stay
+  // truthful — and a TBD inside a fence is correctly no longer read as an open marker.
+  const lines = linesOutsideFences(t);
+  // Every id ON RECORD at any heading depth, for the contiguity check below. Separate from
+  // `decs`, which holds only the STRUCTURED entries that owe a `**Resolution:**` line.
+  const recorded = [];
+  for (const ln of lines) {
+    const m = RE_DEC_ANY.exec(ln);
+    if (m) recorded.push(m[1]);
+  }
   for (let i = 0; i < lines.length; i++) {
     const m = RE_DEC.exec(lines[i]);
     if (m) {
@@ -1295,7 +1358,10 @@ function phase4() {
       decs.push({ id: m[1], res });
     }
   }
-  if (decs.length === 0) g.push('DECISIONS.md: no `### DEC-N: ...` entries parsed');
+  // Emptiness is judged on the WIDE set: a file written entirely in the prose-style
+  // `## DEC-N — …` form has real records, and reporting "none parsed" for it would be the
+  // narrow matcher's blind spot showing through as a bogus gap.
+  if (recorded.length === 0) g.push('DECISIONS.md: no `### DEC-N: ...` entries parsed');
   for (const d of decs) if (!d.res) g.push(`DECISIONS.md: ${d.id} has no "**Resolution:**" line`);
 
   // CONTIGUITY — a decision that was ACTED ON but never written down leaves a hole.
@@ -1317,13 +1383,33 @@ function phase4() {
   // files in both consumer repos, and reading them as members of the numeric sequence would
   // fail artifacts that are already valid — a gate whose first act is to break every
   // in-flight branch does not get adopted, it gets bypassed.
-  const nums = decs.map((d) => /^DEC-(\d+)$/.exec(d.id)).filter(Boolean).map((m) => parseInt(m[1], 10));
+  //
+  // POPULATION. This governs exactly ONE file per invocation: `<featureDir>/DECISIONS.md`
+  // (see `read`, which joins featureDir). It never scans a tree, so a `DECISIONS.md` that is
+  // not a lifecycle artifact — `docs/analysis-workbench/DECISIONS.md` and friends — is out of
+  // scope by construction, not by exclusion. Stated because measuring this rule across a
+  // filesystem is easy to confuse with what it enforces: a sweep over every `DECISIONS.md` on
+  // disk generates failures in files nobody owns, which is not what this gate does.
+  //
+  // Measured over the population it DOES govern — the live `.lifecycle/*/DECISIONS.md` set,
+  // 81 files — 80 pass and 1 carries genuine holes (an early stage worktree that skipped
+  // DEC-23/24; the fuller tree of the same feature records both, so it is the multi-owner
+  // shape of exactly the defect this catches). Verified by positive control: the neighbours
+  // of every reported hole ARE found by the same matcher in the same file.
+  // Asserted on the SET of declared ids, and NOT on their uniqueness. Re-using a DEC-N as a
+  // later heading is a widespread, legitimate convention in the live population: corrections,
+  // amendments, dispositions and WITHDRAWAL RECORDS are appended as their own headings against
+  // the id they annotate (`## DEC-11 CORRECTION — …`, `## DEC-6 NOTE — …`, `### DEC-25 (test
+  // correction): …`, `## DEC-25 (stage 1's withdrawal record) — …`). An earlier version of
+  // this gate rejected duplicates and so fired on precisely the practice the hole check exists
+  // to ENCOURAGE — recording a withdrawn decision rather than renumbering over it.
+  //
+  // Contiguity-on-the-set is immune to that convention (an annotation re-uses an existing id
+  // and can never create a hole); a uniqueness check is not. That asymmetry is the reason only
+  // holes are checked.
+  const nums = recorded.map((id) => /^DEC-(\d+)$/.exec(id)).filter(Boolean).map((m) => parseInt(m[1], 10));
   if (nums.length) {
-    const seen = new Set();
-    const dupes = new Set();
-    for (const n of nums) (seen.has(n) ? dupes : seen).add(n);
-    for (const n of [...dupes].sort((a, b) => a - b))
-      g.push(`DECISIONS.md: DEC-${n} is declared more than once — two headings with one id means the record silently loses whichever decision the reader does not scroll to. Renumber the later one.`);
+    const seen = new Set(nums);
     const max = Math.max(...nums);
     const missing = [];
     for (let n = 1; n <= max; n++) if (!seen.has(n)) missing.push(n);

@@ -436,10 +436,16 @@ assert_exit 1 "phase4 contiguity: a HOLE (DEC-4 missing) fails — the measured 
 dec_file 2 3
 assert_exit 1 "phase4 contiguity: numbering that does not start at DEC-1 fails" -- --phase 4 --repo "$DC" --dir "$DC/.lifecycle/dec"
 
-# A DUPLICATE id is the other way the record loses a decision: the second heading
-# silently overwrites the first in every reader's mental model.
+# A REPEATED id must PASS. Measured across the live lifecycle population, re-using a DEC-N
+# as a later heading is a widespread and legitimate convention — corrections, amendments,
+# dispositions, and WITHDRAWAL RECORDS are appended as their own headings against the id
+# they annotate (`## DEC-11 CORRECTION — …`, `## DEC-6 NOTE — …`, `### DEC-25 (test
+# correction): …`). An earlier version of this gate rejected duplicates and was therefore
+# firing on exactly the practice the hole check exists to ENCOURAGE: recording a withdrawn
+# decision instead of renumbering over it. Contiguity is asserted on the SET of declared
+# ids, which is immune to annotation; uniqueness is not, so uniqueness is not checked.
 dec_file 1 2 2 3
-assert_exit 1 "phase4 contiguity: a DUPLICATE DEC-2 fails" -- --phase 4 --repo "$DC" --dir "$DC/.lifecycle/dec"
+assert_exit 0 "phase4 contiguity CONTROL: a REPEATED DEC-2 passes (corrections/withdrawal records re-use ids)" -- --phase 4 --repo "$DC" --dir "$DC/.lifecycle/dec"
 
 # CONTROLS — the shapes that must keep passing, or this gate breaks every existing file.
 dec_file 1 2 3
@@ -455,6 +461,64 @@ assert_exit 0 "phase4 contiguity CONTROL: out-of-order but complete 1..3 passes"
 : > "$DC/.lifecycle/dec/DECISIONS.md"
 printf '# DECISIONS\n### DEC-1: q?\n**Resolution:** a.\n**Basis:** convention.\n### DEC-A1: q?\n**Resolution:** a.\n**Basis:** convention.\n### DEC-3b: q?\n**Resolution:** a.\n**Basis:** convention.\n' >> "$DC/.lifecycle/dec/DECISIONS.md"
 assert_exit 0 "phase4 contiguity CONTROL: non-numeric ids (DEC-A1, DEC-3b) are exempt, not holes" -- --phase 4 --repo "$DC" --dir "$DC/.lifecycle/dec"
+
+# MIXED HEADING LEVELS — the false positive that must never fire.
+# Real files mix depths because different owners append at different times: one measured
+# file carries 22 `### DEC-N:` and 8 `## DEC-N` (no colon) headings. A matcher keyed to one
+# depth (or to the trailing colon) cannot see the others, and every id it cannot see reads
+# as a HOLE. A false positive in a push gate is worse than the hole it hunts: it trains
+# people to bypass the gate, so it is absent on the day a decision genuinely goes
+# unrecorded — the same dynamic as the --all scaffolding trap.
+: > "$DC/.lifecycle/dec/DECISIONS.md"
+# Ordered so the HIGHEST id is the one the old colon-keyed matcher could see: if the other
+# depths go unseen the file reads as holes at 1 and 2, so this scenario is RED before the
+# fix rather than vacuously green. (Arranged the other way it passes with the matcher
+# broken, because a matcher that sees only DEC-1 finds no hole below DEC-1.)
+printf '# DECISIONS\n## DEC-1 — a later owner appended this at h2 with no colon\n**Resolution:** a.\n**Basis:** convention.\n#### DEC-2 q with no colon at h4\n**Resolution:** a.\n**Basis:** convention.\n### DEC-3: q?\n**Resolution:** a.\n**Basis:** convention.\n' >> "$DC/.lifecycle/dec/DECISIONS.md"
+assert_exit 0 "phase4 contiguity: MIXED heading levels (## / ### / ####, with and without a colon) all count" -- --phase 4 --repo "$DC" --dir "$DC/.lifecycle/dec"
+
+# THE RISK OF LOOSENING — a matcher relaxed until it matches anything starts counting
+# CITATIONS as records, which inverts the check: a decision merely referenced in passing
+# would satisfy the gate that exists to prove it was written down. DEC-2 here appears only
+# as prose and inside a fenced block, so it must still read as a hole.
+: > "$DC/.lifecycle/dec/DECISIONS.md"
+{ printf '# DECISIONS\n### DEC-1: q?\n**Resolution:** a.\n**Basis:** convention.\n'
+  printf 'Prose referring to DEC-2 in passing, and a line that only looks like a heading:\n'
+  printf '\n```sh\n# DEC-2: this is a shell comment inside a fence, not a decision\n### DEC-2 nor is this\n```\n\n'
+  printf '> ### DEC-2 quoted from another document, not declared here\n\n'
+  printf '### DEC-3: q?\n**Resolution:** a.\n**Basis:** convention.\n'; } >> "$DC/.lifecycle/dec/DECISIONS.md"
+assert_exit 1 "phase4 contiguity: DEC-2 only in prose / a code fence / a blockquote is still a HOLE" -- --phase 4 --repo "$DC" --dir "$DC/.lifecycle/dec"
+
+# ...and the positive half of that control: the SAME file with DEC-2 genuinely declared as a
+# heading passes. Without this, the test above would also pass with the matcher broken
+# outright (matching nothing at all reads every id as missing).
+: > "$DC/.lifecycle/dec/DECISIONS.md"
+{ printf '# DECISIONS\n### DEC-1: q?\n**Resolution:** a.\n**Basis:** convention.\n'
+  printf '\n```sh\n# DEC-2: a shell comment inside a fence\n```\n\n'
+  printf '## DEC-2 — genuinely declared here, at a different depth\n**Resolution:** a.\n**Basis:** convention.\n'
+  printf '### DEC-3: q?\n**Resolution:** a.\n**Basis:** convention.\n'; } >> "$DC/.lifecycle/dec/DECISIONS.md"
+assert_exit 0 "phase4 contiguity: a real heading is still counted when a fence also mentions the id" -- --phase 4 --repo "$DC" --dir "$DC/.lifecycle/dec"
+
+# WIDENING THE MATCHER MUST NOT WIDEN THE **Resolution:** REQUIREMENT.
+# Two different questions are asked of these headings: "which ids are on record" (contiguity,
+# which needs the wide matcher) and "which entries follow the structured decision form and
+# must therefore carry a **Resolution:** line" (which must NOT). The prose-style
+# `## DEC-N — <statement>` entries real owners append do not use that form, and imposing it
+# on them retroactively fails files that are valid today — a regression this fix caused once
+# already and that only a before/after comparison against the old matcher caught.
+: > "$DC/.lifecycle/dec/DECISIONS.md"
+{ printf '# DECISIONS\n### DEC-1: q?\n**Resolution:** a.\n**Basis:** convention.\n'
+  printf '## DEC-2 — a prose-style record with no Resolution line, as real owners write them\n'
+  printf 'The decision is stated in the heading and argued in the body.\n'
+  printf '## DEC-1 CORRECTION — annotating an earlier decision, also with no Resolution line\n'
+  printf 'Later owners append corrections against an existing id.\n'; } >> "$DC/.lifecycle/dec/DECISIONS.md"
+assert_exit 0 "phase4: a prose-style '## DEC-N —' record counts for contiguity but is NOT required to carry **Resolution:**" -- --phase 4 --repo "$DC" --dir "$DC/.lifecycle/dec"
+
+# ...and the structured `### DEC-N:` form still MUST carry one — the check the widening
+# could otherwise have quietly disabled for everyone.
+: > "$DC/.lifecycle/dec/DECISIONS.md"
+printf '# DECISIONS\n### DEC-1: q?\n**Resolution:** a.\n**Basis:** convention.\n### DEC-2: q with no resolution?\nsome prose but no resolution line\n' >> "$DC/.lifecycle/dec/DECISIONS.md"
+assert_exit 1 "phase4 CONTROL: the structured '### DEC-N:' form still requires **Resolution:**" -- --phase 4 --repo "$DC" --dir "$DC/.lifecycle/dec"
 
 # ---------------------------------------------------------------------------
 # FIXTURE 7 — LEDGER RESOLUTION STATE

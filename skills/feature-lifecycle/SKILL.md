@@ -129,7 +129,12 @@ Match these line formats precisely or the gate will not pass.
   `asserts:` prose ("…can open the dashboard…", "…the page still loads…", "…200…").
 - **Decision** — `### DEC-1: <question>` then a `**Resolution:** <answer>` line
   and a `**Basis:** <convention|user|codebase>` line.
-  **Numbering must be CONTIGUOUS from DEC-1, with no holes and no duplicates.**
+  **Numbering must be CONTIGUOUS from DEC-1, with no holes.** Any heading depth
+  (`##`, `###`, `####`) counts, with or without a trailing colon — real files mix
+  depths because owners append at different times. Re-using an id for a later
+  correction/amendment/withdrawal record (`## DEC-11 CORRECTION — …`) is fine and
+  expected; only *holes* are rejected. A `DEC-N` that appears only in prose, a code
+  fence, or a blockquote is a citation, not a record, and does not fill a hole.
   A decision that was approved and dispatched to an implementer but never written
   here is unrecoverable once the conversation carrying it ends — that happened, at
   DEC-25 with DEC-24 the highest recorded, and the withdrawing agent had to

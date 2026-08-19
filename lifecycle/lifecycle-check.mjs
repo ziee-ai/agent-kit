@@ -28,6 +28,10 @@ function opt(name, def = undefined) {
   return v && !v.startsWith('--') ? v : true;
 }
 const wantAll = args.includes('--all');
+// `--wip` — the MID-ROUND push gate. Same nine phases as `--all`, but the phase the branch
+// is CURRENTLY WORKING may be in progress. See `runAll` for the frontier rule and why this
+// is a separate flag rather than a loosening of `--all`.
+const wantWip = args.includes('--wip');
 const phaseArg = opt('--phase');
 const baseArg = opt('--base'); // resolved after repo is known (default: origin/main if it exists)
 let dirArg = opt('--dir');
@@ -1293,6 +1297,39 @@ function phase4() {
   }
   if (decs.length === 0) g.push('DECISIONS.md: no `### DEC-N: ...` entries parsed');
   for (const d of decs) if (!d.res) g.push(`DECISIONS.md: ${d.id} has no "**Resolution:**" line`);
+
+  // CONTIGUITY — a decision that was ACTED ON but never written down leaves a hole.
+  //
+  // Measured live: a decision was approved by a coordinator, an agent was dispatched to
+  // build it, it was superseded, and it existed ONLY in coordinator-to-agent messages. The
+  // highest recorded decision was 24; the dispatched one was 25. The withdrawing agent had
+  // to CREATE it in withdrawn form so the reasoning would be findable. It was the fifth
+  // unresolvable reference in one round.
+  //
+  // A hole is mechanically visible without knowing what the decision SAID, which is what
+  // makes this the cheapest check that catches the real case. Its limit is worth stating:
+  // a decision dispatched as the NEXT number and never recorded leaves no hole at all — the
+  // sequence just stops early, and nothing here can see that. The DEC-N REFERENCE check
+  // (every DEC-N cited in a lifecycle artifact resolves to a heading here) is the companion
+  // that catches that shape; contiguity catches the interior one.
+  //
+  // Numeric ids only. `DEC-A1` / `DEC-3b` are a real namespacing convention in existing
+  // files in both consumer repos, and reading them as members of the numeric sequence would
+  // fail artifacts that are already valid — a gate whose first act is to break every
+  // in-flight branch does not get adopted, it gets bypassed.
+  const nums = decs.map((d) => /^DEC-(\d+)$/.exec(d.id)).filter(Boolean).map((m) => parseInt(m[1], 10));
+  if (nums.length) {
+    const seen = new Set();
+    const dupes = new Set();
+    for (const n of nums) (seen.has(n) ? dupes : seen).add(n);
+    for (const n of [...dupes].sort((a, b) => a - b))
+      g.push(`DECISIONS.md: DEC-${n} is declared more than once — two headings with one id means the record silently loses whichever decision the reader does not scroll to. Renumber the later one.`);
+    const max = Math.max(...nums);
+    const missing = [];
+    for (let n = 1; n <= max; n++) if (!seen.has(n)) missing.push(n);
+    if (missing.length)
+      g.push(`DECISIONS.md: numbering has ${missing.length} hole(s) — DEC-${missing.join(', DEC-')} ${missing.length === 1 ? 'is' : 'are'} referenced by position but never recorded (highest is DEC-${max}). A decision that was approved and DISPATCHED to an implementer but never written here is exactly this shape, and it is unrecoverable once the conversation that carried it ends: record ${missing.length === 1 ? 'it' : 'them'} — including one that was later withdrawn or superseded, in withdrawn form with the reasoning — or renumber so the sequence is contiguous.`);
+  }
   // forbidden markers anywhere
   lines.forEach((ln, i) => {
     if (FORBIDDEN_DECISION.test(ln)) g.push(`DECISIONS.md:${i + 1}: forbidden unresolved marker (TBD/TODO/ASK/???): "${ln.trim()}"`);
@@ -1351,12 +1388,28 @@ function phase5() {
   const g = [];
   const drifts = glob('DRIFT');
   if (drifts.length === 0) return { present: false, gaps: ['no DRIFT-<n>.md files (implement + drift loop not started)'] };
-  // every drift file must declare its unresolved count; the highest round must be 0
+  // Each drift entry needs a recognized verdict.
+  //
+  // A second, UNANCHORED presence regex used to run here, demanding the digit sit OUTSIDE
+  // the bold (`**Unresolved drifts:** 0`) while the parser below accepts that spelling AND
+  // `**Unresolved drifts: 0**`. So a file spelled the second way parsed to a correct 0 and
+  // was still rejected as missing its summary line.
+  //
+  // It was REMOVED rather than realigned, and the measurement is why. Compared across every
+  // spelling, the presence check contributed ZERO unique rejections: every file it rejected
+  // the parser also rejects (no summary at all; the phrase only as mid-line prose), except
+  // the two it rejected WRONGLY — the bold spelling above and `* Unresolved drifts: 0`, a
+  // second false negative that was never reported. In the other direction the parser is
+  // strictly STRICTER: being unanchored, the presence check ACCEPTED a file whose only
+  // occurrence of the phrase was inside a `- **DRIFT-N.M** — …` entry, which the anchored
+  // parser correctly refuses. The parser's reject-set therefore strictly CONTAINS it.
+  //
+  // Two predicates for one property is two things to keep in sync, and this pair had
+  // already drifted apart — which is the general reason to prefer deleting a redundant
+  // check over teaching it to agree. The `n == null` branch below is now the single place
+  // a missing summary line is refused, and it names the same requirement in its message.
   for (const d of drifts) {
     const t = read(d.file);
-    if (!/\*\*\s*unresolved drifts\s*:?\s*\*\*\s*\d+/i.test(t) && !/^\s*unresolved drifts\s*:\s*\d+/im.test(t))
-      g.push(`${d.file}: missing "**Unresolved drifts:** <N>" summary line`);
-    // each drift entry needs a recognized verdict
     for (const ln of t.split(/\r?\n/)) {
       if (/^\s*-\s*\*\*DRIFT-/.test(ln) && !RE_DRIFT.test(ln))
         g.push(`${d.file}: drift entry missing verdict (plan-wins|impl-wins|none|resolved): "${ln.trim().slice(0, 80)}"`);
@@ -1417,6 +1470,26 @@ function phase6() {
     if (promoted.length === 0)
       g.push('LEDGER.jsonl: records corroboration fields but no finding qualifies as promoted (corroborated_by >= 2, oracle_confirmed, or severity in {security,data-loss,authz,high}) — the fix loop should work from promoted findings, not the raw union of every angle.');
   }
+
+  // RESOLUTION vocabulary. Opt-in, exactly like corroboration above: a ledger that records
+  // no `resolution` anywhere is never failed for lacking one, so every pre-existing file in
+  // both consumer repos keeps passing. A row that DOES record one is held to the vocabulary,
+  // because the failure mode of a typo here is silent and one-directional — an unrecognised
+  // word is not `open`, so the row drops out of the open set and the finding is lost.
+  ledger.forEach((r, i) => {
+    if (r.__parse_error || r.resolution_state === undefined || r.resolution_state === null || r.resolution_state === '') return;
+    const res = resolutionOf(r);
+    const line = i + 1;
+    if (res !== RESOLUTION_OPEN && !RESOLUTION_CLOSED.includes(res)) {
+      g.push(`LEDGER.jsonl:${line}: unknown resolution_state "${r.resolution_state}" — must be one of ${RESOLUTION_OPEN}, ${RESOLUTION_CLOSED.join(', ')}. An unrecognised value is not treated as open, so a typo here silently DELETES a real finding from the open set.`);
+      return;
+    }
+    const need = RESOLUTION_NEEDS_REF[res];
+    if (need && !String(r[need] ?? '').trim())
+      g.push(`LEDGER.jsonl:${line}: resolution "${res}" requires a \`${need}\` referent (a commit sha, DEC-N, or finding id). ${res === 'superseded'
+        ? 'A superseded finding is the dangerous one: it was CORRECT when filed and was inverted by a later change, so it still reads as true and survives re-reading. Without a pointer to what superseded it, the next implementer acts on it and reverts that fix.'
+        : 'A bare "fixed" is an unauditable claim — the referent is what lets the next reader confirm it instead of re-verifying the finding from scratch.'}`);
+  });
   return { present: true, gaps: g };
 }
 
@@ -1473,10 +1546,70 @@ function isPromotedFinding(r) {
     || r.oracle_confirmed === true
     || /^(security|data-loss|authz|high)$/i.test(String(r.severity || ''));
 }
+// ---------------------------------------------------------------------------
+// TRIAGE vs RESOLUTION — two orthogonal axes that were one overloaded field.
+// ---------------------------------------------------------------------------
+// `status: "confirmed"` answers "is this a REAL finding?" — a TRIAGE verdict, settled once
+// at audit time and never revisited. It does NOT answer "is this STILL TRUE?", and nothing
+// ever wrote an answer to that second question back. So an open-set derived from the ledger
+// over-counts silently, and a stale entry is indistinguishable from a live one.
+//
+// Three staleness modes were measured on one real stage's tail, all found only by verifying
+// each finding against the code before working it:
+//   ALREADY FIXED       — 6 of ~20, including the only high-severity item.
+//   COUNT OVER-STATED   — one finding claimed five untested branches; three were real, six
+//                         had acquired tests between filing and reading.
+//   SUPERSEDED          — correct when filed and INVERTED by a later change. This is the one
+//                         with teeth: it is still true AS WRITTEN, so it survives re-reading,
+//                         and acting on it UNDOES the fix that superseded it.
+//
+// The fix is a second field, not a wider vocabulary on the first — collapsing them is what
+// made "confirmed" ambiguous in the first place. `triage` is the immutable verdict;
+// `resolution_state` is the mutable state.
+//
+// THE NAME IS `resolution_state`, NOT `resolution`, AND THAT IS NOT COSMETIC. `resolution`
+// is ALREADY IN USE in real ledgers as a FREE-TEXT prose field ("commit e607672e1: the tools
+// picker was removed from…") — 112 rows across 7 files in the two consumer repos. Validating
+// a vocabulary on that name would have failed 100% of them. `disposition` (179 rows) is
+// likewise taken. The name was chosen by measuring the actual field namespace across 13,799
+// real rows rather than by picking the obvious word, which is the only way to know.
+//
+// The same measurement showed `fix` (337 rows), `round_fixed` (67) and even
+// `fixed_in_round_3` (32) already in the wild: the need this field serves is real and people
+// had been inventing ad-hoc, mutually-incompatible spellings for it. That is the argument for
+// one named field with a checked vocabulary rather than prose.
+//
+// MIGRATION. Both consumer repos carry hundreds of ledgers written with `status` and no
+// resolution state at all. Every reader below falls back `triage ?? status ?? verdict`, and
+// an absent `resolution_state` means `open` — so an existing file parses unchanged and keeps
+// the exact behaviour it has today. Enforcement is opt-in on the same principle phase 6
+// already uses for `corroborated_by`: a ledger that never records a `resolution_state` is
+// never failed for lacking one. Only a row that DOES record one is held to the vocabulary.
+const RESOLUTION_OPEN = 'open';
+const RESOLUTION_CLOSED = ['fixed', 'superseded', 'obsolete', 'wontfix'];
+// A closed state whose claim is unauditable without a referent. `superseded` is the sharp
+// one — without a pointer to what superseded it, the row reads as a live, still-literally-
+// true finding and the next implementer reverts the fix. Requiring the pointer is what makes
+// the dangerous state safe to store, rather than a thing to detect afterwards.
+const RESOLUTION_NEEDS_REF = { fixed: 'fixed_in', superseded: 'superseded_by' };
+
+/** The immutable triage verdict, honouring the legacy `status`/`verdict` spellings. */
+function triageOf(r) {
+  return String(r.triage ?? r.status ?? r.verdict ?? '');
+}
+/** The mutable resolution state. Absent ⇒ `open`, which is what every legacy row means. */
+function resolutionOf(r) {
+  const v = r.resolution_state;
+  return v === undefined || v === null || v === '' ? RESOLUTION_OPEN : String(v).trim().toLowerCase();
+}
 // A ledger row that records a REAL finding (not one the reviewer withdrew).
 function isRejectedFinding(r) {
   return /^\s*(rejected|false[-\s]?positive|dismissed|invalid|not[-\s]a[-\s]bug|no[-\s]finding)/i
-    .test(String(r.status || r.verdict || ''));
+    .test(triageOf(r));
+}
+/** A real finding that is STILL LIVE — the set the fix loop should actually work from. */
+function isOpenFinding(r) {
+  return !isRejectedFinding(r) && resolutionOf(r) === RESOLUTION_OPEN;
 }
 // Scope the ledger to the round the estimate is about: the highest explicit
 // `round` if the ledger carries one, else the whole file (the phase-6 case).
@@ -1629,6 +1762,25 @@ function phase7() {
   // not it fires, and so a ledger that cannot support one says why.
   const t1 = t1Estimate();
   notes.push(t1Note(t1));
+
+  // OPEN SET — the count the fix loop should actually work from, printed so the difference
+  // between "findings filed" and "findings still live" is visible instead of assumed. This
+  // is the whole point of the resolution field: before it, every confirmed row read as open
+  // forever, so the remaining-work number silently over-counted and a stale entry looked
+  // exactly like a live one. Informational — it never fails a branch.
+  const lrows = (parseLedger() || []).filter((r) => !r.__parse_error);
+  if (lrows.length) {
+    const real = lrows.filter((r) => !isRejectedFinding(r));
+    const open = real.filter(isOpenFinding);
+    const closed = real.length - open.length;
+    if (closed > 0) {
+      const by = {};
+      for (const r of real) if (!isOpenFinding(r)) by[resolutionOf(r)] = (by[resolutionOf(r)] || 0) + 1;
+      notes.push(`open set: ${open.length} of ${real.length} confirmed finding(s) still open (${closed} closed — ${Object.entries(by).map(([k, v]) => `${v} ${k}`).join(', ')}). Work the OPEN set; a closed row is kept as record, not as remaining work.`);
+    } else {
+      notes.push(`open set: ${open.length} of ${real.length} confirmed finding(s) still open (none marked resolved). If findings have been fixed since filing, record \`resolution\` on them — an unmarked ledger cannot distinguish a live finding from one that was fixed, over-stated, or superseded by a later change.`);
+    }
+  }
 
   // Decay test over the trailing window: the final round must be below the
   // median of what came before. Cheap, and it is the one rule that separates the
@@ -1847,11 +1999,15 @@ function runOne(n) {
   return { n, name: PHASE_NAMES[n], ...r };
 }
 
-function report(results) {
+// `exempt` — under `--wip`, the ONE phase the branch is currently working. Its gaps are
+// printed in full (they are the author's own worklist) but do not fail the run. Every other
+// phase behaves exactly as under `--all`.
+function report(results, exempt = null) {
   let anyFail = false;
   for (const r of results) {
-    const status = !r.present ? 'PENDING' : r.gaps.length === 0 ? 'OK' : 'FAIL';
-    const glyph = status === 'OK' ? '✓' : status === 'PENDING' ? '·' : '✗';
+    const inProgress = exempt != null && r.n === exempt;
+    const status = !r.present ? 'PENDING' : r.gaps.length === 0 ? 'OK' : inProgress ? 'IN-PROGRESS' : 'FAIL';
+    const glyph = status === 'OK' ? '✓' : status === 'PENDING' ? '·' : status === 'IN-PROGRESS' ? '~' : '✗';
     process.stdout.write(`  ${glyph} phase ${r.n} ${r.name.padEnd(16)} ${status}\n`);
     // Notes are INFORMATIONAL — the estimate, the tier, the concentration
     // measure. They never fail a phase; they exist so the numbers a gate decided
@@ -1859,7 +2015,7 @@ function report(results) {
     for (const n of r.notes || []) process.stdout.write(`      · ${n}\n`);
     if (r.gaps.length) {
       for (const gap of r.gaps) process.stdout.write(`      - ${gap}\n`);
-      if (r.present) anyFail = true;
+      if (r.present && !inProgress) anyFail = true;
     }
   }
   return anyFail;
@@ -1869,27 +2025,75 @@ const TIER = classifyTier();
 process.stdout.write(`lifecycle-check  feature=${featureDir.replace(repo + '/', '')}  base=${baseRef}  tier=${TIER.tier}\n`);
 process.stdout.write(`  tier ${TIER.tier}: ${TIER.reasons.join('; ')}\n`);
 
-if (wantAll) {
+// `--all` (whole-feature) and `--wip` (mid-round) share one runner and differ in exactly one
+// rule, spelled out at FRONTIER below.
+//
+// WHY `--wip` EXISTS. The pre-push hook ran `--all` on every push. Contrary to the obvious
+// diagnosis, `--all` does NOT demand all nine phases — a PENDING phase never sets the
+// failure flag, so a clean tree at phase 5 passes it today. The real blocker is narrower:
+// the moment you SCAFFOLD the next phase's artifact (an empty `LEDGER.jsonl` as you begin
+// phase 6, a `HUMAN_FEEDBACK.md` stub) that phase becomes `present`, and a present phase
+// with gaps is fatal — as is the contiguity rule if the scaffolded phase sits above a
+// PENDING one. Writing the first byte of the next phase makes the branch unpushable until
+// that phase is finished.
+//
+// That is why every mid-round push in the last round used `--no-verify`. Those pushes were
+// honest and named their failing gates, but a gate that cannot pass teaches people to
+// bypass it reflexively, and then it is not there on the day it would have caught
+// something. A guard everyone routes around is worse than no guard: it still reads as
+// protection. The fix is not to weaken the gate but to let an honest mid-round push pass
+// honestly.
+//
+// `--all` is left BYTE-FOR-BYTE unchanged in behaviour, so the merge path, CI, and the
+// orchestrator's pre-merge step keep demanding everything and no existing caller shifts.
+function runAll({ wip }) {
   const results = [];
   const glob = checkA1(); // A1 runs globally, regardless of --dir
   if (glob.length) results.push({ n: 0, name: 'GLOBAL', present: true, gaps: glob });
   for (let n = 1; n <= 9; n++) results.push(runOne(n));
-  const anyFail = report(results);
-  // contiguity: no completed (present & OK) phase may sit above a PENDING one
+
+  // FRONTIER — the phase the branch is currently working: the top of the CONTIGUOUS run of
+  // phases that have artifacts, counting from 1. Deliberately NOT "the lowest phase with
+  // gaps", which would make a REGRESSION in an already-completed phase excuse itself: break
+  // phase 3 while working at phase 6 and phase 3 would become the frontier and be waived.
+  // Presence is progress; gaps are quality. The frontier is read from progress alone, and
+  // then quality is demanded of everything below it.
+  const phases = results.filter((r) => r.n >= 1);
+  let frontier = 0;
+  for (const r of phases) { if (!r.present) break; frontier = r.n; }
+  // A COMPLETE feature (artifacts for all nine) has no phase left to be "in progress", so
+  // the exemption switches itself off and the final push demands everything — the property
+  // that must survive this change.
+  const exempt = wip && frontier > 0 && frontier < 9 ? frontier : null;
+
+  const anyFail = report(results, exempt);
+  // Contiguity: no completed (present & OK) phase may sit above a PENDING one — a phase with
+  // artifacts above a hole means a gate was skipped. Under --wip this is only a WARNING: the
+  // usual cause mid-round is a scaffolded later-phase file, which is untidy, not unsound.
+  // The phases below the frontier are still fully gated, so nothing is waved through.
   let sawPending = false;
   let gap = false;
-  for (const r of results) {
+  for (const r of phases) {
     if (!r.present) { sawPending = true; continue; }
-    if (r.present && sawPending) { gap = true; process.stdout.write(`  ! phase ${r.n} ${r.name} has artifacts but an earlier phase is PENDING (gate skipped)\n`); }
+    if (sawPending) {
+      gap = true;
+      process.stdout.write(`  ${wip ? '·' : '!'} phase ${r.n} ${r.name} has artifacts but an earlier phase is PENDING (gate skipped)${wip ? ' — tolerated under --wip; it must be contiguous before merge' : ''}\n`);
+    }
   }
-  if (anyFail || gap) {
-    process.stderr.write('lifecycle-check: FAIL — resolve the gaps above before pushing.\n');
+  if (anyFail || (gap && !wip)) {
+    process.stderr.write(`lifecycle-check: FAIL — resolve the gaps above before pushing.\n`);
     process.exit(1);
   }
-  const highest = results.filter((r) => r.present).map((r) => r.n).pop() || 0;
+  if (exempt) {
+    process.stdout.write(`lifecycle-check: OK (--wip) — phases 1..${exempt - 1} complete, phase ${exempt} ${PHASE_NAMES[exempt]} in progress. A COMPLETE feature is gated on all nine: run --all before merge.\n`);
+    process.exit(0);
+  }
+  const highest = phases.filter((r) => r.present).map((r) => r.n).pop() || 0;
   process.stdout.write(`lifecycle-check: OK — phases 1..${highest} complete (${highest}/9).\n`);
   process.exit(0);
 }
+
+if (wantAll || wantWip) runAll({ wip: wantWip && !wantAll });
 
 if (phaseArg) {
   const n = parseInt(phaseArg, 10);
@@ -1909,4 +2113,4 @@ if (phaseArg) {
   process.exit(0);
 }
 
-fail('specify --phase <1-8> or --all');
+fail('specify --phase <1-9>, --wip (mid-round push), or --all (whole feature)');

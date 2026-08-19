@@ -128,12 +128,37 @@ Match these line formats precisely or the gate will not pass.
   explicit `[positive-control]` tag, or a plain affirmative claim in the
   `asserts:` prose ("…can open the dashboard…", "…the page still loads…", "…200…").
 - **Decision** — `### DEC-1: <question>` then a `**Resolution:** <answer>` line
-  and a `**Basis:** <convention|user|codebase>` line
+  and a `**Basis:** <convention|user|codebase>` line.
+  **Numbering must be CONTIGUOUS from DEC-1, with no holes and no duplicates.**
+  A decision that was approved and dispatched to an implementer but never written
+  here is unrecoverable once the conversation carrying it ends — that happened, at
+  DEC-25 with DEC-24 the highest recorded, and the withdrawing agent had to
+  reconstruct it. If a decision was withdrawn or superseded, **still record it**, in
+  withdrawn form with the reasoning; do not renumber over the hole. Non-numeric ids
+  (`DEC-5b`, `DEC-A1`) are exempt from the sequence.
 - **Drift entry** — `- **DRIFT-1.2** — verdict: plan-wins — <text>`
   (verdict ∈ `plan-wins | impl-wins | none | resolved`); each DRIFT-*.md needs a
   `**Unresolved drifts:** <N>` summary line
 - **Ledger row** (`LEDGER.jsonl`, one JSON/line) —
-  `{"angle":"correctness","file":"src/...","line":42,"severity":"high","corroborated_by":2,"round":3,"finding":"...","status":"confirmed"}`
+  `{"angle":"correctness","file":"src/...","line":42,"severity":"high","corroborated_by":2,"round":3,"finding":"...","triage":"confirmed","resolution_state":"open"}`
+  **`triage` and `resolution_state` are two different questions.** `triage`
+  (`confirmed | rejected`) is "is this a REAL finding?" — settled once at audit time,
+  never revisited. `resolution_state` (`open | fixed | superseded | obsolete | wontfix`,
+  default `open`) is "is it STILL TRUE?" — and it must be written back when the
+  finding is dealt with. `triage: "confirmed"` was long spelled `status`, which read
+  as "still open" and was never updated, so every open-set derived from a ledger
+  silently over-counted. `status` is still accepted as a legacy spelling of `triage`
+  and an absent `resolution_state` still means `open`, so existing ledgers parse unchanged.
+  (The field is `resolution_state`, not `resolution` — `resolution` is already used in
+  real ledgers as free-text prose and is left alone.)
+  **`fixed` requires `fixed_in` and `superseded` requires `superseded_by`** (a sha,
+  `DEC-N`, or finding id). Superseded is the dangerous state: such a finding was
+  correct when filed and was inverted by a later change, so it still reads as true —
+  without the pointer, the next implementer acts on it and reverts the fix that
+  superseded it. **Before working any finding, verify it against current code**: on
+  one real stage's tail, 6 of ~20 were already fixed (including the only
+  high-severity item) and one claiming five untested branches had six of them
+  acquire tests since filing.
   `corroborated_by` = how many angles independently reported it (1 or 2). It
   decides what becomes WORK (≥2, or oracle-confirmed, or severity
   security/data-loss/authz) **and** it is the input to the phase-7 T1 estimate —
@@ -1217,11 +1242,23 @@ shell in this dir POSIX-portable (no GNU-only flags; guard Unix-only tools with
 
 ```bash
 node .claude/lifecycle/lifecycle-check.mjs --all --repo <worktree-root>   # must be all-green
-git add -A && git commit && git push        # pre-push hook re-runs --all
+git add -A && git commit && git push        # pre-push hook runs --wip
 ```
 
-The pre-push hook blocks the push unless `--all` is green. To push a
-deliberately-incomplete WIP branch, `git push --no-verify` (and say so).
+**The pre-push hook runs `--wip`, not `--all`.** `--wip` gates the phases the branch
+has COMPLETED and lets the one it is currently working be in progress, so a mid-round
+push passes without a bypass. It still fails a regression in a completed phase, still
+fails an unresolved drift, and once every phase has artifacts it demands all nine
+exactly like `--all`. Set `LIFECYCLE_SCOPE=<name>` so a stage gates on its own
+artifacts and a peer stage's open round cannot fail your push.
+
+`--all` (every phase, no exemption) is the **pre-merge** gate — run it yourself before
+handing the branch over, as above.
+
+`git push --no-verify` remains the right tool for a genuine WIP checkpoint that cannot
+pass `--wip`; **name every failing gate and why in the commit body** when you use it.
+It exists so you are never stuck — but reaching for it reflexively is how a guard stops
+being there on the day it matters, which is the reason `--wip` was added.
 
 ## Notes
 

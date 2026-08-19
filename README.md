@@ -14,7 +14,8 @@ It holds:
   (per-phase gate), `merge-gate.mjs` (merge-time gate), `preflight.sh` (Phase-1
   env gate), and the `selftest*.sh` suites that prove them.
 - **`scripts/install-agent-hooks.sh`** — installs the `pre-push` hook that
-  enforces `lifecycle-check --all` on lifecycle branches.
+  enforces `lifecycle-check --wip` on lifecycle branches (completed phases must be green;
+  the phase in progress is exempt). `--all` is the pre-merge gate.
 - **`docs/`** — the framework docs (`FRAMEWORK.md` is the `@import` target;
   `DESIGN_SYSTEM.md`, `CODING_GUIDELINES.md`, + the architecture docs).
 

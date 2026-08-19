@@ -40,8 +40,26 @@ if [ "$ONLY_MAIN" = "1" ]; then exit 0; fi
 if [ -d "$TOP/.lifecycle" ]; then
   CHECK="$TOP/.claude/lifecycle/lifecycle-check.mjs"
   if [ -f "$CHECK" ]; then
-    node "$CHECK" --all --repo "$TOP" || {
-      echo "pre-push: lifecycle-check --all FAILED — fix the gaps above before pushing." >&2
+    # MID-ROUND pushes run --wip: the phases the branch has COMPLETED must be green, and the
+    # one it is currently working may be in progress. --all demanded a state no mid-round
+    # push can be in (scaffolding the next phase's artifact makes that phase `present`, and a
+    # present phase with gaps is fatal), so every mid-round push used --no-verify. A gate
+    # that always fails trains people to bypass it, and then it is absent on the day it would
+    # have caught something. --wip lets an honest mid-round push pass honestly; it still
+    # fails a regression in a completed phase and an unresolved drift, and once every phase
+    # has artifacts it demands all nine exactly like --all.
+    #
+    # The whole-feature --all gate remains the pre-merge step (and the merge-gate path
+    # above); this hook is not where a feature is certified complete.
+    #
+    # --scope: set LIFECYCLE_SCOPE=<name> so a stage gates on its OWN artifacts and a peer
+    # stage's open round cannot fail this owner's push.
+    SCOPE_ARGS=""
+    [ -n "${LIFECYCLE_SCOPE:-}" ] && SCOPE_ARGS="--scope $LIFECYCLE_SCOPE"
+    # shellcheck disable=SC2086
+    node "$CHECK" --wip --repo "$TOP" $SCOPE_ARGS || {
+      echo "pre-push: lifecycle-check --wip FAILED — a COMPLETED phase has gaps (the phase in progress is exempt)." >&2
+      echo "          Fix the gaps above, or push a genuine WIP checkpoint with --no-verify naming each failing gate in the commit body." >&2
       exit 1
     }
   else

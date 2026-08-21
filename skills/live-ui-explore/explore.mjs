@@ -67,6 +67,7 @@
 import { chromium } from 'playwright'
 import { mkdirSync, writeFileSync, appendFileSync, readFileSync, renameSync, existsSync, statSync } from 'node:fs'
 import { join } from 'node:path'
+import { findToolResults, ToolFailureTracker } from './tool-result-detector.mjs'
 
 // ---------------------------------------------------------------------------
 // args
@@ -771,6 +772,41 @@ page.on('response', r => {
   }
   if (s >= 500) bus.http5xx.push(`${s} ${r.request().method()} ${u.slice(0, 160)}`)
 })
+// ---------------------------------------------------------------------------
+// TOOL RESULTS — the one class of failure no other detector can see.
+//
+// Every other detector watches the BROWSER. A failing chat tool call trips none
+// of them: HTTP 200, no console error, no exception, page renders fine, and the
+// activity rail deliberately draws a non-zero exit as a successful step. The
+// failure is entirely inside the response payload, so that is where this looks.
+// See tool-result-detector.mjs for where the infrastructure-vs-command line is
+// drawn and why it is not "exit != 0".
+//
+// A SEPARATE listener from the outcome-accounting one above, and an async one,
+// so reading bodies cannot perturb that synchronous bookkeeping. Bodies are read
+// only for JSON on /api/ — a `text/event-stream` body cannot be read here at all
+// (the chat stream is a single per-user connection that never ends, so
+// Playwright's buffered body never resolves). Live results are therefore seen
+// when the app refetches its message history, which it does on every
+// conversation open; a broken tool surfaces on the next chat the explorer opens,
+// with the FULL payload rather than the stream's 2000-char truncation.
+const toolTracker = new ToolFailureTracker()
+const pendingToolFindings = []
+let currentStepIndex = 0
+const TOOL_BODY_MAX_BYTES = 8 * 1024 * 1024
+page.on('response', async r => {
+  try {
+    if (!/\/api\//.test(r.url()) || r.status() >= 400) return
+    const h = r.headers()
+    if (!/application\/json/i.test(h['content-type'] || '')) return
+    if (Number(h['content-length'] || 0) > TOOL_BODY_MAX_BYTES) return
+    const blocks = findToolResults(await r.json())
+    if (!blocks.length) return
+    for (const f of toolTracker.observe(blocks))
+      pendingToolFindings.push({ ...f, atStep: currentStepIndex, url: r.url() })
+  } catch { /* aborted body, non-JSON despite the header, navigation mid-read */ }
+})
+
 // A native dialog blocks everything; accept so exploration continues, but record it.
 page.on('dialog', async d => { bus.dialog.push(`${d.type()}: ${d.message().slice(0, 200)}`); await d.accept().catch(() => {}) })
 
@@ -835,6 +871,19 @@ function record(kind, severity, detail, step, verifiedBy) {
   log(`  ⚑ ${severity} ${kind}: ${String(detail).slice(0, 140)}`)
 }
 
+// Bodies are read asynchronously, so a result can land a moment after the step
+// that caused it settled. Each finding carries the step index captured when it
+// was queued, and the loop drains after every step; the finally block drains
+// once more so a late body is not lost between the last step and the report.
+function drainToolFindings(step) {
+  while (pendingToolFindings.length) {
+    const f = pendingToolFindings.shift()
+    record(`tool-call-failed`, f.severity,
+      `${f.detail} [${f.reason}]`,
+      { ...(step || {}), i: f.atStep || step?.i || null, url: step?.url ?? f.url }, 'detector')
+  }
+}
+
 try {
   // --- entry: log in mechanically. This is the ONE piece of app knowledge here,
   // and it is deliberate: the auth wall is the precondition for exploring at all,
@@ -897,6 +946,7 @@ try {
   let untriedHere = 0      // untried controls on the current page
   let routePayout = 0      // new routes this page revealed this step
   for (let i = 1; i <= STEPS; i++) {
+    currentStepIndex = i
     // SINK ESCAPE. A route with a long history of consuming steps and revealing
     // nothing gets a hard bound on how long this cycle may linger. Persuasion in
     // the prompt does not work here — the model cannot feel a cost paid across
@@ -1168,6 +1218,7 @@ try {
     for (const t of bus.reqfail) record('request-failed', 'MEDIUM', t, step, 'detector')
     for (const t of bus.dialog) record('native-dialog', 'LOW', t, step, 'detector')
     for (const t of bus.filechooser) log(`  ${t}`)
+    drainToolFindings(step)
 
     // Blank page after an action = something navigated into nothing.
     //
@@ -1224,6 +1275,9 @@ try {
     record('harness-error', 'HIGH', msg, null, 'detector')
   }
 } finally {
+  // A body read in flight when the last step ended still has something to say.
+  await new Promise(res => setTimeout(res, 500))
+  drainToolFindings(null)
   let summaryApi = null
   const summary = {
     startedAt: new Date().toISOString(), base: BASE, model: MODEL,

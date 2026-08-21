@@ -40,7 +40,7 @@ URLs.
 
 | source | examples | label |
 |---|---|---|
-| deterministic detectors | uncaught exception, HTTP 5xx, console error, failed request, blank page after an action, a visible enabled control that cannot be used | `machine-verified` |
+| deterministic detectors | uncaught exception, HTTP 5xx, console error, failed request, blank page after an action, a visible enabled control that cannot be used, **a chat tool call that failed to run** | `machine-verified` |
 | the model's own eyes | spinner that never resolves, dialog with no exit, text overflowing its box | `MODEL VISION ONLY (unverified)` |
 
 Only machine-verified findings reach the ledger. A model-only finding is never
@@ -80,6 +80,38 @@ noise. Two filters fixed it, and both are narrow on purpose:
 - A `type` aimed at a non-editable element is skipped and logged, not recorded.
   That is the explorer mis-aiming, not an app defect, and it was burying the real
   findings.
+
+## Tool calls: the one failure the browser cannot show you
+
+Every other detector watches the browser, and a failing chat tool call trips
+none of them — HTTP 200, no console error, no exception, the page renders, and
+the activity rail draws a non-zero exit as a *successful* step on purpose. The
+failure lives entirely inside the response payload, so `tool-result-detector.mjs`
+reads the payload: `explore.mjs` walks every `/api/` JSON body for `tool_result`
+blocks. That is how the rig watched the model use a sandbox whose `bwrap` could
+not find its rootfs and reported nothing for its entire run.
+
+**A non-zero exit is not a defect.** The model runs failing commands deliberately.
+The line is *whose fault it was*, and it is drawn structurally, calibrated against
+372 real result blocks from the live rig:
+
+- a **completed exec payload** (`{stdout, stderr, exit_code}`) is the command's own
+  business — reported only when the *runner* is speaking where the command should
+  be (non-zero exit, no stdout, stderr opening `bwrap:`/`squashfuse:`/…);
+- an `is_error` result is reported only when the dispatcher had to **synthesize**
+  it (`helpers.rs::execute_tool`'s `Tool execution failed/timed out` arms), a
+  server **was** resolved, no structured payload came back, and the JSON-RPC code
+  is not in the spec's caller range (`-32600..-32602`, `-32700`).
+
+Everything else stays silent: a refused bad request, a tool name the model
+invented, a policy skip, `run_js` running the caller's own broken script. On that
+corpus the rule reports 48 blocks and all 48 are one genuine defect — a built-in
+MCP server that has answered nothing on every call. Severity escalates to HIGH
+when a tool has failed three times in a cycle and never once succeeded;
+cross-cycle recurrence is left to the ledger rather than counted twice.
+
+`node --test tool-result-detector.test.mjs` — the negative controls are the point
+of that file.
 
 Cross-cycle dedup is by a fingerprint that normalises **only** volatile
 identifiers (uuids, bare numbers) — never whole messages. An over-broad key

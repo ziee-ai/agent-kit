@@ -717,8 +717,8 @@ const page = await context.newPage()
 // http4xx is reset per step like everything else: it is the "did the server
 // deliberately refuse THIS action" signal, so it must not leak across steps or
 // it would quiet console errors belonging to a later, unrelated action.
-let bus = { console: [], pageerror: [], reqfail: [], http4xx: [], http5xx: [], dialog: [], filechooser: [] }
-const clearBus = () => { bus = { console: [], pageerror: [], reqfail: [], http4xx: [], http5xx: [], dialog: [], filechooser: [] } }
+let bus = { console: [], warning: [], pageerror: [], reqfail: [], http4xx: [], http5xx: [], dialog: [], filechooser: [] }
+const clearBus = () => { bus = { console: [], warning: [], pageerror: [], reqfail: [], http4xx: [], http5xx: [], dialog: [], filechooser: [] } }
 const NOISE = /favicon|\/@vite\/|__vite|sockjs|hot-update|ERR_ABORTED.*\.map/i
 // A long-lived stream aborted by NAVIGATION is the browser working, not the app
 // failing. Measured: 6 of 14 findings in cycle 1 were this one non-event. Scoped
@@ -726,8 +726,24 @@ const NOISE = /favicon|\/@vite\/|__vite|sockjs|hot-update|ERR_ABORTED.*\.map/i
 // reports.
 const BENIGN_ABORT = /ERR_ABORTED/i
 const STREAMING = /\/(stream|subscribe|subscription|events|sse)(\/|\?|$)/i
+// console.warn is noisier than console.error, so it needs its own filter and a
+// lower default severity. REACT_WARN elevates the warnings that empirically
+// signal a real defect (the same class the gallery runtime-health gate flags as
+// `react-warning`: bad/duplicate keys, act(), setState-on-unmounted, controlled/
+// uncontrolled flips, and deprecation notices) to MEDIUM; every other warning is
+// LOW drift-tracking. WARN_NOISE drops warnings that are never actionable here
+// (React/Vite/devtools banners, third-party download hints).
+const REACT_WARN =
+  /\b(unique "?key"?|each child.*list|act\(\)|can't perform a react state update|unmounted component|controlled.*uncontrolled|uncontrolled.*controlled|componentWill\w+|is deprecated|will be removed|findDOMNode)\b/i
+const WARN_NOISE =
+  /favicon|\/@vite\/|__vite|sockjs|hot-update|download the react devtools|react devtools|\[vite\]|source ?map/i
 
-page.on('console', m => { if (m.type() === 'error' && !NOISE.test(m.text())) bus.console.push(m.text().slice(0, 300)) })
+page.on('console', m => {
+  const type = m.type()
+  const text = m.text()
+  if (type === 'error' && !NOISE.test(text)) bus.console.push(text.slice(0, 300))
+  else if (type === 'warning' && !WARN_NOISE.test(text)) bus.warning.push(text.slice(0, 300))
+})
 page.on('pageerror', e => bus.pageerror.push(String(e).slice(0, 300)))
 page.on('requestfailed', r => {
   const err = r.failure()?.errorText || ''
@@ -1215,6 +1231,12 @@ try {
     const explained = bus.http4xx.length ? ` [expected: app returned ${bus.http4xx[0]}]` : ''
     for (const t of bus.console)
       record('console-error', explained ? 'LOW' : 'MEDIUM', t + explained, step, 'detector')
+    // console.warn: React-class warnings (bad keys, act(), leaks, deprecations)
+    // are real-defect signal → MEDIUM `react-warning`; the rest are LOW drift.
+    for (const t of bus.warning)
+      REACT_WARN.test(t)
+        ? record('react-warning', 'MEDIUM', t, step, 'detector')
+        : record('console-warning', 'LOW', t, step, 'detector')
     for (const t of bus.reqfail) record('request-failed', 'MEDIUM', t, step, 'detector')
     for (const t of bus.dialog) record('native-dialog', 'LOW', t, step, 'detector')
     for (const t of bus.filechooser) log(`  ${t}`)

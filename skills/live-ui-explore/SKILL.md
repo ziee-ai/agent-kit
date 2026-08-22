@@ -40,7 +40,7 @@ URLs.
 
 | source | examples | label |
 |---|---|---|
-| deterministic detectors | uncaught exception, HTTP 5xx, console error, failed request, blank page after an action, a visible enabled control that cannot be used, **a chat tool call that failed to run** | `machine-verified` |
+| deterministic detectors | uncaught exception, HTTP 5xx, console error, console warning (React-class key/act/leak/deprecation → MEDIUM `react-warning`; other warnings → LOW `console-warning`), failed request, blank page after an action, a visible enabled control that cannot be used, **a chat tool call that failed to run** | `machine-verified` |
 | the model's own eyes | spinner that never resolves, dialog with no exit, text overflowing its box | `MODEL VISION ONLY (unverified)` |
 
 Only machine-verified findings reach the ledger. A model-only finding is never

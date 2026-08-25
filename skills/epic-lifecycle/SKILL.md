@@ -206,6 +206,36 @@ as *the acceptance test it needs the provider to pass*. Declare:
 
 Record each item's assumed-built deps + bound `PROV` ids in `ASSUMPTIONS.md`.
 
+### Bind to the `Provides` contract, NEVER to a dependency's internals
+
+A dependent's phases 1–4 reference **only its dependency's `## Provides` (the seam)
++ the phase-3 acceptance tests that make each `Provides` concrete** — NOT the
+dependency's internal `## Items`, internal decisions, or implementation. Those are
+the provider's *private* business (information hiding / Parnas; JEDUF). Item 2
+depends on the INTERFACE, not the IMPLEMENTATION: if item 2 reaches into how item 1
+works internally, a later change to item 1's internals ripples into item 2 — the
+exact coupling this skill exists to prevent, and it makes the leaf un-swappable.
+
+- ✅ `CONS-T2-1 [from T1] [expects: PROV-T1-1]: an S3 endpoint to run my contract
+  tests against` — binds to T1's seam.
+- ❌ "T2 assumes T1 brings up minio via docker-compose with these flags" — binds to
+  T1's internals; forbidden.
+
+**A dependent does NOT re-verify that its dependency's `Provides` is achievable.**
+That was the provider's OWN phase-2 job, already done when the provider was planned
+earlier in topological order — so by the time a dependent plans, its providers'
+`Provides` are already codebase-grounded (phase 2) and stable (phase 4). The
+dependent *trusts* the frozen contract and plans against it; its own phase-2 audit
+covers only its OWN touch points + the `Consumes`↔`Provides` match (which
+reconciliation, Phase 3, settles). This is exactly why topological order is
+mandatory: it guarantees every dependency is fully, groundedly planned before
+anything binds to it.
+
+(At BUILD time the same boundary holds by construction: builds run bottom-up, so a
+dependency is really built before its dependent, and each bound `PROV` is an
+acceptance test the dependency's build had to pass — a dependent never builds
+against an unbuilt or contract-broken provider.)
+
 Gate: every `CONS` names a real provider item + a `PROV` id (may be a GAP); every
 non-leaf has ≥1 `CONS`.
 
@@ -295,6 +325,11 @@ every downstream-bound `PROV` named by an `[acceptance]` test in its item's plan
   breaks on refactor.
 - **A GAP grows the provider.** Downstream need pins upstream scope (consumer-driven
   contract). Dropping a consumer's need is an owner-call, recorded.
+- **Bind to the `Provides` contract, never to a dependency's internals.** A
+  dependent references only its provider's seam (`Provides` + its acceptance tests),
+  not the provider's `Items`/internal decisions/implementation — and it does NOT
+  re-verify the contract is achievable (topological order already grounded it).
+  Interface, not implementation; that is what keeps a leaf swappable.
 - **Reconcile the epic goal, not only edges.** All-green edges can miss the outcome
   (Deming: own the system objective).
 - **Freeze seams, not internals (JEDUF); keep a repair path.** Pin the edge

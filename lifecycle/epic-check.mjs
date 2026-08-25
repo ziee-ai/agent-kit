@@ -42,10 +42,40 @@ const section = (txt, name) => {
   for (let i = hi + 1; i < lines.length; i++) { if (/^##+\s/.test(lines[i])) { end = i; break; } }
   return lines.slice(hi + 1, end).join('\n');
 };
-const RE_PROV = /^\s*-\s*\*\*PROV-([A-Za-z0-9._-]+)\*\*\s*:/gim;
+// A PROV line may carry an optional parenthetical tag between the id and the
+// colon — `- **PROV-T3-2** (G2): …` — so the colon is NOT required to sit
+// immediately after `**`. Without this, such a contract parsed to NOTHING and
+// was SILENTLY DROPPED: the item passed its own gate on its other contracts,
+// and a downstream CONS binding the dropped PROV saw a phantom GAP. (Found when
+// T4 first bound PROV-T3-2.)
+const RE_PROV = /^\s*-\s*\*\*PROV-([A-Za-z0-9._-]+)\*\*\s*(?:\([^)]*\)\s*)?:/gim;
 const RE_CONS = /^\s*-\s*\*\*CONS-([A-Za-z0-9._-]+)\*\*\s*\[from\s+([A-Za-z0-9._-]+)\]\s*\[expects:\s*PROV-([A-Za-z0-9._-]+)\]/gim;
 const RE_RECON = /^\s*-\s*\*\*CONS-([A-Za-z0-9._-]+)\s*↔\s*PROV-([A-Za-z0-9._-]+)\*\*\s*—\s*verdict:\s*(MATCH|GAP|DRIFT)\b/gim;
+// LOUD tripwire: a line that LOOKS like a contract declaration (opens `- **PROV-`
+// / `- **CONS-`) but does NOT match the strict grammar above. Silent-drop is the
+// dangerous failure mode (the gate goes green on unbindable contracts), so any
+// such line is surfaced as an explicit error rather than skipped.
+const RE_PROV_LOOSE = /^[ \t]*-[ \t]*\*\*PROV-([A-Za-z0-9._-]+)\*\*/gim;
+const RE_CONS_LOOSE = /^[ \t]*-[ \t]*\*\*CONS-([A-Za-z0-9._-]+)/gim;
 const all = (re, s) => { const out = []; if (!s) return out; let m; re.lastIndex = 0; while ((m = re.exec(s))) out.push(m); return out; };
+// Return the ids that OPEN a contract bullet (loose) but never satisfy the strict
+// grammar (strict) — i.e. declared-but-unbindable. Compared by captured id, not by
+// line text, because `\s` in the strict regexes can span newlines and defeat any
+// positional reconstruction. Reconcile rows (`CONS-X ↔ PROV-Y`) legitimately open
+// `- **CONS-` without `[from …]`, so the CONS tripwire must skip them.
+const malformed = (loose, strict, s, skip = null) => {
+  if (!s) return [];
+  const strictIds = new Set(all(strict, s).map((m) => m[1]));
+  const seen = new Set();
+  const out = [];
+  for (const m of all(loose, s)) {
+    const id = m[1];
+    if (strictIds.has(id) || seen.has(id)) continue;
+    if (skip && skip.test(s.slice(m.index).split('\n')[0])) continue;
+    seen.add(id); out.push(id);
+  }
+  return out;
+};
 
 // ---- GRAPH parsing (P0) ----
 function graph() {
@@ -68,8 +98,14 @@ function items() {
   const map = {};
   for (const d of itemDirs()) {
     const t = read(join(d, 'PLAN.md'));
-    const prov = all(RE_PROV, section(t, 'Provides')).map((m) => `PROV-${m[1]}`);
-    const cons = all(RE_CONS, section(t, 'Consumes')).map((m) => ({ id: `CONS-${m[1]}`, from: m[2], expects: `PROV-${m[3]}` }));
+    const provSec = section(t, 'Provides');
+    const consSec = section(t, 'Consumes');
+    const prov = all(RE_PROV, provSec).map((m) => `PROV-${m[1]}`);
+    const cons = all(RE_CONS, consSec).map((m) => ({ id: `CONS-${m[1]}`, from: m[2], expects: `PROV-${m[3]}` }));
+    for (const bad of malformed(RE_PROV_LOOSE, RE_PROV, provSec))
+      g(`${d}: PROV-${bad} won't bind — needs \`- **PROV-${bad}**[ (tag)]: text\` (colon after the id/tag)`);
+    for (const bad of malformed(RE_CONS_LOOSE, RE_CONS, consSec, /↔/))
+      g(`${d}: CONS-${bad} won't bind — needs \`- **CONS-${bad} [from <dir>] [expects: PROV-x]: text\``);
     map[d] = { t, prov, cons };
   }
   return map;

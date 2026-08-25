@@ -157,7 +157,27 @@ issue + child tasks + their `blocked-by` edges — use `github-backlog-managemen
 Write `GRAPH.md`: the node list; the edge list (`A → B` = "B depends on A"), WITHIN
 the epic; assert **it is a DAG** (a cycle is a planning error — resolve now); the
 **topological order** and **leaf set**; and the **assumed-available substrate**
-(shipped code + external blockers — recorded, not planned).
+(shipped code + external epics/blockers — recorded, not planned as items here).
+
+### Pin the CROSS-EPIC seams — do NOT leave them unpinned in ASSUMPTIONS
+
+An epic's riskiest contracts are often at its BOUNDARY — what it needs from another
+epic or from shipped code (e.g. compute-metering needs `account_of(project)` + the
+`account_id` key from the accounts epic; quota needs plan allowances from billing).
+If those live only as prose in `ASSUMPTIONS.md`, the mechanism rigorously pins every
+*intra*-epic seam and silently externalizes the *inter*-epic ones — exactly where
+the biggest risk sits. So **declare each cross-epic interface this epic depends on as
+an external contract in the substrate section**:
+
+`- **PROV-<EXT>-1**: <the interface THIS epic assumes from the external provider>`
+
+(`<EXT>` = the external epic/substrate id, e.g. `accounts`, `billing`, `shipped`.)
+A dependent then binds a normal `CONS ... [from <EXT>] [expects: PROV-<EXT>-N]` to
+it, and it enters the reconcile matrix like any other edge. Each externally-bound
+`PROV` gets a **cross-epic acceptance test in the CONSUMING item** — a contract test
+against the external interface (or its mock/stub), so if the external epic later
+delivers a different shape, this epic's own test catches it (Pact across the
+boundary). This turns "assumed and hoped" into "assumed and *verified*."
 
 **Prefer VERTICAL slices.** If an item is a horizontal layer (no end-to-end value,
 integration deferred), that is the failure mode itself — re-slice vertically (each

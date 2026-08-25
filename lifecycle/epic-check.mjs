@@ -27,10 +27,20 @@ const itemDirs = () => {
     catch { return false; }
   });
 };
+// Line-based section slice — robust against the `\Z`-is-not-a-JS-anchor trap
+// (with the /i flag `\Z` matched a literal z, truncating a section at its first
+// "Zarr"/"materialize"/"finalize" and dropping every line after it; a final
+// section with no following heading failed to match at all). Take from the
+// heading line to the next `## ` heading (or end of file).
 const section = (txt, name) => {
   if (!txt) return null;
-  const re = new RegExp(`^##+\\s+${name}\\b([\\s\\S]*?)(?=^##+\\s|\\Z)`, 'im');
-  const m = txt.match(re); return m ? m[1] : null;
+  const lines = txt.split(/\r?\n/);
+  const head = new RegExp(`^##+\\s+${name}\\b`, 'i');
+  const hi = lines.findIndex((l) => head.test(l));
+  if (hi < 0) return null;
+  let end = lines.length;
+  for (let i = hi + 1; i < lines.length; i++) { if (/^##+\s/.test(lines[i])) { end = i; break; } }
+  return lines.slice(hi + 1, end).join('\n');
 };
 const RE_PROV = /^\s*-\s*\*\*PROV-([A-Za-z0-9._-]+)\*\*\s*:/gim;
 const RE_CONS = /^\s*-\s*\*\*CONS-([A-Za-z0-9._-]+)\*\*\s*\[from\s+([A-Za-z0-9._-]+)\]\s*\[expects:\s*PROV-([A-Za-z0-9._-]+)\]/gim;
@@ -41,11 +51,16 @@ const all = (re, s) => { const out = []; if (!s) return out; let m; re.lastIndex
 function graph() {
   const t = read('GRAPH.md');
   if (t == null) { g('GRAPH.md missing (Phase 0)'); return null; }
-  const isDag = /\bDAG\b/i.test(t) && !/cycle (found|detected)/i.test(t);
+  // A DAG assertion must not be defeated by a NEGATED cycle mention ("no cycle
+  // found", "acyclic") — only an ACTUAL cycle declaration ("found a cycle",
+  // "cycle detected", "has a cycle") fails.
+  const isDag = /\bDAG\b|\bacyclic\b/i.test(t) && !/(has|have|found|detected|contains|is)\s+(a\s+)?cycle/i.test(t);
   const hasLeaves = /leaf|leaves/i.test(t);
   const hasTopo = /topolog/i.test(t);
   const edges = [...t.matchAll(/^\s*-?\s*([A-Za-z0-9._-]+)\s*(?:→|->)\s*([A-Za-z0-9._-]+)/gim)].map((m) => [m[1], m[2]]);
-  return { t, isDag, hasLeaves, hasTopo, edges };
+  // external/substrate providers this epic assumes: PROV-<EXT>-N declared in GRAPH
+  const subProv = all(RE_PROV, t).map((m) => `PROV-${m[1]}`);
+  return { t, isDag, hasLeaves, hasTopo, edges, subProv };
 }
 
 // ---- per-item PROV/CONS ----
@@ -86,10 +101,16 @@ if (phase >= 1) {
   }
 }
 if (phase >= 2) {
+  const subProv = new Set(gr?.subProv ?? []); // external/substrate PROVs declared in GRAPH.md
   for (const [d, x] of Object.entries(it)) {
     for (const c of x.cons) {
-      if (!it[c.from]) g(`${d}/PLAN.md: ${c.id} names provider "${c.from}" which is not an item with a PLAN.md`);
-      else if (!it[c.from].prov.includes(c.expects)) g(`${d}/PLAN.md: ${c.id} expects ${c.expects} which ${c.from} does not (yet) provide — a GAP to resolve in Phase 3`);
+      const inEpic = !!it[c.from];
+      const isExternal = !inEpic && subProv.has(c.expects); // a cross-epic substrate contract, pinned in GRAPH
+      if (!inEpic && !isExternal) {
+        g(`${d}/PLAN.md: ${c.id} names provider "${c.from}" which is neither an in-epic item nor an external substrate PROV declared in GRAPH.md — pin the cross-epic interface as a PROV-<EXT> in GRAPH's substrate section (it must NOT be left unpinned in ASSUMPTIONS.md)`);
+      } else if (inEpic && !it[c.from].prov.includes(c.expects)) {
+        g(`${d}/PLAN.md: ${c.id} expects ${c.expects} which ${c.from} does not (yet) provide — a GAP to resolve in Phase 3`);
+      }
     }
   }
   // every non-leaf (has a dependency edge in the graph) should declare ≥1 CONS

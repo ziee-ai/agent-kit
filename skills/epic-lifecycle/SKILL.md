@@ -209,6 +209,28 @@ tests. ADD to its `PLAN.md`:
 
 Gate: each leaf `PLAN.md` has ≥1 `PROV`; leaves consume no in-epic item.
 
+### Mine the PRIOR research — the OSS survey + the example repos (applies to EVERY planning half, Phase 1 AND Phase 2)
+
+The design doc a plan realizes was almost always produced by a research pass that
+already surveyed the **open-source landscape** and named **example repos to follow
+for implementation** (a "OSS landscape / build-vs-adopt / prior-art" section). A
+planning agent that ignores that section re-derives from scratch and descopes to
+the nearest thing it can imagine — the exact failure this skill exists to prevent.
+So EVERY leaf/dependent planning brief MUST:
+
+- Point the agent at the design doc's **OSS-survey section by number** ("read §14
+  OSS landscape") AND name the concrete example repos to study (WebSearch/WebFetch
+  their public schema/docs/source), not just the survey's *conclusion*. Passing the
+  verdict ("adopt X") without the exemplar loses the implementation shape.
+- Require the plan to **CITE `follow <repo> for <aspect>`** in `## Patterns to
+  follow` and in the relevant `## Decisions` (e.g. "follow Cal.com for the
+  member-role enum + unique(account,user) constraint"; "follow River/Oban for the
+  heartbeat-reclaim reaper"; "follow stripe-samples for the webhook handler").
+  Where our design DIVERGES from a cited repo, the plan says why — divergence is a
+  decision, not an accident.
+- This is not optional polish: prior art is *already paid-for* grounding. Not using
+  it is leaving the most descope-resistant input on the table.
+
 ## Phase 1.5 (optional but recommended) — Walking skeleton
 
 If the epic's seam risk is high, plan ONE thin **end-to-end slice through every

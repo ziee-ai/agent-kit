@@ -147,6 +147,12 @@ once building starts.
   something no provider lists as a `PROV`, write the `CONS` anyway** — that is a GAP
   for Phase 3 to resolve by growing the provider; do NOT silently re-implement the
   missing capability (that hides the seam and duplicates work).
+  > **Grammar trap (the parser fails loud on it):** the `**` bold closes
+  > **immediately after the id** — `- **CONS-A3-1** [from …] [expects: …]: text`.
+  > Do NOT wrap the whole label in bold (`- **CONS-A3-1 [from …] [expects: …]**:`) —
+  > that matches no rule, so the item parses with ZERO consumes and is silently
+  > mistaken for a **leaf**, hiding its dependency from reconcile. Same for `PROV`:
+  > `- **PROV-A3-1**: text` (an optional `(tag)` may sit between `**` and `:`).
 - **Reconcile row** (`RECONCILE.md`): `- **CONS-<ITEM>-N ↔ PROV-<PROVIDER>-M** —
   verdict: MATCH | GAP | DRIFT — <note>`.
   - **MATCH** — the provider's plan delivers exactly the assumed shape.

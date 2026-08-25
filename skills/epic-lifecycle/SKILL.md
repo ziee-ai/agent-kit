@@ -76,10 +76,20 @@ executor cannot weaken.** This skill is that fix, applied to an epic's DAG.
 - **GitHub Spec-Kit / Spec-Driven Development** — spec→plan→tasks as durable
   artifacts before code. → the whole artifact model.
 
-> Produces PLANS, not code. Nothing is built in Phases 0–4. "Assume built" means
-> "plan against the declared contract" (need-driven / outside-in TDD: stating what
-> you need from a not-yet-built collaborator IS the design of its interface),
-> recorded in `ASSUMPTIONS.md` — never actual code.
+> Produces PLANS, not code. Each item is planned through `feature-lifecycle`
+> **phases 1–4 (the whole planning half: PLAN → PLAN_AUDIT → TESTS → DECISIONS)**,
+> stopping before phase 5 (IMPLEMENT). "Assume built / don't build" means *stop
+> before phase 5* — NOT skip the rest of planning. Phases 2–4 are what make each
+> contract **grounded** (phase 2 audits it against the real codebase → no frozen
+> impossible contract), **executable** (phase 3 renders it as the acceptance test
+> that IS the contract — Specification-by-Example / Pact, so reconciliation matches
+> test-vs-test, not prose-vs-prose), and **stable** (phase 4 resolves decisions so a
+> deferred choice can't later shift a frozen `Provides` out from under a dependent).
+> "Assume built" = plan against the declared contract (need-driven / outside-in TDD:
+> stating what you need from a not-yet-built collaborator IS the design of its
+> interface), recorded in `ASSUMPTIONS.md` — never actual code. Guard against BDUF
+> with JEDUF: phases 3–4 pin the SEAMS (the downstream-bound contracts); each item
+> keeps internal freedom and a build may change internals without re-reconciling.
 
 ---
 
@@ -156,10 +166,13 @@ horizontally-sliced DAG hides seam mismatches until every node reports done.
 
 Gate: a DAG with a non-empty leaf set + a topo order covering every node.
 
-## Phase 1 — Plan the leaves (planning-only)
+## Phase 1 — Plan the leaves (full planning half: feature-lifecycle 1–4)
 
-For each leaf, produce `<item>/PLAN.md` via `feature-lifecycle` **phase 1 only**
-(PLAN + BASE — do NOT build), and ADD:
+For each leaf, run `feature-lifecycle` **phases 1–4** (PLAN → PLAN_AUDIT → TESTS →
+DECISIONS — do NOT build; stop before phase 5). A leaf depends on nothing, so its
+phase-2 audit runs FULLY against the real codebase and its phase-3 tests are real —
+its `Provides` contracts come out maximally grounded + expressed as acceptance
+tests. ADD to its `PLAN.md`:
 - `## Provides` — every contract this leaf exposes that ANY other item could build
   on. Downstream items can only bind to what you name here; a capability you don't
   list is one a dependent cannot assume. Be generous and concrete.
@@ -178,10 +191,14 @@ Phase 3.
 
 ## Phase 2 — Plan dependents against ASSUMED-BUILT providers
 
-Walk the topological order. For each non-leaf item, produce `<item>/PLAN.md`
-(feature-lifecycle phase 1), treating **every dependency as already built** — its
-`## Provides` contracts are the assumed substrate (need-driven design: stating your
-need designs the dependency's interface). Declare:
+Walk the topological order (dependencies are fully planned before their dependents,
+so you never plan against an unstable provider). For each non-leaf item, run
+`feature-lifecycle` **phases 1–4**, treating **every dependency as already built** —
+its FROZEN `## Provides` contracts are the assumed substrate (need-driven design:
+stating your need designs the dependency's interface). Its phase-2 audit runs
+against the real codebase for its OWN touch points and against the providers'
+declared `Provides` for the assumed seams; its phase-3 tests express each `Consumes`
+as *the acceptance test it needs the provider to pass*. Declare:
 - `## Consumes` — one `CONS` per contract relied on, `[from <provider>] [expects:
   PROV-<provider>-N]` + the assumed shape. A need no provider lists = a GAP; write
   it anyway.

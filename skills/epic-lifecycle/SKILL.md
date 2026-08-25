@@ -108,7 +108,16 @@ Run `epic-lifecycle` ONCE per epic, up front. Its per-item plans feed many
 
 ## Artifacts
 
-Under `.lifecycle/<epic>/` (committed on an `epic/<slug>` planning branch):
+Under `.lifecycle/<epic>/` (committed on an `epic/<slug>` planning branch).
+
+**Push the planning branch to origin — do not leave it local.** These artifacts
+(the graph, the reconciled contracts, the whole plan) are the deliverable; a
+machine move or a lost worktree wipes local-only work. Push `epic/<slug>` to origin
+as you go so the plan is durable and portable across machines — it is a WIP branch,
+NEVER merged to main, so a backup push (`git push --no-verify -u origin epic/<slug>`,
+bypassing the mid-lifecycle pre-push gate, which exists to block *merges* to main,
+not backups) is the correct move. Same for each item's `feat/<slug>` build branch
+once building starts.
 
 - `GRAPH.md` — the dependency DAG, topological order, leaf set, assumed-available
   substrate (already-shipped code + external blockers — boundary inputs, not

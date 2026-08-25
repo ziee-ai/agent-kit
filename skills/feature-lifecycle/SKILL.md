@@ -24,6 +24,15 @@ All artifacts live in `.lifecycle/<feature>/` **inside the feature worktree** an
 are **committed on the branch** so they ride the PR and the pre-push hook can
 read them. `<feature>` is a short kebab slug (e.g. `project-search`).
 
+**Push the feature branch to origin as you go — do not leave it local-only.** The
+`.lifecycle/<feature>/` artifacts (plan, decisions, ledger, fix rounds) are real,
+often-large work; a machine move or a lost worktree wipes anything only committed
+locally. Push `feat/<slug>` to origin for durability/portability — it is a WIP
+branch, never merged to main without sign-off, so a backup push
+(`git push --no-verify -u origin feat/<slug>`) is correct: the pre-push gate exists
+to block *merges to main*, not backup pushes of in-progress branches. Re-push after
+each round of work so the backup stays current.
+
 Work in a dedicated worktree off `origin/main`:
 
 ```bash

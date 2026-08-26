@@ -201,6 +201,33 @@ horizontally-sliced DAG hides seam mismatches until every node reports done.
 
 Gate: a DAG with a non-empty leaf set + a topo order covering every node.
 
+## Track every node as a GitHub issue — open on arrival, CLOSE on landing
+
+The GitHub board is the shared source of truth for what's done; it must MIRROR
+reality at all times: **open = not yet merged, closed = merged**. Keeping it honest
+is part of the lifecycle, not an afterthought — building and merging without
+reconciling the issues leaves a board that lies (every epic looks unstarted).
+
+- **Phase 0 — every node has an issue.** An **epic issue** plus **one issue per
+  GRAPH node** (and per spike / external blocker). If the backlog already has them,
+  record the node ↔ number mapping in `GRAPH.md`. If not, CREATE them now
+  (`gh issue create`, labeled + referencing the epic) — the graph and the board are
+  the same list.
+- **A new item that ARRIVES mid-lifecycle gets an issue immediately.** When Phase 3
+  GROWS a provider into new scope, or a new leaf emerges that wasn't in the original
+  backlog (e.g. a local-sim substrate discovered during planning), FILE its issue
+  the moment it appears — don't let it live only inside a plan file.
+- **On build + merge, CLOSE the item's issue** with the merge commit
+  (`gh issue close <n> -c "built + merged in <sha>"`). The **epic issue** closes when
+  its last child lands. A deferred item stays open with a comment saying so.
+- **Comment when STATUS changes** — unblocked, gated-on-X, deferred — so a reader
+  sees the real state without reading the branch. The reconcile matrix's cross-epic
+  edges (`PROV-<EXT>`) map to the *other* epic's issues; note the dependency there.
+
+This is a recurring miss: an epic can be fully built and merged while its issues sit
+open because closing them was never wired into the flow. Wire it in — at Phase 0
+(open) and at each merge (close).
+
 ## Phase 1 — Plan the leaves (full planning half: feature-lifecycle 1–4)
 
 For each leaf, run `feature-lifecycle` **phases 1–4** (PLAN → PLAN_AUDIT → TESTS →
@@ -354,6 +381,11 @@ reconciliation into the build so it can't be undone:
 Hand off to `feature-orchestration` (or sequential `feature-lifecycle` runs) for
 the bottom-up build + merge. Budget the reconciliation + final-integration steps as
 REAL work (the CPM critique: the join node is a costed task, not free).
+
+**As each item merges, CLOSE its GitHub issue** (with the merge commit sha) and
+close the epic issue when the last child lands — see *Track every node as a GitHub
+issue* above. This is the step most easily forgotten in the build rush; the board
+must not still say "open" for code that is already on main.
 
 ---
 

@@ -68,6 +68,11 @@ MERGE_REGEN_CMD=just openapi-regen
 # the run) and FAILS when it writes a path this list does not name — so the next
 # added output is loud, not silent. C6 SKIPs (explicitly, never PASSes) when the
 # regen rewrites nothing, i.e. when the set cannot be derived.
+# ALSO consumed by lifecycle-check.mjs: every declared path joins its
+# generated-file exemption (diff classification + FE-touch detection) on top of
+# the built-in openapi.json / api-client/types.ts patterns, so a regen-only
+# diff stays classified backend even when the regen writes more than those two
+# files. Unset ⇒ the built-in patterns only (historical behavior).
 MERGE_GENERATED=src-app/ui/openapi/openapi.json src-app/ui/src/api-client/types.ts src-app/desktop/ui/openapi/openapi.json src-app/desktop/ui/src/api-client/types.ts
 # (optional) paths/dirs the regen may dirty WITHOUT failing C3 parity — e.g. a
 # lockfile a build legitimately refreshes. Space-separated, repo-relative; a dir

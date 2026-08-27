@@ -11,7 +11,22 @@
 >   ownership, §2 outbound HTTP & SSRF, §3 secrets, §4 DB correctness, §7
 >   realtime sync (notify-and-refetch), §11 built-in MCP-server checklist.
 > A future app should treat the framework-general sections as its own and the
-> ziee-domain sections as informative precedent. The split was kept annotative
+> ziee-domain sections as informative precedent.
+>
+> **THE RULE for every consumer of this stack.** The SDK
+> (`sdk/packages/framework`, `.../kit`, `.../shell`) supplies the platform
+> MECHANICS and is app-agnostic by construction — it says nothing about how much
+> of your app should be eager, how a store is laid out on disk, or where a
+> subscription belongs. Those are *consumer conventions*, and the only codebase
+> whose conventions are current is **ziee**. An app bootstrapped by copying
+> another consumer (e.g. COMIZY from cytoanalyst) inherits a SNAPSHOT, not a
+> standard: when ziee and that snapshot disagree, **ziee wins, unconditionally**.
+> Grep ziee first, the SDK second, and the snapshot only to find out what to stop
+> doing. A consuming app that has audited its own drift against ziee should keep
+> that audit as a binding doc and name it here — COMIZY's is
+> `docs/ZIEE_RUNTIME_SYSTEMS.md` (module system, store + proxy system, events +
+> sync; file:line evidence, removed-API table, recorded divergences, builder
+> checklist), and it is the authority wherever it and this file disagree. The split was kept annotative
 > (not a hard extraction) to avoid dropping content — see DEC-3 in the
 > agent-kit-consume lifecycle.
 
@@ -166,11 +181,11 @@ The goal: push as many ▢ as possible from `convention` → `lint`/`type`. Sect
   server IDs in one constants module (no hardcoded literals).
 
 **Frontend**
-- 🔧 **Canonical module layout**: `types.ts`, `stores/`, `components/`,
-  `widgets/`, `events/`, `module.tsx`; every `*.store.ts` is registered in the
-  same commit (no dead module files).
-- 📐 **No cross-module store access.** Never read `Stores.<Other>.field` or
-  subscribe to another module's raw zustand hook. Communicate via the owning
+- 🔧 **Canonical module layout**: `types.ts`, `stores/<storeName>/` (the folder
+  store of §12), `components/`, `widgets/`, `events/`, `module.tsx`; every store
+  is registered in the same commit (no dead module files).
+- 📐 **No cross-module store access.** Never import another module's store handle
+  to read its fields, and never subscribe to another module's raw zustand hook. Communicate via the owning
   module's exported actions + EventBus. Import only from a module's public barrel
   (`@/modules/<name>/module`), never its `core/`/`utils/`/components.
 - 🔧 **Cross-module UI via the slot system** (`settingsUserPages`,
@@ -209,16 +224,29 @@ When adding/maintaining a built-in MCP server, **all** of:
 
 ## 12. Frontend store / proxy discipline
 
-- 🔧 **Three reads, one rule.** In RENDER read `Stores.X.field` (the proxy getter
-  is a hook — reactive, render-only). In handlers/effects/async read
-  `Stores.X.$.field` (`$` is the hook-free snapshot). ACTIONS are safe anywhere —
-  `Stores.X.login()` needs no snapshot ceremony. The old `.__state` alias for `$`
-  was **REMOVED** from store-kit; a Biome guardrail bans its reintroduction, so
-  any `Stores.X.__state.field` still in a codebase is stale and must become `.$.`.
-- 🔧 A getter method (`Stores.X.getFoo()`) does **not** subscribe — in render also
+- 🔧 **The access path is decided by WHAT the property is, not where you read
+  it.** (1) An ACTION (function-valued) resolves hook-free from `getState()` and
+  is **safe to call anywhere** — render, handlers, async, module scope — with no
+  ceremony: `Auth.login(creds)`. (2) `$` is the hook-free state SNAPSHOT, the
+  ONLY state read legal outside render: `Auth.$.user`. (3) A plain state value is
+  a reactive, **RENDER-ONLY** hook — `const { user } = Auth` — and throws React's
+  *Invalid hook call* anywhere else (asserted: `stores.test.ts` TEST-3).
+- 🔧 **Two REMOVED APIs — never write either.** `Stores.X.__state.field` (the
+  old hook-free alias; removed — `store-kit.ts:641`, `stores.ts:84`, asserted by
+  `store-kit.test.ts` TEST-6 and `stores.test.ts` TEST-4/TEST-10) → use
+  `X.$.field`. And the **global `Stores.X` proxy itself** (removed —
+  `stores.ts:337-342`; it forced every store to register eagerly, an
+  O(all-stores) boot cost) → import the store handle directly (the value
+  `registerLazyStore` returns); SDK-side code that must read an app store goes
+  through a typed seam (`createAppStoreSeam` — `get()` throws when uninjected,
+  `peek()` returns null for store-less chrome). A Biome grit guardrail
+  (`no-store-internal-state.grit`) bans `.__state` reintroduction; an app without
+  a biome config has only tsc as the backstop, so this rule is the gate.
+- 🔧 A getter method (`X.getFoo()`) does **not** subscribe — in render also
   read the reactive field or the component renders once empty and never updates.
 - 🏛 **Folder-per-store with LAZY actions is the store shape.** A store is a
-  DIRECTORY named for the store (`configClient/`), not a `*.store.ts` monolith:
+  DIRECTORY named for the store (`configClient/`), not a `*.store.ts` monolith
+  (ziee: 124 folder stores):
 
   ```
   <storeName>/
@@ -232,15 +260,45 @@ When adding/maintaining a built-in MCP server, **all** of:
                     # + registerLazyStore + the useXStore export
   ```
 
-  Each action becomes its OWN chunk (dynamic import), with `.preload()` on the
-  dispatcher to warm it on hover/intent; the store's eager half is state +
-  persist config only. Never hand-write an `actions: {…}` / `lazyActions: {…}`
+  Each action becomes its OWN chunk (dynamic import); the store's eager half is
+  state + persist config only. Each dispatcher carries `.preload()`, but do NOT
+  hand-wire prefetch calls — store-kit already warms action chunks on network-idle
+  + main-thread-idle. Never hand-write an `actions: {…}` / `lazyActions: {…}`
   map — the glob is the registration, and `sdk/packages/config/src/lint/
   store-actions.mjs` (wired as `check:store-actions` in `npm run check`) fails
-  the build on a drifted folder or a stale `actions.gen.ts`. Use the EAGER glob
-  (`{ eager: true }`) only for a store that must keep a SYNCHRONOUS selector.
-- 🔬 **Store lifecycle lives in `init`** (`init: ({ set, get, on, onCleanup, actions })`);
-  event/SSE subscriptions are registered there and torn down in `onCleanup`.
+  the build on a drifted folder or a stale `actions.gen.ts`. An action's runtime
+  name is its FILE BASENAME. Consequence to design for: **a lazy action is
+  async**, so `await` it wherever ordering is load-bearing.
+  **Two legitimate exits, and only two.** (a) A store with a genuinely
+  SYNCHRONOUS selector read in render uses the same folder with
+  `import.meta.glob('./actions/*.ts', { eager: true })` — signatures preserved
+  verbatim, no `Promise` wrapping (ziee has 4). (b) A **boot-critical** store,
+  eagerly imported before the first render, may stay a single file with an
+  inline `actions:` factory — deferring its actions would buy nothing (ziee keeps
+  10, `Auth` among them, at 940 lines). A large boot-critical store is not, by
+  itself, a defect. Everything else is a folder with lazy actions.
+- 🔬 **Store lifecycle lives in `init`** (`init: ({ set, get, on, onCleanup, actions })`),
+  which fires on FIRST PROXY ACCESS, not on registration; event/SSE
+  subscriptions are registered there and torn down in `onCleanup`.
+- 🔧 **`registerLazyStore` owns the name — never register it twice.** It builds
+  the proxy ONCE and self-registers it, so `stores: []` in `module.tsx` stays
+  empty. Listing a self-registered store there builds a SECOND proxy over one
+  zustand store: two ref counts, two `init` runs, two of every `sync:<entity>`
+  subscription, two refetches per remote change.
+- 📐 **Module DISCOVERY is not an eager glob.** `import.meta.glob('./**/module.tsx',
+  { eager: true })` is SUPERSEDED: it puts every module body in the entry chunk.
+  The current shape is a build-lifted module MANIFEST (`{ name, shouldLoad,
+  routePaths, dependencies }` extracted statically from each `module.tsx`) plus
+  per-module lazy `load()`, driven in waves — a boot wave of CORE modules,
+  reactive waves on login / permission grant / setup completion, and a
+  route-driven `ensureModuleForPath()` that never downloads an INELIGIBLE
+  module (so a user without a permission never receives that module's code).
+  Eligibility is the module's own `shouldLoad(ctx)`, statically lifted and
+  therefore restricted to `ctx` + the `Permissions` enum — gate on
+  `ctx.can(Permissions.X)`, never a literal permission string. The runtime half
+  (`isEligible`/`coreEntries`/`orderByDependencies`/`entryForPath`/
+  `ModuleLoadContext`) ships in the SDK's `module-system/`; the extraction
+  plugin is app-local and must be ported per app.
 - 📐 **No portal `setTimeout` DOM-ready hacks** — use ResizeObserver/
   IntersectionObserver/parent-provided readiness.
 
@@ -338,7 +396,7 @@ These convert the most-repeated findings into zero-effort gates:
 4. grep: `sqlx::query` inside `handlers.rs` (§9); `unwrap()/expect()` on
    DB/FS/env/HTTP results (§6); `let _ = .*delete` (§5/6).
 5. biome/eslint: `console.log`, hardcoded hex colors, `defaultValue` on
-   controlled antd, raw `fetch(` in modules, `Stores.<Other>` cross-module reads,
+   controlled antd, raw `fetch(` in modules, cross-module store-handle reads,
    `ziee-chat` strings (§12/13/9/17).
 6. CI-scoped diff check: new built-in MCP server → both `mcp.rs` edits present
    (§11); new mutation handler → `sync_publish` present (§7).

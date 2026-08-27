@@ -142,7 +142,7 @@ The goal: push as many ▢ as possible from `convention` → `lint`/`type`. Sect
 - 🏛 **New cross-device entity → add the `SyncEntity` variant first** (it
   auto-derives the `sync:<entity>` TS event key on next OpenAPI regen).
 - 🧪 **Every store showing mutable data subscribes to `sync:<entity>` +
-  `sync:reconnect`** in `__init__.__store__`, and **self-gates** the refetch with
+  `sync:reconnect`** in the store's `init` (via its `on(...)`), and **self-gates** the refetch with
   `hasPermissionNow(Permissions.X)` (no-403-on-reconnect).
 - 🔧 **Detached tasks emit with `origin: None`.**
 
@@ -209,11 +209,38 @@ When adding/maintaining a built-in MCP server, **all** of:
 
 ## 12. Frontend store / proxy discipline
 
-- 🔧 **Render** reads `Stores.X.field` (proxy getter, reactive). **Handlers/async**
-  read `Stores.X.__state.field` (the proxy calls hooks — illegal outside render).
+- 🔧 **Three reads, one rule.** In RENDER read `Stores.X.field` (the proxy getter
+  is a hook — reactive, render-only). In handlers/effects/async read
+  `Stores.X.$.field` (`$` is the hook-free snapshot). ACTIONS are safe anywhere —
+  `Stores.X.login()` needs no snapshot ceremony. The old `.__state` alias for `$`
+  was **REMOVED** from store-kit; a Biome guardrail bans its reintroduction, so
+  any `Stores.X.__state.field` still in a codebase is stale and must become `.$.`.
 - 🔧 A getter method (`Stores.X.getFoo()`) does **not** subscribe — in render also
   read the reactive field or the component renders once empty and never updates.
-- 🔬 **Every store declares `__init__`**; event/SSE subscriptions live there.
+- 🏛 **Folder-per-store with LAZY actions is the store shape.** A store is a
+  DIRECTORY named for the store (`configClient/`), not a `*.store.ts` monolith:
+
+  ```
+  <storeName>/
+    state.ts        # the data state object + `State`/`Set`/`Get` types
+    actions/<name>.ts   # ONE action per file, default-exporting
+                        #   (set, get) => (...args) => Promise<Ret>
+                        # `_`-prefixed files are internal helpers, never dispatched
+    actions.gen.ts  # GENERATED (`npm run gen:store-actions`) — the typed name→factory map
+    index.ts        # defineStore<State, Actions>(name, {
+                    #   state, actions: import.meta.glob('./actions/*.ts'), init })
+                    # + registerLazyStore + the useXStore export
+  ```
+
+  Each action becomes its OWN chunk (dynamic import), with `.preload()` on the
+  dispatcher to warm it on hover/intent; the store's eager half is state +
+  persist config only. Never hand-write an `actions: {…}` / `lazyActions: {…}`
+  map — the glob is the registration, and `sdk/packages/config/src/lint/
+  store-actions.mjs` (wired as `check:store-actions` in `npm run check`) fails
+  the build on a drifted folder or a stale `actions.gen.ts`. Use the EAGER glob
+  (`{ eager: true }`) only for a store that must keep a SYNCHRONOUS selector.
+- 🔬 **Store lifecycle lives in `init`** (`init: ({ set, get, on, onCleanup, actions })`);
+  event/SSE subscriptions are registered there and torn down in `onCleanup`.
 - 📐 **No portal `setTimeout` DOM-ready hacks** — use ResizeObserver/
   IntersectionObserver/parent-provided readiness.
 

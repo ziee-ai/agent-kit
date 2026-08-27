@@ -142,8 +142,11 @@ The goal: push as many ▢ as possible from `convention` → `lint`/`type`. Sect
 - 🏛 **New cross-device entity → add the `SyncEntity` variant first** (it
   auto-derives the `sync:<entity>` TS event key on next OpenAPI regen).
 - 🧪 **Every store showing mutable data subscribes to `sync:<entity>` +
-  `sync:reconnect`** in `__init__.__store__`, and **self-gates** the refetch with
-  `hasPermissionNow(Permissions.X)` (no-403-on-reconnect).
+  `sync:reconnect`** in its `init` (via the `on(...)` toolkit `init` receives —
+  the old `__init__.__store__` naming is gone), and **self-gates** the refetch
+  with `hasPermissionNow(Permissions.X)` (no-403-on-reconnect). If `init`'s
+  initial load is permission-gated, add the bootstrap-race re-trigger:
+  `watch(useAuthStore, () => hasPermissionNow(Permissions.X), (now, prev) => { if (now && !prev) void actions.load() })`.
 - 🔧 **Detached tasks emit with `origin: None`.**
 
 ## 8. Event emission
@@ -167,10 +170,12 @@ The goal: push as many ▢ as possible from `convention` → `lint`/`type`. Sect
 
 **Frontend**
 - 🔧 **Canonical module layout**: `types.ts`, `stores/`, `components/`,
-  `widgets/`, `events/`, `module.tsx`; every `*.store.ts` is registered in the
-  same commit (no dead module files).
-- 📐 **No cross-module store access.** Never read `Stores.<Other>.field` or
-  subscribe to another module's raw zustand hook. Communicate via the owning
+  `widgets/`, `events/`, `module.tsx`; every store is registered in the same
+  commit (no dead module files). A store is a **folder**
+  (`stores/<name>/{index,state,actions.gen}.ts` + `actions/`), not a file —
+  see `REACT_COMPONENT_PATTERNS.md` §9 and `META_FRAMEWORK_ARCHITECTURE.md` §2.2.
+- 📐 **No cross-module store access.** Never read another module's store handle
+  or subscribe to its raw zustand hook. Communicate via the owning
   module's exported actions + EventBus. Import only from a module's public barrel
   (`@/modules/<name>/module`), never its `core/`/`utils/`/components.
 - 🔧 **Cross-module UI via the slot system** (`settingsUserPages`,
@@ -209,29 +214,54 @@ When adding/maintaining a built-in MCP server, **all** of:
 
 ## 12. Frontend store / proxy discipline
 
-- 🔧 **Render** reads `Stores.X.field` (proxy getter, reactive). **Handlers/async**
-  read `Stores.X.__state.field` (the proxy calls hooks — illegal outside render).
-- 🔧 A getter method (`Stores.X.getFoo()`) does **not** subscribe — in render also
+> **CORRECTED.** The global `Stores.X` proxy and the `.__state` alias were both
+> **REMOVED** from the SDK (`sdk/packages/framework/src/stores.ts:337-342`,
+> `:84-85`). Import each store's handle directly — the value `registerLazyStore`
+> returns. Earlier revisions of this file taught `Stores.X.__state.field`; that
+> API does not exist.
+
+- 🔧 **Render** reads `X.field` (reactive; re-renders on change). **Handlers /
+  async / store `init` / module scope** read `X.$.field` — the `$` snapshot is
+  the only hook-free state read. A plain state read outside render throws
+  React's *Invalid hook call*.
+- 🔧 **Actions are hook-free on the proxy**: `X.doThing()` is callable anywhere.
+  Never `X.$.doThing()`.
+- 🔧 A getter method (`X.getFoo()`) does **not** subscribe — in render also
   read the reactive field or the component renders once empty and never updates.
-- 🔬 **Every store declares `__init__`**; event/SSE subscriptions live there.
+- 🔬 **Every store declares `init`**; event/SSE subscriptions live there (via the
+  `on`/`watch`/`onCleanup` toolkit `init` receives), never in a component
+  `useEffect`.
+- 🔧 **Register a store exactly once.** `registerLazyStore(...)` self-registers;
+  also listing it in a `module.tsx` `stores: [...]` array builds a second
+  lifecycle — two `init` runs, two of every `sync:` subscription.
 - 📐 **No portal `setTimeout` DOM-ready hacks** — use ResizeObserver/
   IntersectionObserver/parent-provided readiness.
 
 ## 13. UI/UX & accessibility
 
-- 🔬 **Semantic interactive elements** (`button`/`a`/antd `Button`) for clickables;
-  a `div onClick` needs role+keyboard handlers.
-- 🔬 **Always render `store.error`** (antd `Alert`/inline) — never `return null` on
-  error. **Always show loading** (`Spin`/`Skeleton`) on initial fetch. **Always
-  show success/error feedback** after a mutation (`message.*`).
-- 🔬 **Accessible names**: every control has a label (`Form.Item label`/`<label
-  htmlFor>`/`aria-label`); every page a `role=main`; nav landmarks set.
-- 🔧 **antd theme tokens** (`token.colorText`, …) — never hardcoded hex. No
-  CSS-`!important` hacks; no inline `e.currentTarget.style.*` for hover/focus (use
-  `:hover`/`:focus-visible`). Respect antd v6 deprecations (`Alert message`→
-  `title`, `closable={{closeIcon:true}}`, …).
-- 🔧 **Controlled antd controls** use `value`/`checked` (never `defaultValue`/
+> **CORRECTED.** This section was written in the antd era. **antd is gone** —
+> the reference app has zero `antd` imports and no `antd` dependency, and a
+> Biome rule rejects the import. UI comes from the kit (`@ziee/kit` /
+> `@/components/ui`). Ignore any antd-token or antd-deprecation guidance.
+
+- 🔬 **Semantic interactive elements** (kit `Button`/`Link`, or `button`/`a`) for
+  clickables; a `div onClick` needs role + keyboard handlers. Raw
+  `<button>/<input>/<select>/<textarea>` in app code is lint-rejected.
+- 🔬 **Always render `store.error`** (kit `ErrorState`/`Alert`/`Result`) — never
+  `return null` on error. **Always show loading** (`Spin`/`Spinner`) on initial
+  fetch, and an `Empty` for no rows. **Always show success/error feedback** after
+  a mutation (`message.*` from `@ziee/kit`).
+- 🔬 **Accessible names**: every control has a label (kit `FormField label` /
+  `<label htmlFor>` / `aria-label`); an icon-only `Button` needs `tooltip` or
+  `aria-label`; every page a `role=main`; nav landmarks set.
+- 🔧 **Semantic design tokens only** (`bg-background`, `text-muted-foreground`, …)
+  — never a raw hue, an arbitrary color value, or an inline `style` color. See
+  `DESIGN_SYSTEM.md`. No CSS-`!important` hacks; no inline
+  `e.currentTarget.style.*` for hover/focus (use `:hover`/`:focus-visible`).
+- 🔧 **Controlled kit controls** use `value`/`checked` (never `defaultValue`/
   `defaultChecked` in a controlled component).
+- 🔧 **`data-testid` is required** on kit functional/container/value/action
+  components and must be globally unique.
 - 🔧 **No `console.log`/`debug` in production** (only `console.error`/`warn`).
 
 ## 14. Testing requirements
@@ -310,9 +340,10 @@ These convert the most-repeated findings into zero-effort gates:
    struct (§3); handler `async fn` without `#[debug_handler]` (§10).
 4. grep: `sqlx::query` inside `handlers.rs` (§9); `unwrap()/expect()` on
    DB/FS/env/HTTP results (§6); `let _ = .*delete` (§5/6).
-5. biome/eslint: `console.log`, hardcoded hex colors, `defaultValue` on
-   controlled antd, raw `fetch(` in modules, `Stores.<Other>` cross-module reads,
-   `ziee-chat` strings (§12/13/9/17).
+5. biome/eslint: `console.log`, hardcoded hex colors, `defaultValue` on a
+   controlled kit control, raw `fetch(` in modules, cross-module store/component
+   imports (**no gate exists for this one today** — see
+   `REACT_COMPONENT_PATTERNS.md` §2), `ziee-chat` strings (§12/13/9/17).
 6. CI-scoped diff check: new built-in MCP server → both `mcp.rs` edits present
    (§11); new mutation handler → `sync_publish` present (§7).
 

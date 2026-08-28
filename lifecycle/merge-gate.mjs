@@ -28,8 +28,8 @@
 // child_process.
 
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, cpSync, rmSync, readdirSync, readFileSync, statSync, symlinkSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { existsSync, mkdtempSync, mkdirSync, cpSync, rmSync, readdirSync, readFileSync, statSync, symlinkSync, realpathSync, lstatSync } from 'node:fs';
+import { dirname, join, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 
 // ---------------------------------------------------------------------------
@@ -495,6 +495,105 @@ function makeStaging() {
 function stagingNote(msg) { process.stdout.write(`  · staging: ${msg}\n`); }
 function stagingWarn(msg) { process.stdout.write(`  ! staging: ${msg}\n`); }
 
+/**
+ * Mirror a dependency directory (`node_modules`) into staging as a REAL
+ * directory of symlinks, rather than one symlink to the whole thing.
+ *
+ * WHY NOT ONE SYMLINK: npm workspaces put a RELATIVE self-link in
+ * `node_modules` for every workspace package — `@app/ui -> ../../src-app/ui`.
+ * A relative link resolves against the directory it physically lives in, so if
+ * `staging/node_modules` is merely a symlink to the SOURCE repo's
+ * `node_modules`, that self-link resolves into the **source repo's** sources.
+ * The check then type-checks, lints and unit-tests the wrong tree — silently,
+ * and mostly GREEN, which is the worst possible failure for a gate. (Measured:
+ * `tsc` passed against the source tree and only `vitest` noticed.)
+ *
+ * So: every entry is symlinked individually; any symlink that points back into
+ * the SOURCE REPO but outside its `node_modules` is a workspace/self link and
+ * is re-pointed at the STAGING equivalent. Scope directories (`@foo`) are
+ * recursed into, because that is where npm puts scoped workspace links.
+ *
+ * Nothing is copied and nothing is hard-linked — a hard-link mirror would let a
+ * build writing into `node_modules/.cache` corrupt the source repo's tree.
+ */
+function mirrorDepDir(srcDir, dstDir) {
+  mkdirSync(dstDir, { recursive: true });
+  let count = 0;
+  for (const entry of readdirSync(srcDir, { withFileTypes: true })) {
+    const from = join(srcDir, entry.name);
+    const to = join(dstDir, entry.name);
+    if (entry.isSymbolicLink()) {
+      let real;
+      try { real = realpathSync(from); } catch { continue; }
+      symlinkSync(real, to, 'dir');
+      count++;
+      continue;
+    }
+    // A scope dir (@foo) can hold workspace links — recurse. Everything else is
+    // third-party and is linked whole.
+    if (entry.isDirectory() && entry.name.startsWith('@')) {
+      count += mirrorDepDir(from, to);
+      continue;
+    }
+    symlinkSync(from, to, entry.isDirectory() ? 'dir' : 'file');
+    count++;
+  }
+  return count;
+}
+
+/**
+ * Re-point every workspace package link inside staging's mirrored dep dir at
+ * STAGING's copy of that workspace.
+ *
+ * This is driven by the MERGED tree's declared `workspaces`, not by guessing
+ * from where a link happens to point — because the source repo's `node_modules`
+ * may itself be a symlink somewhere else entirely, in which case a workspace
+ * link's realpath lands in a THIRD tree. Measured exactly that: a worktree whose
+ * `node_modules` was symlinked from the main checkout resolved `@ziee/shell` to
+ * the MAIN CHECKOUT's sdk — pinned two bumps behind — so a gate running there
+ * graded the merged app against the wrong SDK and failed on a hook that the
+ * merged tree does have.
+ *
+ * Only packages the merged tree actually declares are re-pointed; everything
+ * else stays linked to the source's third-party copy, which is what makes this
+ * cheap.
+ */
+function repointWorkspaceLinks(depDir) {
+  let pkg;
+  try { pkg = JSON.parse(readFileSync(join(staging, 'package.json'), 'utf8')); } catch { return 0; }
+  const globs = Array.isArray(pkg.workspaces) ? pkg.workspaces : (pkg.workspaces?.packages ?? []);
+  const dirs = [];
+  for (const g of globs) {
+    if (g.endsWith('/*')) {
+      const base = g.slice(0, -2);
+      let kids = [];
+      try { kids = readdirSync(join(staging, base), { withFileTypes: true }); } catch { continue; }
+      for (const k of kids) if (k.isDirectory()) dirs.push(`${base}/${k.name}`);
+    } else dirs.push(g);
+  }
+  let n = 0;
+  for (const rel of dirs) {
+    let name;
+    try { name = JSON.parse(readFileSync(join(staging, rel, 'package.json'), 'utf8')).name; } catch { continue; }
+    if (!name) continue;
+    const link = join(depDir, ...name.split('/'));
+    // CORRECT an existing link; never CREATE one. npm hoists workspace links to
+    // the root `node_modules` only, so inventing them in a nested dep dir
+    // changes resolution semantics rather than preserving them — measured: it
+    // broke the regen gate, which had been passing.
+    if (!existsSync(dirname(link))) continue;
+    let already;
+    try { already = lstatSync(link).isSymbolicLink(); } catch { continue; }
+    if (!already) continue;
+    try {
+      rmSync(link, { recursive: true, force: true });
+      symlinkSync(join(staging, rel), link, 'dir');
+      n++;
+    } catch { /* leave the source link in place */ }
+  }
+  return n;
+}
+
 function provisionStaging() {
   // (a) submodules
   if (existsSync(join(staging, '.gitmodules'))) {
@@ -562,8 +661,9 @@ function provisionStaging() {
     try {
       mkdirSync(dirname(dst), { recursive: true });
       rmSync(dst, { recursive: true, force: true });
-      symlinkSync(src, dst, 'dir');
-      stagingNote(`linked gitignored dir "${rel}" into staging`);
+      const n = mirrorDepDir(src, dst);
+      const w = repointWorkspaceLinks(dst);
+      stagingNote(`mirrored gitignored dir "${rel}" into staging (${n} entr${n === 1 ? 'y' : 'ies'}; ${w} workspace package link(s) re-pointed at the merged tree)`);
     } catch (e) {
       stagingWarn(`could not link "${rel}" into staging: ${e.message}`);
     }

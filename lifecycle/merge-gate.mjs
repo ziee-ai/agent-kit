@@ -151,7 +151,12 @@ if (VERIFY_HEAD) {
     problems.push(`C5: ${rev} still carries .lifecycle/ process artifacts (${lc.out.trim().split(/\r?\n/).length} file(s)) — strip them (git rm -r .lifecycle) before landing on main.`);
 
   // C2: no duplicate migration number prefixes in the committed tree.
-  // Skipped when MERGE_MIGRATIONS_DIR is unset (app has no migrations dir).
+  // Unset MERGE_MIGRATIONS_DIR is only a legitimate skip when the tree really has no
+  // migrations — see probeMigrationFiles.
+  if (!MIGRATION_ROOTS.length) {
+    const p = unconfiguredMigrationProblem([rev]);
+    if (p) problems.push(p);
+  }
   if (MIGRATION_ROOTS.length) {
     const ml = gitTry(repo, 'ls-tree', '-r', '--name-only', rev, '--', ...MIGRATION_ROOTS);
     if (ml.ok) {
@@ -255,6 +260,39 @@ const mergeBase = git(repo, 'merge-base', base, branch);
 // ---------------------------------------------------------------------------
 // filename `00000000000135_create_x.sql` → number "00000000000135"
 // (MIGRATIONS_DIR is resolved from app.config near the top; null ⇒ no migrations.)
+// UNCONFIGURED-INPUT PROBE. `MERGE_MIGRATIONS_DIR` unset used to mean "this app has no
+// migrations" and C2 reported SKIP. That inference is wrong whenever the key is simply
+// MISSING from an app.config, which is the state comic shipped: eight (now fourteen)
+// migrations under `src-app/server/src/modules/*/migrations/` and a config comment
+// declaring the check skipped. The gate printed "no migrations dir" while the input it
+// could not find sat in the tree — the SECOND time C2 has been found inert.
+//
+// So do not take the config's word for it: look. A migration-shaped file anywhere in the
+// committed tree (`<digits6+>_<name>.sql`, matching what migsAt parses) with no configured
+// root is a MISCONFIGURATION, and a gate that cannot find its input must say so loudly
+// rather than skip. Only a tree with genuinely no migrations still SKIPs.
+function probeMigrationFiles(ref) {
+  const r = gitTry(repo, 'ls-tree', '-r', '--name-only', ref);
+  if (!r.ok) return [];
+  return r.out.split(/\r?\n/).map((l) => l.trim())
+    .filter((l) => l && /(?:^|\/)\d{6,}_[^/]*\.sql$/.test(l));
+}
+// The directories those files live in — the roots the app.config should have declared.
+function suggestMigrationRoots(files) {
+  const dirs = [...new Set(files.map((f) => f.slice(0, f.lastIndexOf('/'))))].sort();
+  // collapse `a/b/<mod>/migrations` siblings to their common parent when there are several
+  const parents = [...new Set(dirs.map((d) => d.split('/').slice(0, -2).join('/')).filter(Boolean))];
+  return dirs.length > 3 && parents.length === 1 ? parents : dirs;
+}
+function unconfiguredMigrationProblem(refs) {
+  const found = [...new Set(refs.flatMap((r) => probeMigrationFiles(r)))];
+  if (!found.length) return null;
+  return `C2: MERGE_MIGRATIONS_DIR is UNSET in .claude/app.config, but ${found.length} migration file(s) exist in the tree ` +
+    `(e.g. ${found.slice(0, 3).join(', ')}${found.length > 3 ? ', …' : ''}) — the collision check has no input and therefore checked nothing. ` +
+    `Set MERGE_MIGRATIONS_DIR (comma-separated roots; suggested: ${suggestMigrationRoots(found).join(',')}) and re-run. ` +
+    `A gate that cannot find its input must fail, not SKIP.`;
+}
+
 function migsAt(ref) {
   if (!MIGRATION_ROOTS.length) return new Map();
   // list migration files present in <ref>'s tree; tolerant of a root being absent
@@ -303,7 +341,12 @@ function gateC4() {
 // the BRANCH added must sort after main's max-at-fork (else it renumbers-needs).
 // ===========================================================================
 function gateC2() {
-  if (!MIGRATION_ROOTS.length) { record('C2', 'migration-collision', 'SKIP', 'MERGE_MIGRATIONS_DIR unset (no migrations dir configured)'); return; }
+  if (!MIGRATION_ROOTS.length) {
+    const p = unconfiguredMigrationProblem([branch, base]);
+    if (p) { record('C2', 'migration-collision', 'FAIL', p); return; }
+    record('C2', 'migration-collision', 'SKIP', 'MERGE_MIGRATIONS_DIR unset AND no migration-shaped file found on either ref (probed)');
+    return;
+  }
   const atMergeBase = migsAt(mergeBase);
   const atBase = migsAt(base);
   const atBranch = migsAt(branch);

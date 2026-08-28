@@ -20,22 +20,64 @@ import { join, resolve, dirname } from 'node:path';
 // ---------------------------------------------------------------------------
 // arg parsing
 // ---------------------------------------------------------------------------
-const args = process.argv.slice(2);
-function opt(name, def = undefined) {
-  const i = args.indexOf(name);
-  if (i === -1) return def;
-  const v = args[i + 1];
-  return v && !v.startsWith('--') ? v : true;
+// STRICT. Every recognised flag is listed here with whether it takes a value; anything else
+// — an unknown flag, a bare positional, a value-taking flag with no value — is a FATAL
+// usage error naming what was wrong and what is valid.
+//
+// WHY THIS IS STRICT AND NOT TOLERANT. The old parser was `args.indexOf(name)`: an
+// unrecognised flag was silently DROPPED, and so was its value. `--feature C9` (the real
+// flag is `--dir`) therefore did not select C9 — it left `--dir` unset, fell through to the
+// single-subdirectory auto-discovery, graded the EPIC root `.lifecycle/comizy-v1/` (which
+// holds no phase artifacts of its own), found all nine phases PENDING, and printed
+// `OK — phases 1..0 complete (0/9)` with exit 0. A merge agent read that as a pass. A gate
+// that grades the wrong directory on a typo is worse than no gate: it manufactures
+// evidence. Silent tolerance of an unknown flag is never a convenience here.
+const FLAG_SPEC = {
+  '--all': { value: false, help: 'grade all nine phases (whole feature)' },
+  // `--wip` — the MID-ROUND push gate. Same nine phases as `--all`, but the phase the branch
+  // is CURRENTLY WORKING may be in progress. See `runAll` for the frontier rule and why this
+  // is a separate flag rather than a loosening of `--all`.
+  '--wip': { value: false, help: 'mid-round push gate (the frontier phase may be in progress)' },
+  '--phase': { value: true, help: '<1-9>  grade exactly one phase' },
+  '--dir': { value: true, help: '<path>  the feature dir (default: the sole .lifecycle/<feature>)' },
+  '--base': { value: true, help: '<ref>  diff base (default: origin/main, else main)' },
+  '--repo': { value: true, help: '<path>  repo root (default: git rev-parse --show-toplevel)' },
+  '--scope': { value: true, help: '<name>  grade only this owner\'s scoped artifacts' },
+};
+function usageFail(msg) {
+  const lines = Object.entries(FLAG_SPEC).map(([f, s]) => `    ${f.padEnd(9)} ${s.help}`);
+  process.stderr.write(
+    `lifecycle-check: FATAL: ${msg}\n  valid flags:\n${lines.join('\n')}\n` +
+    `  usage: node lifecycle-check.mjs (--all | --wip | --phase <1-9>) [--dir <d>] [--base <ref>] [--repo <r>] [--scope <s>]\n`,
+  );
+  process.exit(2);
 }
-const wantAll = args.includes('--all');
-// `--wip` — the MID-ROUND push gate. Same nine phases as `--all`, but the phase the branch
-// is CURRENTLY WORKING may be in progress. See `runAll` for the frontier rule and why this
-// is a separate flag rather than a loosening of `--all`.
-const wantWip = args.includes('--wip');
-const phaseArg = opt('--phase');
-const baseArg = opt('--base'); // resolved after repo is known (default: origin/main if it exists)
-let dirArg = opt('--dir');
-let repoArg = opt('--repo');
+// `--k=v` is normalised to `--k v` first: the old parser matched flags by exact token, so
+// `--phase=5` was ALSO silently dropped — the same defect wearing different clothes.
+const args = [];
+for (const a of process.argv.slice(2)) {
+  const m = /^(--[A-Za-z][A-Za-z0-9-]*)=([\s\S]*)$/.exec(a);
+  if (m) args.push(m[1], m[2]);
+  else args.push(a);
+}
+const OPTS = Object.create(null);
+for (let i = 0; i < args.length; i++) {
+  const tok = args[i];
+  if (!tok.startsWith('--')) usageFail(`unexpected positional argument \`${tok}\` — every input is a named flag`);
+  const spec = FLAG_SPEC[tok];
+  if (!spec) usageFail(`unknown flag \`${tok}\``);
+  if (!spec.value) { OPTS[tok] = true; continue; }
+  const v = args[i + 1];
+  if (v === undefined || v.startsWith('--')) usageFail(`\`${tok}\` requires a value`);
+  OPTS[tok] = v;
+  i++;
+}
+const wantAll = OPTS['--all'] === true;
+const wantWip = OPTS['--wip'] === true;
+const phaseArg = OPTS['--phase'];
+const baseArg = OPTS['--base']; // resolved after repo is known (default: origin/main if it exists)
+let dirArg = OPTS['--dir'];
+let repoArg = OPTS['--repo'];
 // `--scope <name>` — evaluate only THIS owner's scoped artifacts (plus the UNSCOPED ones,
 // which belong to everybody), ignoring other owners'.
 //
@@ -51,7 +93,7 @@ let repoArg = opt('--repo');
 //
 // UNSCOPED files are deliberately KEPT in a scoped run: `DRIFT-1.md` predates the split and
 // is everyone's, so an owner must still gate on it. Only OTHER owners' scopes are dropped.
-const scopeArg = opt('--scope');
+const scopeArg = OPTS['--scope'];
 const SCOPE = typeof scopeArg === 'string' ? scopeArg : null;
 
 // ---------------------------------------------------------------------------
@@ -164,6 +206,42 @@ if (dirArg) {
   featureDir = join(lifecycleRoot, subs[0]);
 }
 if (!existsSync(featureDir)) fail(`feature dir not found: ${featureDir}`);
+if (!statSync(featureDir).isDirectory()) fail(`--dir is not a directory: ${featureDir}`);
+
+// The COMPLETE set of filenames any phase reads. Kept next to the emptiness check that
+// consumes it: adding a phase artifact without adding it here makes the check too strict,
+// which fails loudly, rather than too lax, which does not.
+const ARTIFACT_NAMES = [
+  'PLAN.md', 'PLAN_AUDIT.md', 'DESIGN_FIDELITY.md', 'TESTS.md', 'DECISIONS.md',
+  'LEDGER.jsonl', 'AUDIT_COVERAGE.tsv', 'TEST_RESULTS.md', 'HUMAN_FEEDBACK.md',
+];
+const ARTIFACT_SERIES = /^(?:DRIFT|FIX_ROUND)-(?:[a-z0-9]+-)?\d+\.md$/;
+function artifactsPresent(dir) {
+  let names;
+  try { names = readdirSync(dir); } catch { return []; }
+  return names.filter((f) => ARTIFACT_NAMES.includes(f) || ARTIFACT_SERIES.test(f));
+}
+// A directory that exists but holds NOT ONE lifecycle artifact is a MISDIRECTED run, not a
+// feature sitting at phase 0. Grading it produces nine PENDINGs and — before this — an
+// `OK — phases 1..0 complete (0/9)` with exit 0. Two real ways to land here: a typo'd or
+// stale `--dir`, and the auto-discovery picking an EPIC root (`.lifecycle/comizy-v1/`)
+// whose phase artifacts live one level down in per-item subdirectories. Both are errors
+// about the INVOCATION, so they are reported as fatal usage errors, not as a phase verdict.
+if (artifactsPresent(featureDir).length === 0) {
+  const subs = (() => {
+    try {
+      return readdirSync(featureDir).filter((d) => {
+        try { return statSync(join(featureDir, d)).isDirectory() && artifactsPresent(join(featureDir, d)).length > 0; }
+        catch { return false; }
+      });
+    } catch { return []; }
+  })();
+  fail(
+    `${featureDir} contains no lifecycle artifacts (none of ${ARTIFACT_NAMES.join(', ')}, DRIFT-<n>.md, FIX_ROUND-<n>.md) — ` +
+    `there is nothing here to grade, and grading nothing is not a pass.` +
+    (subs.length ? ` Its subdirectories DO carry artifacts (${subs.join(', ')}) — this looks like an EPIC root; pass --dir <that subdirectory>.` : ''),
+  );
+}
 
 // Resolve the diff base. Worktrees are cut from origin/main, and a stale local
 // `main` would inflate the diff with the whole upstream delta — so prefer
@@ -2190,6 +2268,19 @@ function runAll({ wip }) {
     process.exit(0);
   }
   const highest = phases.filter((r) => r.present).map((r) => r.n).pop() || 0;
+  // GRADING NOTHING IS NOT A PASS. `highest === 0` means every phase is PENDING: no
+  // artifact was found, so no gate actually ran, so the exit code carries no evidence.
+  // It used to print `OK — phases 1..0 complete (0/9)` and exit 0 — a green a merge agent
+  // read as "the lifecycle is satisfied". A PENDING phase legitimately does not fail a run
+  // (a branch mid-lifecycle must be pushable), but ALL NINE pending means the run was
+  // pointed somewhere with nothing in it, and the honest answer is a failure.
+  if (highest === 0) {
+    process.stderr.write(
+      `lifecycle-check: FAIL — every phase is PENDING in ${featureDir.replace(repo + '/', '')}: ` +
+      `no phase was graded, so this run proves nothing. Check --dir (and that the feature's artifacts are committed).\n`,
+    );
+    process.exit(1);
+  }
   process.stdout.write(`lifecycle-check: OK — phases 1..${highest} complete (${highest}/9).\n`);
   process.exit(0);
 }

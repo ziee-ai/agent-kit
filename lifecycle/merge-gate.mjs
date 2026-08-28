@@ -35,7 +35,46 @@ import { tmpdir } from 'node:os';
 // ---------------------------------------------------------------------------
 // arg parsing (mirrors lifecycle-check.mjs)
 // ---------------------------------------------------------------------------
-const argv = process.argv.slice(2);
+// STRICT, for the reason lifecycle-check.mjs is strict: `argv.indexOf(name)` DROPS an
+// unrecognised flag, and a gate that silently ignores half its instructions grades
+// something other than what it was asked to grade. Here the failure is quieter but real —
+// a typo'd `--verify-head` runs the full branch gate, a typo'd value flag leaves its bare
+// value to be mistaken for the branch name, and a misspelled `--skip-heavy` silently turns
+// a fast run into a slow one (or, the other way, a heavy gate into a skipped one).
+const VALUE_FLAGS = ['--repo', '--base', '--staging', '--max-behind', '--rev'];
+const BOOL_FLAGS = ['--skip-heavy', '--keep-staging', '--no-fetch', '--verify-head'];
+const argv = [];
+for (const a of process.argv.slice(2)) {
+  const m = /^(--[A-Za-z][A-Za-z0-9-]*)=([\s\S]*)$/.exec(a);
+  if (m) argv.push(m[1], m[2]);
+  else argv.push(a);
+}
+{
+  const positionals = [];
+  for (let i = 0; i < argv.length; i++) {
+    const tok = argv[i];
+    if (!tok.startsWith('--')) { positionals.push(tok); continue; }
+    if (VALUE_FLAGS.includes(tok)) {
+      const v = argv[i + 1];
+      if (v === undefined || v.startsWith('--')) {
+        process.stderr.write(`merge-gate: FATAL: \`${tok}\` requires a value\n`);
+        process.exit(2);
+      }
+      i++;
+      continue;
+    }
+    if (BOOL_FLAGS.includes(tok)) continue;
+    process.stderr.write(
+      `merge-gate: FATAL: unknown flag \`${tok}\`\n  valid: ${[...VALUE_FLAGS.map((f) => `${f} <value>`), ...BOOL_FLAGS].join(', ')}\n` +
+      `  usage: merge-gate.mjs <branch> [options]   |   merge-gate.mjs --verify-head [--rev <ref>]\n`,
+    );
+    process.exit(2);
+  }
+  if (positionals.length > 1) {
+    process.stderr.write(`merge-gate: FATAL: more than one branch argument (${positionals.join(', ')})\n`);
+    process.exit(2);
+  }
+}
 function opt(name, def = undefined) {
   const i = argv.indexOf(name);
   if (i === -1) return def;
@@ -43,9 +82,7 @@ function opt(name, def = undefined) {
   return v && !v.startsWith('--') ? v : true;
 }
 const flag = (name) => argv.includes(name);
-const branch = argv.find((a) => !a.startsWith('--') && argv[argv.indexOf(a) - 1] !== '--repo'
-  && argv[argv.indexOf(a) - 1] !== '--base' && argv[argv.indexOf(a) - 1] !== '--staging'
-  && argv[argv.indexOf(a) - 1] !== '--max-behind');
+const branch = argv.find((a, i) => !a.startsWith('--') && !VALUE_FLAGS.includes(argv[i - 1]));
 
 const SKIP_HEAVY = flag('--skip-heavy');
 const KEEP_STAGING = flag('--keep-staging');

@@ -1851,5 +1851,28 @@ lc 1 "invocation: --wip is bound by the same all-PENDING rule" --wip --repo "$IV
 lc 1 "invocation: --wip rejects an unknown flag too" --wip --repo "$IV" --feature ITEM-1 --base main
 rm -rf "$IV"
 
+
+# --- merge-gate + epic-check: the same strict-flag rule ------------------------
+# `argv.indexOf(name)` drops an unrecognised flag in EVERY one of these gates. It is
+# loudest in lifecycle-check (it manufactured a 0/9 green), but a merge-gate run with a
+# typo'd `--verify-head` silently becomes a full branch gate, and a typo'd value flag
+# leaves its bare value to be read as the branch name.
+R="$(new_repo)"; CLEANUP+=("$R")
+git -C "$R" checkout -q -b feat/x; echo hi > "$R/f.txt"
+git -C "$R" add -A && git -C "$R" commit -qm x
+assert_exit_cmd 1 "merge-gate: an unknown flag is fatal, not dropped" -- \
+  node "$MG" feat/x --repo "$R" --base main --no-fetch --skip-heavy --feature C9
+assert_exit_cmd 1 "merge-gate: a value-taking flag with no value is fatal" -- \
+  node "$MG" feat/x --repo "$R" --base main --no-fetch --skip-heavy --rev
+assert_exit_cmd 0 "merge-gate CONTROL: the same run without the bogus flag is unchanged" -- \
+  node "$MG" feat/x --repo "$R" --base main --no-fetch --skip-heavy
+assert_exit_cmd 0 "merge-gate: --k=v is honoured, not dropped" -- \
+  node "$MG" feat/x "--repo=$R" "--base=main" --no-fetch --skip-heavy
+
+EPIC_CHECK="$HERE/epic-check.mjs"
+assert_exit_cmd 1 "epic-check: an unknown flag is fatal" -- node "$EPIC_CHECK" --phase 0 --epic e --repo "$R" --feature C9
+assert_exit_cmd 1 "epic-check: a bare positional is fatal" -- node "$EPIC_CHECK" --phase 0 --epic e --repo "$R" C9
+assert_exit_cmd 1 "epic-check CONTROL: a missing epic still fails on its own merits" -- node "$EPIC_CHECK" --phase 0 --epic e --repo "$R"
+
 echo "== $PASS passed, $FAIL failed =="
 [ "$FAIL" -eq 0 ]

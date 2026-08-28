@@ -8,7 +8,34 @@
 import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
-const arg = (f) => { const i = process.argv.indexOf(f); return i >= 0 ? process.argv[i + 1] : null; };
+// STRICT arg parsing, for the same reason lifecycle-check.mjs is strict: `indexOf` drops
+// an unrecognised flag silently, and a gate must never grade something other than what it
+// was asked to grade. `--k=v` is normalised rather than ignored.
+const ARGV = [];
+for (const a of process.argv.slice(2)) {
+  const m = /^(--[A-Za-z][A-Za-z0-9-]*)=([\s\S]*)$/.exec(a);
+  if (m) ARGV.push(m[1], m[2]);
+  else ARGV.push(a);
+}
+const VALUE_FLAGS = ['--phase', '--epic', '--repo'];
+for (let i = 0; i < ARGV.length; i++) {
+  const tok = ARGV[i];
+  if (!tok.startsWith('--')) {
+    console.error(`epic-check: FATAL: unexpected positional argument \`${tok}\`\n  usage: epic-check.mjs --phase <0-4> --epic <slug> --repo <root>`);
+    process.exit(2);
+  }
+  if (!VALUE_FLAGS.includes(tok)) {
+    console.error(`epic-check: FATAL: unknown flag \`${tok}\`\n  valid: ${VALUE_FLAGS.join(', ')}\n  usage: epic-check.mjs --phase <0-4> --epic <slug> --repo <root>`);
+    process.exit(2);
+  }
+  const v = ARGV[i + 1];
+  if (v === undefined || v.startsWith('--')) {
+    console.error(`epic-check: FATAL: \`${tok}\` requires a value`);
+    process.exit(2);
+  }
+  i++;
+}
+const arg = (f) => { const i = ARGV.indexOf(f); return i >= 0 ? ARGV[i + 1] : null; };
 const phase = parseInt(arg('--phase') ?? '-1', 10);
 const epic = arg('--epic');
 const repo = arg('--repo') ?? process.cwd();

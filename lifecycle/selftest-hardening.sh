@@ -1090,8 +1090,31 @@ echo 'all:' > "$GOOD/src-app/server/vendor/pgvector/Makefile"
 # a real repo always ships config/dev.example.yaml; check #7 auto-seeds dev.yaml from it.
 printf 'jwt:\n  secret: "dev-secret-change-in-production-min-32-chars-long"\n' \
   > "$GOOD/src-app/server/config/dev.example.yaml"
+# "fully provisioned" now includes the agent pre-push hook (preflight §8): both
+# lifecycle-check --wip and merge-gate --verify-head are invoked by nothing until
+# install-agent-hooks.sh has run in the clone, which is a per-clone action a
+# fresh checkout has NOT performed.
+INSTALL_HOOKS="$(cd "$(dirname "$PREFLIGHT")/../scripts" && pwd)/install-agent-hooks.sh"
+(cd "$GOOD" && bash "$INSTALL_HOOKS" >/dev/null 2>&1)
 assert_exit_cmd 0 "preflight: fully-provisioned env passes" -- \
   env -u DATABASE_URL -u ZIEE_BUILD_DB_PERWORKTREE bash "$PREFLIGHT" --repo "$GOOD"
+
+# and the NEW §8 case: the same fully-provisioned repo, hook REMOVED, is refused.
+rm -f "$GOOD/.git/hooks/pre-push"
+assert_exit_cmd 1 "preflight §8: a clone with NO pre-push hook is REFUSED" -- \
+  env -u DATABASE_URL -u ZIEE_BUILD_DB_PERWORKTREE bash "$PREFLIGHT" --repo "$GOOD"
+# a hook that exists but does not invoke merge-gate is equally inert.
+printf '#!/usr/bin/env bash\nexit 0\n' > "$GOOD/.git/hooks/pre-push"
+chmod +x "$GOOD/.git/hooks/pre-push"
+assert_exit_cmd 1 "preflight §8: a pre-push hook that never calls merge-gate is REFUSED" -- \
+  env -u DATABASE_URL -u ZIEE_BUILD_DB_PERWORKTREE bash "$PREFLIGHT" --repo "$GOOD"
+# a correct hook that is NOT EXECUTABLE — git skips it silently.
+printf '#!/usr/bin/env bash\nnode "$TOP/.claude/lifecycle/merge-gate.mjs" --verify-head\n' \
+  > "$GOOD/.git/hooks/pre-push"
+chmod -x "$GOOD/.git/hooks/pre-push"
+assert_exit_cmd 1 "preflight §8: a non-executable pre-push hook is REFUSED" -- \
+  env -u DATABASE_URL -u ZIEE_BUILD_DB_PERWORKTREE bash "$PREFLIGHT" --repo "$GOOD"
+chmod +x "$GOOD/.git/hooks/pre-push"
 
 # bad: hub-seed missing (build.rs would PANIC) — app.config present so the seed
 # + node_modules checks are ACTIVE and fail.
@@ -1104,7 +1127,10 @@ assert_exit_cmd 1 "preflight: missing hub-seed/node_modules is REFUSED" -- \
 # the gate exits 0 on the generic checks only (a fresh app pre-app.config is not
 # hard-blocked by ziee's server prerequisites).
 NOCFG="$(new_repo)"; CLEANUP+=("$NOCFG")
-assert_exit_cmd 0 "preflight: NO app.config ⇒ generic-only, exit 0" -- \
+# §8 is app.config-INDEPENDENT (the hook is lifecycle infrastructure, not an app
+# prerequisite), so this fixture needs one too for the "generic-only" claim to
+# be about the app-specific checks.
+(cd "$NOCFG" && bash "$INSTALL_HOOKS" >/dev/null 2>&1)
   env -u DATABASE_URL -u ZIEE_BUILD_DB_PERWORKTREE bash "$PREFLIGHT" --repo "$NOCFG"
 
 # SECURITY regression: a malicious PREFLIGHT_BUILD_DB_ENV must be rejected before

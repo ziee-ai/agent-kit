@@ -317,7 +317,13 @@ HOOKS_DIR="$(git -C "$REPO" config --get core.hooksPath 2>/dev/null)"
 if [ -n "$HOOKS_DIR" ]; then
   case "$HOOKS_DIR" in /*) : ;; *) HOOKS_DIR="$REPO/$HOOKS_DIR" ;; esac
 else
-  HOOKS_DIR="$(git -C "$REPO" rev-parse --git-common-dir 2>/dev/null)/hooks"
+  # `git -C <dir> rev-parse --git-common-dir` returns a path relative to <dir>
+  # (plain ".git" in an ordinary clone), NOT to the caller's cwd — resolving it
+  # against the wrong directory is how this check reported a missing hook in a
+  # repo that had one.
+  HOOKS_DIR="$(git -C "$REPO" rev-parse --git-common-dir 2>/dev/null)"
+  case "$HOOKS_DIR" in /*) : ;; *) HOOKS_DIR="$REPO/$HOOKS_DIR" ;; esac
+  HOOKS_DIR="$HOOKS_DIR/hooks"
 fi
 INSTALLER="$(cd "$(dirname "$0")/../scripts" 2>/dev/null && pwd)/install-agent-hooks.sh"
 [ -f "$INSTALLER" ] || INSTALLER="$REPO/agent-kit/scripts/install-agent-hooks.sh"

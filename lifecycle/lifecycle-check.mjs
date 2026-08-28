@@ -343,6 +343,15 @@ const RE_INV = /^-\s*\*\*(INV-[A-Za-z0-9._-]+)\*\*\s*:\s*(.+?)\s*$/;
 // TEST acceptance/invariant tags:  [acceptance]  and  [invariant: INV-1, INV-2]
 const RE_TEST_ACCEPTANCE = /\[\s*acceptance\s*\]/i;
 const RE_TEST_INVARIANT = /\[\s*invariant\s*:\s*([^\]]+)\]/i;
+// STANDING-GATE tag: a `[standing-gate]` marker means "this TEST asserts that the
+// branch's code passes a STANDING repo-wide gate (domain-lint / positional-lint /
+// openapi-regen, run by `npm run check` / `gate:ui`) — NOT a branch-authored
+// test file." Such an entry is exempt from A11's branch-authorship requirement
+// and its phase-8 result-requirement is discharged by a recorded green standing
+// gate — but ONLY when that gate line is actually present (see
+// `standingGatePassPresent`), and NEVER on an [acceptance] design-invariant test
+// (an invariant must be branch-proven; the two tags are mutually exclusive).
+const RE_TEST_STANDING_GATE = /\[\s*standing-gate\s*\]/i;
 // DESIGN_FIDELITY line:  - **INV-1** — fidelity: UPHELD|AT-RISK|DROPPED — <how>
 const RE_FIDELITY = /^-\s*\*\*(INV-[A-Za-z0-9._-]+)\*\*.*?fidelity\s*:\s*(UPHELD|AT-RISK|DROPPED)\b(.*)$/i;
 // A10 restricted-user tag: a `[negative-perm]` marker on a `tier: e2e` test line
@@ -454,9 +463,10 @@ function parseTests() {
     const negPerm = RE_TEST_NEGPERM.test(ln);
     const posControl = RE_TEST_POSCONTROL.test(ln) || RE_POSCONTROL_PROSE.test(asserts || '');
     const acceptance = RE_TEST_ACCEPTANCE.test(ln);
+    const standingGate = RE_TEST_STANDING_GATE.test(ln);
     const invRaw = (RE_TEST_INVARIANT.exec(ln) || [])[1] || '';
     const invariants = invRaw.split(/[,\s]+/).map((s) => s.trim()).filter((s) => /^INV-/.test(s));
-    tests.push({ id: idm[1], tier, covers, file: file && file.trim(), asserts: asserts && asserts.trim(), negPerm, posControl, acceptance, invariants, line: ln });
+    tests.push({ id: idm[1], tier, covers, file: file && file.trim(), asserts: asserts && asserts.trim(), negPerm, posControl, acceptance, standingGate, invariants, line: ln });
   }
   return tests;
 }
@@ -503,6 +513,70 @@ function parseApprovedDescopes() {
     if (m) (RE_DESCOPE_APPROVED.test(m[2]) ? approved : unapproved).add(m[1]);
   }
   return { approved, unapproved };
+}
+// The set of PLAN ITEMs that are BOTH marked [DESCOPED] in PLAN.md AND carry an
+// approved `- DESCOPED: ITEM-N … [approved: …]` disposition in DECISIONS.md —
+// i.e. the FULL FB-7 approval chain. This is the SOLE key that unlocks the
+// approved-test-descope exemptions (A5 shrink-guard + phase-8 result-requirement):
+// an item [DESCOPED] without recorded approval, or approved without the PLAN
+// marker, is NOT in this set, so a descope missing either half trips the gates
+// exactly as before.
+function approvedDescopedItems() {
+  const descoped = parseDescopedPlanItems();
+  const { approved } = parseApprovedDescopes();
+  const s = new Set();
+  for (const id of descoped) if (approved.has(id)) s.add(id);
+  return s;
+}
+// The covering ITEMs declared for each TEST-ID in a raw TESTS.md blob (used to
+// resolve a REMOVED test's covering item from a PRIOR committed TESTS.md, since
+// the current TESTS.md no longer carries the removed entry). Unions covers across
+// duplicate lines; a test with no parseable `[covers: …]` maps to an empty set
+// (→ NOT exempt, fail-closed).
+function testCoversIn(text) {
+  const m = new Map();
+  if (!text) return m;
+  for (const ln of text.split(/\r?\n/)) {
+    if (!/^\s*-\s/.test(ln)) continue;
+    const idm = RE_TEST_ID.exec(ln);
+    if (!idm) continue;
+    const coversRaw = (RE_TEST_COVERS.exec(ln) || [])[1] || '';
+    const covers = coversRaw.split(/[,\s]+/).map((s) => s.trim()).filter((s) => /^ITEM-/.test(s));
+    const prev = m.get(idm[1]) || new Set();
+    for (const c of covers) prev.add(c);
+    m.set(idm[1], prev);
+  }
+  return m;
+}
+// TEST-ID → covering ITEMs, unioned across EVERY earlier committed TESTS.md on
+// this branch (the same history the A5 shrink-guard walks). Lets A5 read a
+// removed test's prior-declared covering item to decide the descope exemption.
+function priorTestCovers() {
+  const rel = testsRelPath();
+  let commits = [];
+  try { commits = git(repo, 'log', '--format=%H', '--', rel).split(/\r?\n/).filter(Boolean); }
+  catch { return new Map(); }
+  const union = new Map();
+  for (const c of commits.slice(1)) {
+    let blob = '';
+    try { blob = git(repo, 'show', `${c}:${rel}`); } catch { continue; }
+    for (const [id, items] of testCoversIn(blob)) {
+      const prev = union.get(id) || new Set();
+      for (const it of items) prev.add(it);
+      union.set(id, prev);
+    }
+  }
+  return union;
+}
+// A STANDING-GATE assertion is discharged only by a recorded GREEN standing gate:
+// a `npm run check (<ws>): PASS` or `gate:ui (<ws>): PASS` line in TEST_RESULTS.md.
+// The comparative A7 form ("gate:ui (ui): branch N vs base M") carries no PASS
+// token and deliberately does NOT satisfy this — a standing-gate test needs the
+// gate actually green, not merely "no worse than base".
+const RE_STANDING_GATE_PASS = /(?:npm run check|gate:ui)\s*\(\s*[A-Za-z0-9._/\- ]+?\s*\)\s*:?\s*.*?\bPASS\b/i;
+function standingGatePassPresent(text) {
+  for (const ln of String(text || '').split(/\r?\n/)) if (RE_STANDING_GATE_PASS.test(ln)) return true;
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -953,9 +1027,31 @@ function checkA5() {
   const prior = priorTestIds();
   if (!prior || prior.size === 0) return [];
   const now = testIdsIn(cur);
-  const vanished = [...prior].filter((id) => !now.has(id));
+  let vanished = [...prior].filter((id) => !now.has(id));
+  // EXEMPTION — an owner-APPROVED test descope. A removed test is exempt iff its
+  // PRIOR-declared covering item(s) are ALL, in the CURRENT PLAN/DECISIONS, in the
+  // full FB-7 approval chain ([DESCOPED] in PLAN.md + approved DECISIONS
+  // disposition). This mirrors FB-7 exactly: an approved descope may drop its
+  // tests. Fail-closed everywhere the chain is incomplete — a removed test whose
+  // prior covering item cannot be determined, or whose item is not [DESCOPED],
+  // or is descoped WITHOUT approval, still trips A5 (the item is not in
+  // `approvedDescopedItems`). A5 compares against a PRIOR TESTS.md, so the removed
+  // test's covering item is read from that prior entry, then checked against the
+  // CURRENT PLAN/DECISIONS.
+  if (vanished.length) {
+    const approvedDescoped = approvedDescopedItems();
+    if (approvedDescoped.size) {
+      const priorCovers = priorTestCovers();
+      vanished = vanished.filter((id) => {
+        const covers = priorCovers.get(id);
+        if (!covers || covers.size === 0) return true; // covers undeterminable → NOT exempt
+        for (const c of covers) if (!approvedDescoped.has(c)) return true; // any non-approved-descoped cover → NOT exempt
+        return false; // every covering item is approved-descoped → exempt (drop from vanished)
+      });
+    }
+  }
   if (vanished.length)
-    return [`A5: TESTS.md dropped ${vanished.length} previously-enumerated test(s) (${vanished.slice(0, 8).join(', ')}) — do not shrink the test plan to pass; re-add or justify each in an amend.`];
+    return [`A5: TESTS.md dropped ${vanished.length} previously-enumerated test(s) (${vanished.slice(0, 8).join(', ')}) — do not shrink the test plan to pass; re-add or justify each in an amend (or, for an owner-approved descope, mark the covered item [DESCOPED] in PLAN.md with an approved DECISIONS disposition, FB-7).`];
   return [];
 }
 
@@ -1044,8 +1140,19 @@ function checkA11(results) {
     // still names a real file this branch touched.
     return touched.some((p) => p === f || p.endsWith(`/${f}`) || f.endsWith(`/${p}`));
   };
+  // STANDING-GATE disposition. A `[standing-gate]` entry asserts that the branch's
+  // code passes a STANDING repo-wide gate (domain-lint / positional-lint /
+  // openapi-regen, run by `npm run check` / `gate:ui`) — proven by the tool, not a
+  // branch-authored test — so it is exempt from the branch-authorship requirement.
+  // But the exemption is HARD-GATED: it applies ONLY when a green standing-gate
+  // line is actually recorded in TEST_RESULTS.md, and NEVER to an [acceptance]
+  // design-invariant test (which must be branch-proven). Without the green line, or
+  // on an [acceptance] test, the tag grants nothing and A11 fires exactly as
+  // before — a `[standing-gate]` tag cannot let a real feature test dodge A11.
+  const standingOk = standingGatePassPresent(read('TEST_RESULTS.md') || '');
+  const standingExempt = (t) => !!t.standingGate && !t.acceptance && standingOk;
   const unearned = tests
-    .filter((t) => results.get(t.id) === 'PASS' && !cited.has(t.id) && !wroteDeclaredFile(t))
+    .filter((t) => results.get(t.id) === 'PASS' && !cited.has(t.id) && !wroteDeclaredFile(t) && !standingExempt(t))
     .map((t) => ({ id: t.id, acceptance: !!t.acceptance, invariants: t.invariants ?? [] }));
   if (unearned.length === 0) return [];
   const g = [];
@@ -1406,6 +1513,8 @@ function phase3() {
   const invs = parseInvariants();
   const invCovered = new Set();
   for (const t of tests) {
+    if (t.standingGate && t.acceptance)
+      g.push(`TESTS.md: ${t.id} is tagged BOTH [standing-gate] and [acceptance] — mutually exclusive. An [acceptance] test proves a design invariant and must be branch-authored + branch-run; a standing repo-wide gate cannot discharge it. Drop one tag.`);
     if (t.acceptance && t.invariants.length === 0)
       g.push(`TESTS.md: ${t.id} is tagged [acceptance] but names no [invariant: INV-N] — an acceptance test must pin a specific design invariant.`);
     if (!t.acceptance && t.invariants.length > 0)
@@ -2051,7 +2160,26 @@ function phase8() {
     const r = results.get(at.id);
     if (r !== 'PASS') g.push(`TEST_RESULTS.md: acceptance test ${at.id} (design invariant ${at.invariants.join(', ') || '?'}) is ${r || 'missing'}, not PASS — a design invariant is unproven; run it and record PASS.`);
   }
+  // The per-test result-requirement, with the two honest-green dispositions:
+  //   · STANDING-GATE (non-acceptance): discharged by a recorded green standing
+  //     gate line (`npm run check (<ws>): PASS` / `gate:ui (<ws>): PASS`) — the
+  //     assertion IS "the standing gate is green". HARD-GATED: absent that line it
+  //     FAILS, even if a bare `TEST-N: PASS` was written. [acceptance] never
+  //     qualifies (rejected at phase 3; must be branch-proven).
+  //   · APPROVED TEST-DESCOPE: a KEPT-enumerated test whose covering item(s) are
+  //     ALL in the full FB-7 approval chain needs no PASS — the item was cut with
+  //     recorded owner sign-off. Fail-closed: any non-approved-descoped cover (or
+  //     an [acceptance] tag) keeps the PASS requirement.
+  const standingResultOk = standingGatePassPresent(t);
+  const approvedDescoped = approvedDescopedItems();
   for (const test of tests) {
+    if (test.standingGate && !test.acceptance) {
+      if (!standingResultOk)
+        g.push(`TEST_RESULTS.md: ${test.id} is tagged [standing-gate] but no green standing-gate line ("npm run check (<ws>): PASS" / "gate:ui (<ws>): PASS") is recorded — a standing-gate assertion is proven ONLY by the recorded green gate. Run it and record the PASS line, or bind ${test.id} to a real test this branch added and run it.`);
+      continue;
+    }
+    if (!test.acceptance && test.covers.length > 0 && test.covers.every((c) => approvedDescoped.has(c)))
+      continue; // approved test-descope kept enumerated → no PASS required
     const r = results.get(test.id);
     if (!r) g.push(`TEST_RESULTS.md: ${test.id} (from TESTS.md) has no result line`);
     else if (r !== 'PASS') g.push(`TEST_RESULTS.md: ${test.id} is ${r}, not PASS`);

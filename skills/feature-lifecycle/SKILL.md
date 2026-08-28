@@ -16,7 +16,7 @@ A phase state machine. **You may not enter phase N+1 until the validator passes
 phase N:**
 
 ```bash
-node .claude/lifecycle/lifecycle-check.mjs --phase <N> --repo <worktree-root>
+node .claude/lifecycle/lifecycle-check.mjs --phase <N> --repo <worktree-root> --dir <feature-dir>
 # exit 0 → proceed.  non-zero → read the gap list, fix, re-run.
 ```
 
@@ -32,6 +32,15 @@ branch, never merged to main without sign-off, so a backup push
 (`git push --no-verify -u origin feat/<slug>`) is correct: the pre-push gate exists
 to block *merges to main*, not backup pushes of in-progress branches. Re-push after
 each round of work so the backup stays current.
+
+**PASS `--dir` WHENEVER THE REPO IS RUNNING AN EPIC.** `--dir` may be omitted only
+when `.lifecycle/` holds exactly one directory and that directory holds the phase
+artifacts. Under `epic-lifecycle` the layout is `.lifecycle/<epic>/<item>/`, so the
+sole subdirectory is the EPIC ROOT — it holds `GRAPH.md`/`RECONCILE.md`, not
+`PLAN.md` — and a `--dir`-less run grades the wrong directory. It used to grade it
+silently and report `OK — phases 1..0 complete (0/9)` with exit 0; it now refuses
+and tells you to pass `--dir`. Unknown flags are likewise fatal (`--feature` is not
+a flag), so a typo can no longer be dropped in favour of auto-discovery.
 
 Work in a dedicated worktree off `origin/main`:
 
@@ -1255,7 +1264,9 @@ shell in this dir POSIX-portable (no GNU-only flags; guard Unix-only tools with
 ## Finishing
 
 ```bash
-node .claude/lifecycle/lifecycle-check.mjs --all --repo <worktree-root>   # must be all-green
+node .claude/lifecycle/lifecycle-check.mjs --all --repo <worktree-root> --dir <feature-dir>  # must be all-green
+# Read the LAST line: `phases 1..9 complete (9/9)`. Anything less than 9/9 is not done,
+# and `(0/9)` means it graded a directory with no artifacts in it (it now fails instead).
 git add -A && git commit && git push        # pre-push hook runs --wip
 ```
 

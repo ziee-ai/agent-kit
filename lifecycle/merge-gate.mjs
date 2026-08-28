@@ -35,7 +35,46 @@ import { tmpdir } from 'node:os';
 // ---------------------------------------------------------------------------
 // arg parsing (mirrors lifecycle-check.mjs)
 // ---------------------------------------------------------------------------
-const argv = process.argv.slice(2);
+// STRICT, for the reason lifecycle-check.mjs is strict: `argv.indexOf(name)` DROPS an
+// unrecognised flag, and a gate that silently ignores half its instructions grades
+// something other than what it was asked to grade. Here the failure is quieter but real —
+// a typo'd `--verify-head` runs the full branch gate, a typo'd value flag leaves its bare
+// value to be mistaken for the branch name, and a misspelled `--skip-heavy` silently turns
+// a fast run into a slow one (or, the other way, a heavy gate into a skipped one).
+const VALUE_FLAGS = ['--repo', '--base', '--staging', '--max-behind', '--rev'];
+const BOOL_FLAGS = ['--skip-heavy', '--keep-staging', '--no-fetch', '--verify-head'];
+const argv = [];
+for (const a of process.argv.slice(2)) {
+  const m = /^(--[A-Za-z][A-Za-z0-9-]*)=([\s\S]*)$/.exec(a);
+  if (m) argv.push(m[1], m[2]);
+  else argv.push(a);
+}
+{
+  const positionals = [];
+  for (let i = 0; i < argv.length; i++) {
+    const tok = argv[i];
+    if (!tok.startsWith('--')) { positionals.push(tok); continue; }
+    if (VALUE_FLAGS.includes(tok)) {
+      const v = argv[i + 1];
+      if (v === undefined || v.startsWith('--')) {
+        process.stderr.write(`merge-gate: FATAL: \`${tok}\` requires a value\n`);
+        process.exit(2);
+      }
+      i++;
+      continue;
+    }
+    if (BOOL_FLAGS.includes(tok)) continue;
+    process.stderr.write(
+      `merge-gate: FATAL: unknown flag \`${tok}\`\n  valid: ${[...VALUE_FLAGS.map((f) => `${f} <value>`), ...BOOL_FLAGS].join(', ')}\n` +
+      `  usage: merge-gate.mjs <branch> [options]   |   merge-gate.mjs --verify-head [--rev <ref>]\n`,
+    );
+    process.exit(2);
+  }
+  if (positionals.length > 1) {
+    process.stderr.write(`merge-gate: FATAL: more than one branch argument (${positionals.join(', ')})\n`);
+    process.exit(2);
+  }
+}
 function opt(name, def = undefined) {
   const i = argv.indexOf(name);
   if (i === -1) return def;
@@ -43,9 +82,7 @@ function opt(name, def = undefined) {
   return v && !v.startsWith('--') ? v : true;
 }
 const flag = (name) => argv.includes(name);
-const branch = argv.find((a) => !a.startsWith('--') && argv[argv.indexOf(a) - 1] !== '--repo'
-  && argv[argv.indexOf(a) - 1] !== '--base' && argv[argv.indexOf(a) - 1] !== '--staging'
-  && argv[argv.indexOf(a) - 1] !== '--max-behind');
+const branch = argv.find((a, i) => !a.startsWith('--') && !VALUE_FLAGS.includes(argv[i - 1]));
 
 const SKIP_HEAVY = flag('--skip-heavy');
 const KEEP_STAGING = flag('--keep-staging');
@@ -151,7 +188,12 @@ if (VERIFY_HEAD) {
     problems.push(`C5: ${rev} still carries .lifecycle/ process artifacts (${lc.out.trim().split(/\r?\n/).length} file(s)) — strip them (git rm -r .lifecycle) before landing on main.`);
 
   // C2: no duplicate migration number prefixes in the committed tree.
-  // Skipped when MERGE_MIGRATIONS_DIR is unset (app has no migrations dir).
+  // Unset MERGE_MIGRATIONS_DIR is only a legitimate skip when the tree really has no
+  // migrations — see probeMigrationFiles.
+  if (!MIGRATION_ROOTS.length) {
+    const p = unconfiguredMigrationProblem([rev]);
+    if (p) problems.push(p);
+  }
   if (MIGRATION_ROOTS.length) {
     const ml = gitTry(repo, 'ls-tree', '-r', '--name-only', rev, '--', ...MIGRATION_ROOTS);
     if (ml.ok) {
@@ -255,6 +297,39 @@ const mergeBase = git(repo, 'merge-base', base, branch);
 // ---------------------------------------------------------------------------
 // filename `00000000000135_create_x.sql` → number "00000000000135"
 // (MIGRATIONS_DIR is resolved from app.config near the top; null ⇒ no migrations.)
+// UNCONFIGURED-INPUT PROBE. `MERGE_MIGRATIONS_DIR` unset used to mean "this app has no
+// migrations" and C2 reported SKIP. That inference is wrong whenever the key is simply
+// MISSING from an app.config, which is the state comic shipped: eight (now fourteen)
+// migrations under `src-app/server/src/modules/*/migrations/` and a config comment
+// declaring the check skipped. The gate printed "no migrations dir" while the input it
+// could not find sat in the tree — the SECOND time C2 has been found inert.
+//
+// So do not take the config's word for it: look. A migration-shaped file anywhere in the
+// committed tree (`<digits6+>_<name>.sql`, matching what migsAt parses) with no configured
+// root is a MISCONFIGURATION, and a gate that cannot find its input must say so loudly
+// rather than skip. Only a tree with genuinely no migrations still SKIPs.
+function probeMigrationFiles(ref) {
+  const r = gitTry(repo, 'ls-tree', '-r', '--name-only', ref);
+  if (!r.ok) return [];
+  return r.out.split(/\r?\n/).map((l) => l.trim())
+    .filter((l) => l && /(?:^|\/)\d{6,}_[^/]*\.sql$/.test(l));
+}
+// The directories those files live in — the roots the app.config should have declared.
+function suggestMigrationRoots(files) {
+  const dirs = [...new Set(files.map((f) => f.slice(0, f.lastIndexOf('/'))))].sort();
+  // collapse `a/b/<mod>/migrations` siblings to their common parent when there are several
+  const parents = [...new Set(dirs.map((d) => d.split('/').slice(0, -2).join('/')).filter(Boolean))];
+  return dirs.length > 3 && parents.length === 1 ? parents : dirs;
+}
+function unconfiguredMigrationProblem(refs) {
+  const found = [...new Set(refs.flatMap((r) => probeMigrationFiles(r)))];
+  if (!found.length) return null;
+  return `C2: MERGE_MIGRATIONS_DIR is UNSET in .claude/app.config, but ${found.length} migration file(s) exist in the tree ` +
+    `(e.g. ${found.slice(0, 3).join(', ')}${found.length > 3 ? ', …' : ''}) — the collision check has no input and therefore checked nothing. ` +
+    `Set MERGE_MIGRATIONS_DIR (comma-separated roots; suggested: ${suggestMigrationRoots(found).join(',')}) and re-run. ` +
+    `A gate that cannot find its input must fail, not SKIP.`;
+}
+
 function migsAt(ref) {
   if (!MIGRATION_ROOTS.length) return new Map();
   // list migration files present in <ref>'s tree; tolerant of a root being absent
@@ -303,7 +378,12 @@ function gateC4() {
 // the BRANCH added must sort after main's max-at-fork (else it renumbers-needs).
 // ===========================================================================
 function gateC2() {
-  if (!MIGRATION_ROOTS.length) { record('C2', 'migration-collision', 'SKIP', 'MERGE_MIGRATIONS_DIR unset (no migrations dir configured)'); return; }
+  if (!MIGRATION_ROOTS.length) {
+    const p = unconfiguredMigrationProblem([branch, base]);
+    if (p) { record('C2', 'migration-collision', 'FAIL', p); return; }
+    record('C2', 'migration-collision', 'SKIP', 'MERGE_MIGRATIONS_DIR unset AND no migration-shaped file found on either ref (probed)');
+    return;
+  }
   const atMergeBase = migsAt(mergeBase);
   const atBase = migsAt(base);
   const atBranch = migsAt(branch);

@@ -99,8 +99,12 @@ MERGE_GENERATED=src-app/ui/openapi/openapi.json src-app/ui/src/api-client/types.
 #     genuine C1/C3 failure).
 MERGE_STAGING_COPY_FILES=src-app/server/config/dev.yaml
 
-# Repo-relative DIRECTORIES symlinked (never copied — these are gigabytes) from
-# the source repo into staging. This exists for `node_modules`: a staging
+# Repo-relative DIRECTORIES mirrored from the source repo into staging as a tree
+# of symlinks (never copied — these are gigabytes; never hard-linked either, so a
+# build writing into node_modules/.cache cannot corrupt the source repo).
+# Workspace SELF-links are re-pointed at staging: a single symlink to the whole
+# node_modules would make `@app/ui -> ../../src-app/ui` resolve into the SOURCE
+# tree, and the check would grade the wrong code, mostly green. This exists for `node_modules`: a staging
 # worktree is the TRACKED tree only, so any gate that shells out to npm/tsc dies
 # with "command not found" or "Cannot find module" — a FALSE RED indistinguishable
 # from a real regression. Same TRACKED-path refusal as COPY_FILES.

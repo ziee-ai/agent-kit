@@ -165,6 +165,15 @@ const GENERATED = (APP.MERGE_GENERATED || '').split(/\s+/).filter(Boolean); // C
 // every exemption must be declared, so the default posture is "any file the
 // regen touches is a generated file the gate is responsible for".
 const REGEN_IGNORE = (APP.MERGE_REGEN_IGNORE || '').split(/\s+/).filter(Boolean); // C3/C6
+// C7: the app's OWN static-check chain, run from the merged tree. This is the
+// gate that catches what every per-file gate misses — a branch whose files are
+// each individually fine but whose MERGE breaks a repo-wide check. Observed:
+// a docs-only branch passed all six gates and turned `check-brand` red on main.
+const CHECK_CMD = APP.MERGE_CHECK_CMD || null;                 // C7
+// C7 (optional): run before CHECK_CMD in the staging tree. The staging worktree
+// carries the TRACKED tree plus submodules — it has no node_modules, no vendored
+// deps — so a check chain with a frontend half needs its install step named here.
+const CHECK_SETUP_CMD = APP.MERGE_CHECK_SETUP_CMD || null;     // C7
 // staging PROVISIONING (see provisionStaging below)
 const STAGING_SUBMODULES = (APP.MERGE_STAGING_SUBMODULES || '1').trim() !== '0';
 const STAGING_COPY_FILES = (APP.MERGE_STAGING_COPY_FILES || '').split(/\s+/).filter(Boolean);
@@ -744,6 +753,99 @@ function gateC1() {
   }
 }
 
+// ===========================================================================
+// C7 — the app's static-check chain, from the MERGED tree.
+//
+// C1 proves the Rust crate compiles and C3 proves the generated files are in
+// parity, but neither runs the repo-wide checks an app actually gates on: the
+// brand/vocabulary lints, the doc-reference checks, the UI type-check. Those
+// are exactly the checks a MERGE can break without either side breaking them,
+// because they are assertions over the whole tree rather than over a diff.
+//
+// This exists because it happened: a docs-only branch went green on all six
+// gates and turned `check-brand` red on main the moment it landed. Every gate
+// was working; none of them was the check that mattered.
+//
+// UNCONFIGURED-INPUT PROBE — same posture as C2. An unset key does not mean
+// "this app has no static checks"; on the app where this was found, the key was
+// simply never added while `just check` sat in the justfile. So when the key is
+// unset, PROBE the merged tree for a check chain and FAIL if one exists. A gate
+// that cannot find its input must fail, not SKIP.
+// ===========================================================================
+function probeCheckChain() {
+  const found = [];
+  for (const f of ['justfile', 'Justfile', '.justfile']) {
+    const jf = join(staging, f);
+    if (!existsSync(jf)) continue;
+    try {
+      if (/^check\s*(\+?[\w-]+\s*)*:/m.test(readFileSync(jf, 'utf8'))) found.push(`\`just check\` in ${f}`);
+    } catch {}
+  }
+  const pkg = join(staging, 'package.json');
+  if (existsSync(pkg)) {
+    try {
+      const scripts = JSON.parse(readFileSync(pkg, 'utf8')).scripts || {};
+      if (scripts.check) found.push('`npm run check` in package.json');
+    } catch {}
+  }
+  return found;
+}
+
+function gateC7() {
+  // The unconfigured-input probe runs BEFORE the --skip-heavy escape: finding
+  // out that the gate is not wired costs nothing, and `--skip-heavy` must not
+  // be able to hide a MISSING configuration behind a SKIP that reads like a
+  // deliberate one.
+  if (!CHECK_CMD) {
+    const found = probeCheckChain();
+    if (found.length) {
+      record('C7', 'static-checks', 'FAIL',
+        `MERGE_CHECK_CMD is UNSET in .claude/app.config, but the merged tree HAS a static-check chain: ${found.join(', ')}. ` +
+        `Every merge is therefore landing without the repo-wide checks ever running over the merged tree — which is how a branch ` +
+        `whose own files are all fine reddens main. Set MERGE_CHECK_CMD (and MERGE_CHECK_SETUP_CMD if the chain needs dependencies ` +
+        `installed in the staging worktree). A gate that cannot find its input must fail, not SKIP.`);
+      return;
+    }
+    record('C7', 'static-checks', 'SKIP', 'MERGE_CHECK_CMD unset AND no check chain found on the merged tree (probed)');
+    return;
+  }
+  if (SKIP_HEAVY) { record('C7', 'static-checks', 'SKIP', '--skip-heavy'); return; }
+  if (CHECK_SETUP_CMD) {
+    const [sc, ...sa] = CHECK_SETUP_CMD.split(/\s+/);
+    const sr = spawnSync(sc, sa, { cwd: staging, encoding: 'utf8', stdio: 'pipe', maxBuffer: 256 * 1024 * 1024 });
+    if (sr.error || sr.status === null) {
+      record('C7', 'static-checks', 'FAIL', `MERGE_CHECK_SETUP_CMD "${CHECK_SETUP_CMD}" could not run: ${sr.error ? sr.error.message : 'process did not exit normally'} (is "${sc}" installed?)`);
+      return;
+    }
+    if (sr.status !== 0) {
+      record('C7', 'static-checks', 'FAIL',
+        `MERGE_CHECK_SETUP_CMD "${CHECK_SETUP_CMD}" failed (exit ${sr.status}) — the check chain never ran. Tail:\n` +
+        ((sr.stdout || '') + (sr.stderr || '')).split(/\n/).slice(-12).join('\n'));
+      return;
+    }
+  }
+  const [cmd, ...args] = CHECK_CMD.split(/\s+/);
+  const r = spawnSync(cmd, args, { cwd: staging, encoding: 'utf8', stdio: 'pipe', maxBuffer: 256 * 1024 * 1024 });
+  if (r.error || r.status === null) {
+    record('C7', 'static-checks', 'FAIL', `${CHECK_CMD} could not run: ${r.error ? r.error.message : 'process did not exit normally'} (is "${cmd}" installed?)`);
+    return;
+  }
+  if (r.status !== 0) {
+    // Print BOTH: the error-shaped lines (which name the failing RECIPE) and the
+    // raw tail (which usually carries the finding itself — `just` reports "recipe
+    // X failed" long after the lint printed the file:line that caused it).
+    const out = ((r.stdout || '') + (r.stderr || '')).split(/\n/).filter(Boolean);
+    const errish = out.filter((l) => /error|fail|✗|refus/i.test(l)).slice(0, 8);
+    const tail = out.slice(-14);
+    const shown = [...new Set([...errish, ...tail])];
+    record('C7', 'static-checks', 'FAIL',
+      `${CHECK_CMD} FAILED (exit ${r.status}) from the MERGED tree. Neither side's branch has to be broken for this to happen. Output:\n` +
+      shown.join('\n'));
+    return;
+  }
+  record('C7', 'static-checks', 'PASS', `${CHECK_CMD} clean from the merged tree`);
+}
+
 // ---------------------------------------------------------------------------
 // run
 // ---------------------------------------------------------------------------
@@ -754,8 +856,12 @@ try {
   gateMergeAndP2C5();
   // C1/C3 only run on a completed merge
   const merged = results.find((r) => r.id === 'MERGE')?.status === 'PASS';
-  if (merged) { gateC3(); gateC1(); }
-  else { record('C3', 'regen-parity', 'SKIP', 'merge did not complete'); record('C1', 'clean-build', 'SKIP', 'merge did not complete'); }
+  if (merged) { gateC3(); gateC1(); gateC7(); }
+  else {
+    record('C3', 'regen-parity', 'SKIP', 'merge did not complete');
+    record('C1', 'clean-build', 'SKIP', 'merge did not complete');
+    record('C7', 'static-checks', 'SKIP', 'merge did not complete');
+  }
 } finally {
   if (stagingCreated && !KEEP_STAGING) {
     const rm = gitTry(repo, 'worktree', 'remove', '--force', staging);

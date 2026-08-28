@@ -252,14 +252,87 @@ if [ -n "$CFG_DIR_REL" ] && [ -n "$CFG_FILE" ] && [ -n "$CFG_EXAMPLE" ] && [ -n 
       bad "$CFG_DIR_REL/$CFG_FILE missing and no $CFG_EXAMPLE to seed from" \
           "author $DEV_CFG manually — the server will not boot without it"
     fi
-  elif grep -qE "^[[:space:]]*secret:[[:space:]]*\"$PLACEHOLDER\"" "$DEV_CFG"; then
+  # PLACEHOLDER DETECTION — value-compare, not a quoted-spelling regex.
+  #
+  # This used to be `grep -qE '^[[:space:]]*secret:[[:space:]]*"$PLACEHOLDER"'`,
+  # which sees exactly ONE of the three spellings YAML accepts for the same
+  # value. `secret: REPLACE_ME_…` (bare — the spelling a human hand-editing a
+  # YAML file is MOST likely to produce, since YAML does not need the quotes)
+  # and `secret: 'REPLACE_ME_…'` both sailed past, and the gate then printed
+  # "present with a non-placeholder jwt.secret" over a config the server will
+  # refuse to boot on. It also interpolated $PLACEHOLDER into an ERE, so a
+  # placeholder containing a regex metacharacter matched something else or
+  # nothing at all.
+  #
+  # Two checks now, both metachar-safe:
+  #   (a) a `secret:` line whose VALUE, after stripping optional matching
+  #       quotes and trailing space, EQUALS the placeholder;
+  #   (b) the placeholder appearing anywhere on a non-comment line — which is
+  #       what catches the block-scalar spellings (`secret: >-` then the value
+  #       on the next line) that no single-line rule can see, and any OTHER
+  #       key the example left unfilled.
+  elif awk -v ph="$PLACEHOLDER" '
+        /^[[:space:]]*secret:[[:space:]]*/ {
+          v = $0
+          sub(/^[[:space:]]*secret:[[:space:]]*/, "", v)
+          sub(/[[:space:]]+$/, "", v)
+          if (length(v) > 1) {
+            f = substr(v, 1, 1); l = substr(v, length(v), 1)
+            if ((f == "\"" && l == "\"") || (f == "'"'"'" && l == "'"'"'")) v = substr(v, 2, length(v) - 2)
+          }
+          if (v == ph) { found = 1; exit }
+        }
+        END { exit (found ? 0 : 1) }' "$DEV_CFG"; then
     bad "$CFG_DIR_REL/$CFG_FILE still has the placeholder jwt.secret — the server refuses to boot" \
         "set jwt.secret to a random >=32-char value:  openssl rand -base64 48"
+  elif awk -v ph="$PLACEHOLDER" '
+        { line = $0; sub(/^[[:space:]]*/, "", line) }
+        line ~ /^#/ { next }
+        index($0, ph) { found = 1; exit }
+        END { exit (found ? 0 : 1) }' "$DEV_CFG"; then
+    bad "$CFG_DIR_REL/$CFG_FILE still contains the placeholder value \"$PLACEHOLDER\" (not on a \`secret:\` line — a block scalar, or another unfilled key)" \
+        "replace every occurrence with a real value; for a secret:  openssl rand -base64 48"
   else
     ok "$CFG_DIR_REL/$CFG_FILE present with a non-placeholder jwt.secret"
   fi
 else
   skip "dev-config seed check (PREFLIGHT_CONFIG_* unset)"
+fi
+
+# ---------------------------------------------------------------------------
+# 8. the agent pre-push hook is INSTALLED — else `lifecycle-check --wip` and
+#    `merge-gate --verify-head` ship and are invoked by nothing.
+#
+#    Both scripts exist, work, and are observed refusing; neither one runs on
+#    its own. `scripts/install-agent-hooks.sh` is the installer, and it is a
+#    PER-CLONE action, so a fresh worktree/clone silently has no enforcement at
+#    all — which is how a repo can carry a working merge gate and still land a
+#    duplicate migration prefix. Phase 1 is where a per-clone setup gap belongs,
+#    next to node_modules and the build DB.
+#
+#    The hook lives in the COMMON git dir, so every worktree of a clone shares
+#    one install; a `core.hooksPath` override is honoured if the repo sets one.
+# ---------------------------------------------------------------------------
+HOOKS_DIR="$(git -C "$REPO" config --get core.hooksPath 2>/dev/null)"
+if [ -n "$HOOKS_DIR" ]; then
+  case "$HOOKS_DIR" in /*) : ;; *) HOOKS_DIR="$REPO/$HOOKS_DIR" ;; esac
+else
+  HOOKS_DIR="$(git -C "$REPO" rev-parse --git-common-dir 2>/dev/null)/hooks"
+fi
+INSTALLER="$(cd "$(dirname "$0")/../scripts" 2>/dev/null && pwd)/install-agent-hooks.sh"
+[ -f "$INSTALLER" ] || INSTALLER="$REPO/agent-kit/scripts/install-agent-hooks.sh"
+PREPUSH="$HOOKS_DIR/pre-push"
+if [ ! -f "$PREPUSH" ]; then
+  bad "no pre-push hook in $HOOKS_DIR — lifecycle-check --wip and merge-gate --verify-head are installed but INVOKED BY NOTHING" \
+      "bash $INSTALLER"
+elif ! grep -q "merge-gate.mjs" "$PREPUSH" 2>/dev/null; then
+  bad "$PREPUSH exists but does not invoke merge-gate --verify-head — a push to main is ungated for leaked .lifecycle/ artifacts and duplicate migration prefixes" \
+      "bash $INSTALLER   (it is idempotent; back up the existing hook first if it is yours)"
+elif [ ! -x "$PREPUSH" ]; then
+  bad "$PREPUSH is present but NOT EXECUTABLE — git skips a non-executable hook silently" \
+      "chmod +x $PREPUSH"
+else
+  ok "pre-push hook installed (lifecycle-check --wip + merge-gate --verify-head)"
 fi
 
 echo ""

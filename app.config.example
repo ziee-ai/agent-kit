@@ -79,6 +79,25 @@ MERGE_GENERATED=src-app/ui/openapi/openapi.json src-app/ui/src/api-client/types.
 # entry covers everything under it. Empty by default: anything the regen touches
 # is treated as generated output the gate is responsible for.
 #MERGE_REGEN_IGNORE=Cargo.lock
+# C7 static-checks: the app's OWN repo-wide check chain, run from the MERGED
+# tree. C1 proves the crate compiles and C3 proves regen parity; NEITHER runs
+# the checks that are assertions over the whole tree — a brand/vocabulary lint,
+# a doc-reference check, a frontend typecheck — which are exactly the checks a
+# MERGE can break with neither side broken. Observed on one consumer: a
+# docs-only branch went green on all six gates and reddened `check-brand` on
+# main the moment it landed.
+#
+# UNSET IS NOT A SKIP. If the key is absent, C7 probes the merged tree for a
+# `check` recipe / npm script and FAILS if it finds one — the same posture C2
+# takes for MERGE_MIGRATIONS_DIR, and for the same reason: on the app where this
+# was found, the key was simply never added while `just check` sat in the
+# justfile. `--skip-heavy` still SKIPs a CONFIGURED chain, but it cannot hide an
+# unconfigured one.
+MERGE_CHECK_CMD=just check
+# (optional) run first, in the staging worktree, before MERGE_CHECK_CMD. The
+# staging tree is the tracked tree + submodules — no node_modules, no vendored
+# deps — so a chain with a frontend half needs its install step named here.
+#MERGE_CHECK_SETUP_CMD=npm install
 # STAGING PROVISIONING. `git worktree add` materializes the TRACKED tree ONLY, so
 # the staging tree the heavy gates build from is missing two things the real
 # working tree has — and C1/C3 then fail SPURIOUSLY (a provisioning gap, NOT a

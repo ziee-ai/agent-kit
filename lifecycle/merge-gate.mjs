@@ -28,7 +28,7 @@
 // child_process.
 
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, cpSync, rmSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, cpSync, rmSync, readdirSync, readFileSync, statSync, symlinkSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -168,6 +168,14 @@ const REGEN_IGNORE = (APP.MERGE_REGEN_IGNORE || '').split(/\s+/).filter(Boolean)
 // staging PROVISIONING (see provisionStaging below)
 const STAGING_SUBMODULES = (APP.MERGE_STAGING_SUBMODULES || '1').trim() !== '0';
 const STAGING_COPY_FILES = (APP.MERGE_STAGING_COPY_FILES || '').split(/\s+/).filter(Boolean);
+// Repo-relative DIRECTORIES symlinked from the source repo into staging. This
+// exists for `node_modules`: a staging worktree is the TRACKED tree only, so any
+// gate that shells out to npm/tsc/eslint dies with "command not found" or
+// "Cannot find module" — a FALSE RED that looks exactly like a real regression.
+// Symlinked, never copied: these trees are gigabytes.
+const STAGING_LINK_DIRS = (APP.MERGE_STAGING_LINK_DIRS || '').split(/\s+/).filter(Boolean);
+// C7: the app's OWN check recipe, run on the merged tree. See gateC7.
+const CHECK_CMD = APP.MERGE_CHECK_CMD || null;
 
 // ---------------------------------------------------------------------------
 // --verify-head — the fast subset safe to run in a pre-push hook on a push to
@@ -529,6 +537,37 @@ function provisionStaging() {
       stagingWarn(`could not copy "${rel}" into staging: ${e.message}`);
     }
   }
+  // (c) app-declared gitignored-but-required DIRECTORIES, symlinked.
+  for (const rel of STAGING_LINK_DIRS) {
+    if (rel.startsWith('/') || rel.split(/[\\/]/).includes('..')) {
+      stagingWarn(`MERGE_STAGING_LINK_DIRS entry "${rel}" is not a safe repo-relative path — NOT linked`);
+      continue;
+    }
+    // Same rule as COPY_FILES, same reason: a TRACKED path already has its
+    // authoritative MERGED content in staging, and shadowing it with a symlink
+    // to the live working tree would substitute unreviewed content and could
+    // MASK a real failure.
+    if (gitTry(staging, 'ls-files', '--error-unmatch', '--', rel).ok) {
+      stagingWarn(`MERGE_STAGING_LINK_DIRS: "${rel}" is TRACKED by git — NOT linked. `
+        + 'Declare only gitignored per-machine directories here.');
+      continue;
+    }
+    const src = join(repo, rel);
+    const dst = join(staging, rel);
+    if (!existsSync(src)) {
+      stagingWarn(`MERGE_STAGING_LINK_DIRS: "${rel}" is ABSENT from ${repo} — NOT linked. `
+        + 'A gate needing it will fail for that reason (e.g. `npm install` was never run in the source repo).');
+      continue;
+    }
+    try {
+      mkdirSync(dirname(dst), { recursive: true });
+      rmSync(dst, { recursive: true, force: true });
+      symlinkSync(src, dst, 'dir');
+      stagingNote(`linked gitignored dir "${rel}" into staging`);
+    } catch (e) {
+      stagingWarn(`could not link "${rel}" into staging: ${e.message}`);
+    }
+  }
 }
 
 function gateMergeAndP2C5() {
@@ -745,6 +784,44 @@ function gateC1() {
 }
 
 // ---------------------------------------------------------------------------
+// C7 — the app's OWN check recipe, run on the MERGED tree.
+//
+// WHY THIS EXISTS: C1 is `cargo check` and C3 is regen parity. Neither runs the
+// repo's own `check` target, so every gate this campaign wired into that target
+// — a stale-brand lint, a doc-reference checker, a design-token drift check, a
+// testid-registry parity check, the frontend `tsc` — is INVISIBLE to the merge
+// gate. Measured consequence: a DOCS-ONLY branch passed all nine gates and
+// turned `just check` red on main, because the prose it added tripped a
+// prose-grading lint that only `check` runs. The gates most likely to be
+// tripped by a diff nobody thinks needs testing were the ones nothing ran.
+//
+// It is deliberately the app's OWN recipe rather than a list of commands here:
+// the app already had to define "everything that must be true of this tree",
+// and a second list in this file would drift from it.
+// ---------------------------------------------------------------------------
+function gateC7() {
+  if (SKIP_HEAVY) { record('C7', 'repo-check', 'SKIP', '--skip-heavy'); return; }
+  if (!CHECK_CMD) {
+    record('C7', 'repo-check', 'SKIP', 'MERGE_CHECK_CMD unset (no repo check configured)');
+    return;
+  }
+  const [cmd, ...args] = CHECK_CMD.split(/\s+/);
+  const r = spawnSync(cmd, args, { cwd: staging, encoding: 'utf8', stdio: 'pipe', maxBuffer: 256 * 1024 * 1024 });
+  if (r.error || r.status === null) {
+    record('C7', 'repo-check', 'FAIL', `${CHECK_CMD} could not run: ${r.error ? r.error.message : 'process did not exit normally'} (is "${cmd}" installed?)`);
+    return;
+  }
+  if (r.status !== 0) {
+    const out = (r.stdout || '') + (r.stderr || '');
+    record('C7', 'repo-check', 'FAIL',
+      `${CHECK_CMD} FAILED on the merged tree (exit ${r.status}). This is the gate set the app itself defines — a lint, a doc-reference check or a typecheck that C1/C3 do not run. Tail:\n`
+      + out.split(/\n/).filter((l) => l.trim()).slice(-14).join('\n'));
+    return;
+  }
+  record('C7', 'repo-check', 'PASS', `${CHECK_CMD} green on the merged tree`);
+}
+
+// ---------------------------------------------------------------------------
 // run
 // ---------------------------------------------------------------------------
 process.stdout.write(`merge-gate  branch=${branch}  base=${base}  merge-base=${mergeBase.slice(0, 10)}\n`);
@@ -754,8 +831,12 @@ try {
   gateMergeAndP2C5();
   // C1/C3 only run on a completed merge
   const merged = results.find((r) => r.id === 'MERGE')?.status === 'PASS';
-  if (merged) { gateC3(); gateC1(); }
-  else { record('C3', 'regen-parity', 'SKIP', 'merge did not complete'); record('C1', 'clean-build', 'SKIP', 'merge did not complete'); }
+  if (merged) { gateC3(); gateC1(); gateC7(); }
+  else {
+    record('C3', 'regen-parity', 'SKIP', 'merge did not complete');
+    record('C1', 'clean-build', 'SKIP', 'merge did not complete');
+    record('C7', 'repo-check', 'SKIP', 'merge did not complete');
+  }
 } finally {
   if (stagingCreated && !KEEP_STAGING) {
     const rm = gitTry(repo, 'worktree', 'remove', '--force', staging);

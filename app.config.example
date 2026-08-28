@@ -99,6 +99,25 @@ MERGE_GENERATED=src-app/ui/openapi/openapi.json src-app/ui/src/api-client/types.
 #     genuine C1/C3 failure).
 MERGE_STAGING_COPY_FILES=src-app/server/config/dev.yaml
 
+# Repo-relative DIRECTORIES symlinked (never copied — these are gigabytes) from
+# the source repo into staging. This exists for `node_modules`: a staging
+# worktree is the TRACKED tree only, so any gate that shells out to npm/tsc dies
+# with "command not found" or "Cannot find module" — a FALSE RED indistinguishable
+# from a real regression. Same TRACKED-path refusal as COPY_FILES.
+# Unset = no directories linked (and C7 will fail for a node-based check).
+MERGE_STAGING_LINK_DIRS=node_modules src-app/ui/node_modules
+
+# ── C7: the app's OWN check recipe, run on the MERGED tree ────────────────
+# C1 is `cargo check`; C3 is regen parity. NEITHER runs the repo's own `check`
+# target, so every gate wired into it — stale-brand lints, doc-reference checks,
+# design-token drift, testid-registry parity, frontend `tsc` — is invisible to
+# the merge gate. Measured: a DOCS-ONLY branch passed all nine gates and turned
+# `just check` red on main, because prose is exactly what a prose-grading lint
+# grades and nothing at merge time ran one.
+# Runs after C3/C1, only on a completed merge; skipped by --skip-heavy.
+# Unset SKIPS the gate.
+MERGE_CHECK_CMD=just check
+
 # ── lifecycle-check.mjs (per-phase gate) ──────────────────────────────────
 # lifecycle-check is otherwise app-agnostic; only these three ziee-specific
 # values are read from app.config. EACH KEY DEFAULTS TO ZIEE'S HISTORICAL

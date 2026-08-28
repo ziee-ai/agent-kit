@@ -120,6 +120,17 @@ const OPENAPI_SPECS = (APP.LIFECYCLE_OPENAPI_SPECS
 // vendored pgvector submodule.
 const CLEAN_TREE_IGNORE = (APP.LIFECYCLE_CLEAN_TREE_IGNORE || 'vendor/pgvector')
   .split(/\s+/).filter(Boolean);
+// MERGE_GENERATED (shared with merge-gate.mjs; space-separated repo-relative
+// paths): the app's DECLARED codegen output set. Every declared path joins the
+// generated-file exemption below (DIFF_EXCLUDES + isGeneratedFe) IN ADDITION to
+// the historical openapi.json / api-client/types.ts patterns — an app whose
+// regen writes MORE than those two files (comic/cytoanalyst's `finish_and_emit`
+// writes five per workspace: + permissions.ts, permissionDescriptions.ts,
+// apiEndpoints.ts) otherwise has a regen-only diff misread as a real UI touch,
+// against this gate's own documented intent. Unset ⇒ exactly the historical
+// patterns (and ziee is byte-identical either way: its declared set is already
+// covered by those patterns).
+const GENERATED_FILES = (APP.MERGE_GENERATED || '').split(/\s+/).filter(Boolean);
 // LIFECYCLE_LIGHT_MAX_LINES: the LIGHT-tier size threshold (added+deleted lines in
 // base...HEAD, excluding lifecycle artifacts + generated files). See classifyTier.
 // The default is a REVIEW-CAPACITY judgement, not a measurement: two angles
@@ -431,6 +442,9 @@ const DIFF_EXCLUDES = [
   ':(exclude).lifecycle',
   ':(glob,exclude)**/openapi.json',
   ':(glob,exclude)**/api-client/types.ts',
+  // + every app-DECLARED generated file (MERGE_GENERATED in app.config) — same
+  // rationale, derived from the app's declaration instead of hardcoded here.
+  ...GENERATED_FILES.map((p) => `:(exclude,literal)${p}`),
 ];
 function diffHunks() {
   let out;
@@ -478,13 +492,14 @@ function changedFilePaths() {
 // A mechanically-generated frontend artifact never counts as a real UI touch
 // (belt-and-suspenders alongside DIFF_EXCLUDES; also used to filter PLAN paths).
 const RE_GENERATED_FE = /(?:^|\/)openapi\.json$|(?:^|\/)api-client\/types\.ts$/;
+const isGeneratedFe = (p) => RE_GENERATED_FE.test(p) || GENERATED_FILES.includes(p);
 // Map a set of paths → the frontend npm workspaces they touch, per the
 // (app.config-driven) FE_WORKSPACES prefix→label map. Default (ziee):
 // `src-app/desktop/ui/**` → "desktop/ui"; `src-app/ui/**` → "ui".
 function frontendWorkspacesOf(paths) {
   const ws = new Set();
   for (const p of paths) {
-    if (RE_GENERATED_FE.test(p)) continue;
+    if (isGeneratedFe(p)) continue;
     for (const { prefix, label } of FE_WORKSPACES) {
       if (p.startsWith(prefix)) { ws.add(label); break; } // first (most-specific) match wins
     }

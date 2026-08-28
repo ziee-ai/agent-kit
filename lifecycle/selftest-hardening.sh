@@ -552,6 +552,200 @@ printf '\n- DESCOPED: ITEM-2 — deferred to a follow-up [approved: human 2026-0
 git -C "$R" commit -qam descope-approved >/dev/null
 lc 0 "FB-7: a [DESCOPED] item WITH an approved DECISIONS disposition passes (phase 3)" --phase 3 --repo "$R" --dir "$D" --base main
 
+# ---------------------------------------------------------------------------
+# Fix 1 — owner-APPROVED TEST descope. A test covering an item that is BOTH
+# [DESCOPED] in PLAN.md AND approved in DECISIONS.md is exempt from A5 (if its
+# test was REMOVED) and from the phase-8 result-requirement (if KEPT enumerated).
+# Gated by the SAME full FB-7 approval chain — an unapproved/undescoped item
+# unlocks nothing.
+# ---------------------------------------------------------------------------
+# Shared grow-the-plan step: add ITEM-2 covered by TEST-2, committed as the PRIOR
+# TESTS.md the A5 shrink-guard walks back to.
+grow_item2() {
+  local R="$1" D="$2"
+  cat > "$D/PLAN.md" <<'EOF'
+# PLAN — bar
+## Design source
+- `docs/design/bar.md` §1 "Bar listing" — this plan realizes the read path.
+## Invariants
+- **INV-1**: `list_bar` returns every bar row — the listing is never silently truncated.
+## Items
+- **ITEM-1**: Add list_bar to the bar repository.
+- **ITEM-2**: A sub-feature (section H) planned this round.
+## Files to touch
+- `src-app/server/src/modules/bar/repository.rs` — new fn (ITEM-1).
+## Patterns to follow
+- Mirror an existing server repository module.
+EOF
+  cat > "$D/TESTS.md" <<'EOF'
+# TESTS — bar
+- **TEST-1** (tier: unit) [acceptance] [invariant: INV-1] [covers: ITEM-1] file: `src-app/server/src/modules/bar/repository.rs` — asserts: list_bar returns both rows.
+- **TEST-2** (tier: integration) [covers: ITEM-2] file: `src-app/server/tests/bar/sub.rs` — asserts: the section-H sub-feature.
+EOF
+  git -C "$R" commit -qam grow-plan-item2 >/dev/null
+}
+# The PLAN.md with ITEM-2 marked [DESCOPED] (reused across cases).
+plan_item2_descoped() {
+  cat > "$1" <<'EOF'
+# PLAN — bar
+## Design source
+- `docs/design/bar.md` §1 "Bar listing" — this plan realizes the read path.
+## Invariants
+- **INV-1**: `list_bar` returns every bar row — the listing is never silently truncated.
+## Items
+- **ITEM-1**: Add list_bar to the bar repository.
+- **ITEM-2**: [DESCOPED] section H, deferred to a follow-up issue.
+## Files to touch
+- `src-app/server/src/modules/bar/repository.rs` — new fn (ITEM-1).
+## Patterns to follow
+- Mirror an existing server repository module.
+EOF
+}
+
+# (1a) POSITIVE — approved descope, TEST-2 REMOVED → A5 exempt (phase 3 PASS).
+R="$(build_be)"; D="$R/.lifecycle/bar"
+grow_item2 "$R" "$D"
+plan_item2_descoped "$D/PLAN.md"
+printf '\n- DESCOPED: ITEM-2 — section H deferred to issue #29 [approved: owner 2026-08]\n' >> "$D/DECISIONS.md"
+cat > "$D/TESTS.md" <<'EOF'
+# TESTS — bar
+- **TEST-1** (tier: unit) [acceptance] [invariant: INV-1] [covers: ITEM-1] file: `src-app/server/src/modules/bar/repository.rs` — asserts: list_bar returns both rows.
+EOF
+git -C "$R" commit -qam descope-item2-drop-test2 >/dev/null
+lc 0 "Fix1/A5: an APPROVED-descoped item's REMOVED test is exempt from A5 (phase 3)" --phase 3 --repo "$R" --dir "$D" --base main
+
+# (1b) NEGATIVE — descope WITHOUT approval, TEST-2 REMOVED → A5 still fires.
+R="$(build_be)"; D="$R/.lifecycle/bar"
+grow_item2 "$R" "$D"
+plan_item2_descoped "$D/PLAN.md"   # [DESCOPED] but NO DECISIONS approval line
+cat > "$D/TESTS.md" <<'EOF'
+# TESTS — bar
+- **TEST-1** (tier: unit) [acceptance] [invariant: INV-1] [covers: ITEM-1] file: `src-app/server/src/modules/bar/repository.rs` — asserts: list_bar returns both rows.
+EOF
+git -C "$R" commit -qam descope-unapproved-drop-test2 >/dev/null
+lc 1 "Fix1/A5 anti-loophole: an UNapproved descope does NOT exempt the removed test (phase 3)" --phase 3 --repo "$R" --dir "$D" --base main
+if grep -q "A5" "$LC_SELFTEST_OUT"; then
+  PASS=$((PASS+1)); printf '  \033[32mok  \033[0m %s\n' "Fix1/A5 anti-loophole: A5 still names itself for the unapproved descope"
+else
+  FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "Fix1/A5 anti-loophole: A5 still names itself for the unapproved descope"
+  sed 's/^/        | /' "$LC_SELFTEST_OUT"
+fi
+
+# (1c) NEGATIVE — removed test whose item is NOT [DESCOPED] → A5 fires (FB-7 kept
+# satisfied by covering ITEM-2 with a DIFFERENT retained test, so ONLY A5 can speak).
+R="$(build_be)"; D="$R/.lifecycle/bar"
+cat > "$D/PLAN.md" <<'EOF'
+# PLAN — bar
+## Design source
+- `docs/design/bar.md` §1 "Bar listing" — this plan realizes the read path.
+## Invariants
+- **INV-1**: `list_bar` returns every bar row — the listing is never silently truncated.
+## Items
+- **ITEM-1**: Add list_bar to the bar repository.
+- **ITEM-2**: A sub-feature planned this round.
+## Files to touch
+- `src-app/server/src/modules/bar/repository.rs` — new fn (ITEM-1).
+## Patterns to follow
+- Mirror an existing server repository module.
+EOF
+cat > "$D/TESTS.md" <<'EOF'
+# TESTS — bar
+- **TEST-1** (tier: unit) [acceptance] [invariant: INV-1] [covers: ITEM-1] file: `src-app/server/src/modules/bar/repository.rs` — asserts: list_bar returns both rows.
+- **TEST-2** (tier: integration) [covers: ITEM-2] file: `src-app/server/tests/bar/sub.rs` — asserts: the sub-feature (path A).
+- **TEST-3** (tier: integration) [covers: ITEM-2] file: `src-app/server/tests/bar/sub2.rs` — asserts: the sub-feature (path B).
+EOF
+git -C "$R" commit -qam grow-item2-two-tests >/dev/null
+cat > "$D/TESTS.md" <<'EOF'
+# TESTS — bar
+- **TEST-1** (tier: unit) [acceptance] [invariant: INV-1] [covers: ITEM-1] file: `src-app/server/src/modules/bar/repository.rs` — asserts: list_bar returns both rows.
+- **TEST-3** (tier: integration) [covers: ITEM-2] file: `src-app/server/tests/bar/sub2.rs` — asserts: the sub-feature (path B).
+EOF
+git -C "$R" commit -qam drop-test2-item-not-descoped >/dev/null
+lc 1 "Fix1/A5 anti-loophole: a removed test whose item is NOT [DESCOPED] still fails A5 (phase 3)" --phase 3 --repo "$R" --dir "$D" --base main
+
+# (1d) POSITIVE — approved descope, TEST-2 KEPT enumerated with NO PASS line →
+# exempt from the phase-8 result-requirement.
+R="$(build_be)"; D="$R/.lifecycle/bar"
+grow_item2 "$R" "$D"
+plan_item2_descoped "$D/PLAN.md"
+printf '\n- DESCOPED: ITEM-2 — section H deferred to issue #29 [approved: owner 2026-08]\n' >> "$D/DECISIONS.md"
+# TESTS.md still enumerates TEST-2 (covers the descoped-approved ITEM-2);
+# TEST_RESULTS.md records NO result for it — build_be's TEST_RESULTS has only TEST-1.
+git -C "$R" commit -qam descope-item2-keep-test2 >/dev/null
+lc 0 "Fix1/phase8: an approved-descoped item's KEPT test needs no PASS line (phase 8)" --phase 8 --repo "$R" --dir "$D" --base main
+
+# (1e) NEGATIVE — same KEPT test but the descope is UNapproved → phase-8 still
+# demands a PASS for TEST-2 (the exemption is approval-gated).
+R="$(build_be)"; D="$R/.lifecycle/bar"
+grow_item2 "$R" "$D"
+plan_item2_descoped "$D/PLAN.md"   # [DESCOPED] but no DECISIONS approval
+git -C "$R" commit -qam descope-unapproved-keep-test2 >/dev/null
+lc 1 "Fix1/phase8 anti-loophole: an UNapproved descope's kept test still needs a PASS (phase 8)" --phase 8 --repo "$R" --dir "$D" --base main
+
+# ---------------------------------------------------------------------------
+# Fix 2 — [standing-gate] disposition. A `[standing-gate]` TEST asserts the
+# branch's code passes a STANDING repo-wide gate (`npm run check` / `gate:ui`),
+# not a branch-authored test. It is exempt from A11's branch-authorship rule and
+# its phase-8 result-requirement is discharged by a recorded green standing-gate
+# line — but ONLY when that line is present, and NEVER on an [acceptance] test.
+# ---------------------------------------------------------------------------
+# add_standing_test <repo> <dir> — appends an UNEARNED standing-gate TEST-3 whose
+# declared file the branch never touched and whose id is cited in no added line.
+add_standing_test() {
+  cat >> "$2/TESTS.md" <<'EOF'
+- **TEST-3** (tier: integration) [standing-gate] [covers: ITEM-1] file: `scripts/domain-lint.mjs` — asserts: the branch's code passes domain-lint (a standing repo-wide gate run by npm run check).
+EOF
+}
+
+# (2a) POSITIVE — [standing-gate] TEST-3 recorded PASS WITH an `npm run check
+# (ui): PASS` line present → A11 exempt + phase-8 discharged (phase 8 PASS).
+R="$(build_be)"; D="$R/.lifecycle/bar"
+add_standing_test "$R" "$D"
+cat >> "$D/TEST_RESULTS.md" <<'EOF'
+- **TEST-3**: PASS
+npm run check (ui): PASS
+EOF
+git -C "$R" commit -qam standing-gate-with-green-line >/dev/null
+lc 0 "Fix2: a [standing-gate] test WITH 'npm run check (ui): PASS' present passes A11 + phase 8" --phase 8 --repo "$R" --dir "$D" --base main
+
+# (2b) NEGATIVE — the SAME [standing-gate] test WITHOUT the npm-check PASS line →
+# fails (A11 fires + the standing-gate result-requirement fires).
+R="$(build_be)"; D="$R/.lifecycle/bar"
+add_standing_test "$R" "$D"
+cat >> "$D/TEST_RESULTS.md" <<'EOF'
+- **TEST-3**: PASS
+EOF
+git -C "$R" commit -qam standing-gate-no-green-line >/dev/null
+lc 1 "Fix2 anti-loophole: a [standing-gate] test WITHOUT the npm-check PASS line FAILS (phase 8)" --phase 8 --repo "$R" --dir "$D" --base main
+if grep -q "A11\|standing-gate" "$LC_SELFTEST_OUT"; then
+  PASS=$((PASS+1)); printf '  \033[32mok  \033[0m %s\n' "Fix2 anti-loophole: the refusal names A11/standing-gate"
+else
+  FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "Fix2 anti-loophole: the refusal names A11/standing-gate"
+  sed 's/^/        | /' "$LC_SELFTEST_OUT"
+fi
+
+# (2c) NEGATIVE — [standing-gate] + [acceptance] together is REJECTED at phase 3
+# (an invariant proof cannot be discharged by a standing gate).
+R="$(build_be)"; D="$R/.lifecycle/bar"
+cat >> "$D/TESTS.md" <<'EOF'
+- **TEST-3** (tier: integration) [standing-gate] [acceptance] [invariant: INV-1] [covers: ITEM-1] file: `scripts/domain-lint.mjs` — asserts: the invariant holds via a standing gate.
+EOF
+git -C "$R" commit -qam standing-gate-plus-acceptance >/dev/null
+lc 1 "Fix2 anti-loophole: [standing-gate] + [acceptance] together is REJECTED (phase 3)" --phase 3 --repo "$R" --dir "$D" --base main
+
+# (2d) CONTROL — the ORIGINAL A11 catch still fires: an unearned PASS with NO
+# standing-gate tag (an inherited PASS from another feature's namespace) FAILS.
+R="$(build_be)"; D="$R/.lifecycle/bar"
+cat >> "$D/TESTS.md" <<'EOF'
+- **TEST-3** (tier: integration) [covers: ITEM-1] file: `scripts/domain-lint.mjs` — asserts: an unrelated claim, in a file this branch never touched.
+EOF
+cat >> "$D/TEST_RESULTS.md" <<'EOF'
+- **TEST-3**: PASS
+npm run check (ui): PASS
+EOF
+git -C "$R" commit -qam unearned-no-standing-tag >/dev/null
+lc 1 "Fix2 CONTROL: an unearned PASS with NO [standing-gate] tag STILL fails A11 (phase 8)" --phase 8 --repo "$R" --dir "$D" --base main
+
 # --- A8: a built-in MCP server without BOTH mcp.rs edits -> FAIL; with both -> PASS
 R="$(build_be)"; D="$R/.lifecycle/bar"
 printf '\nfn bar_mcp_server_id() -> u32 { 1 }\n' >> "$R/src-app/server/src/modules/bar/repository.rs"

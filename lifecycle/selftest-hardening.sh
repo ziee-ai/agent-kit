@@ -23,6 +23,22 @@ STALE_CHECK="$HERE/staleness-check.mjs"
 HOOK="$HERE/edit-lint-hook.mjs"
 
 lc()  { assert_exit_cmd "$1" "$2" -- node "$CHECK" "${@:3}"; }
+# lc_says <needle> <label> <lifecycle-check args...> — asserts the DIAGNOSIS text, not just
+# the exit code. The invocation-integrity defects all had the right *shape* of output and
+# the wrong content, so these gates are pinned on what the message SAYS. A leading `--`
+# lets a needle start with a dash.
+lc_says_impl() {
+  [ "${1:-}" = "--" ] && shift
+  local needle="$1"; shift
+  local out; out="$(node "$CHECK" "$@" 2>&1)"
+  if printf '%s\n' "$out" | grep -qF -- "$needle"; then return 0; fi
+  printf 'expected the diagnosis to contain: %s\n--- actual ---\n%s\n' "$needle" "$out"
+  return 1
+}
+lc_says() {
+  if [ "${1:-}" = "--" ]; then shift; assert_exit_cmd 0 "$2" -- lc_says_impl -- "$1" "${@:3}";
+  else assert_exit_cmd 0 "$2" -- lc_says_impl "$1" "${@:3}"; fi
+}
 sc()  { assert_exit_cmd "$1" "$2" -- node "$STALE_CHECK" "${@:3}"; }
 
 # sc_says <needle> <label> <staleness-check args...> — asserts the DIAGNOSIS text,
@@ -867,9 +883,13 @@ git -C "$R" update-ref refs/remotes/origin/feat/mig "$(git -C "$R" rev-parse fea
 assert_exit_cmd 0 "merge-gate: local AHEAD of remote still passes (unpushed work)" -- \
   node "$MG" feat/mig --repo "$R" --base main --no-fetch --skip-heavy
 
-# de-ziee-ify: with NO .claude/app.config, C2 has no migrations dir configured
-# and SKIPs — the same colliding migration that fails above now PASSES (proving
-# the app-specific gate is app.config-driven, not baked in).
+# de-ziee-ify + UNCONFIGURED-INPUT PROBE.
+#
+# This pair USED to assert that no `.claude/app.config` ⇒ C2 SKIPs, and that the
+# colliding migration above therefore passed. That is the defect, not the feature:
+# comic shipped an app.config with MERGE_MIGRATIONS_DIR simply absent while eight
+# migrations sat in the tree, and every run printed "no migrations dir" — the SECOND
+# time C2 was found inert. Unset now means "look before you skip".
 R="$(new_repo)"; CLEANUP+=("$R")
 mkdir -p "$R/src-app/server/migrations"
 echo "CREATE TABLE a();" > "$R/src-app/server/migrations/00000000000010_a.sql"
@@ -877,14 +897,27 @@ git -C "$R" add -A && git -C "$R" commit -qm mig-10
 git -C "$R" checkout -q -b feat/mig
 echo "CREATE TABLE b();" > "$R/src-app/server/migrations/00000000000009_early.sql"
 git -C "$R" add -A && git -C "$R" commit -qm branch-mig
-assert_exit_cmd 0 "merge-gate: NO app.config ⇒ C2 SKIPs (collision not flagged)" -- \
+assert_exit_cmd 1 "merge-gate C2: NO app.config but migrations EXIST ⇒ hard FAIL, not SKIP" -- \
   node "$MG" feat/mig --repo "$R" --base main --no-fetch --skip-heavy
-# strengthen: exit 0 alone can't distinguish SKIP from PASS — assert the C2 line
-# actually reads SKIP in the just-captured output ("$LC_SELFTEST_OUT").
-if grep -qE "C2.*SKIP" "$LC_SELFTEST_OUT"; then
-  PASS=$((PASS+1)); printf '  \033[32mok  \033[0m %s\n' "merge-gate: NO app.config ⇒ C2 line explicitly reads SKIP (not PASS)"
+# The diagnosis must name the missing key and the roots it found, or the operator
+# cannot act on it.
+if grep -qE "MERGE_MIGRATIONS_DIR is UNSET" "$LC_SELFTEST_OUT" && grep -qF "src-app/server/migrations" "$LC_SELFTEST_OUT"; then
+  PASS=$((PASS+1)); printf '  \033[32mok  \033[0m %s\n' "merge-gate C2: the diagnosis names the unset key AND the root it should be"
 else
-  FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "merge-gate: NO app.config — C2 did not report SKIP"
+  FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "merge-gate C2: unset-key diagnosis is not actionable"
+  sed 's/^/        | /' "$LC_SELFTEST_OUT"
+fi
+# CONTROL — an app that genuinely has NO migrations still SKIPs (the probe finds
+# nothing), so the app-agnostic contract is preserved for apps without a database.
+R="$(new_repo)"; CLEANUP+=("$R")
+git -C "$R" checkout -q -b feat/nomig
+echo "hello" > "$R/src.txt"; git -C "$R" add -A && git -C "$R" commit -qm no-migrations
+assert_exit_cmd 0 "merge-gate C2 CONTROL: no app.config AND no migrations anywhere ⇒ SKIP" -- \
+  node "$MG" feat/nomig --repo "$R" --base main --no-fetch --skip-heavy
+if grep -qE "C2.*SKIP" "$LC_SELFTEST_OUT"; then
+  PASS=$((PASS+1)); printf '  \033[32mok  \033[0m %s\n' "merge-gate C2 CONTROL: the C2 line explicitly reads SKIP (not PASS)"
+else
+  FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "merge-gate C2 CONTROL: did not report SKIP"
   sed 's/^/        | /' "$LC_SELFTEST_OUT"
 fi
 
@@ -1113,15 +1146,19 @@ echo "CREATE TABLE b();" > "$R/src-app/server/migrations/00000000000010_b.sql"
 git -C "$R" add -A && git -C "$R" commit -qm dup-mig
 assert_exit_cmd 1 "verify-head C2: duplicate migration prefix on HEAD is REFUSED" -- node "$MG" --verify-head --repo "$R"
 
-# de-ziee-ify: with NO app.config, verify-head C2 has no migrations dir and
-# SKIPs — the same duplicate-prefix HEAD that fails above now passes verify-head
-# (C5 .lifecycle-strip, the app-agnostic guard, still runs).
+# UNCONFIGURED-INPUT PROBE on the verify-head path — same rule as the branch path:
+# unset MERGE_MIGRATIONS_DIR with migrations present is a misconfiguration, and the
+# duplicate prefix below must NOT slip onto main behind a "no migrations dir" skip.
 R="$(new_repo)"; CLEANUP+=("$R")
 mkdir -p "$R/src-app/server/migrations"
 echo "CREATE TABLE a();" > "$R/src-app/server/migrations/00000000000010_a.sql"
 echo "CREATE TABLE b();" > "$R/src-app/server/migrations/00000000000010_b.sql"
 git -C "$R" add -A && git -C "$R" commit -qm dup-mig
-assert_exit_cmd 0 "verify-head: NO app.config ⇒ C2 SKIPs (dup prefix not flagged; C5 still runs)" -- node "$MG" --verify-head --repo "$R"
+assert_exit_cmd 1 "verify-head C2: NO app.config but migrations EXIST ⇒ hard FAIL, not SKIP" -- node "$MG" --verify-head --repo "$R"
+# CONTROL — no app.config and no migrations at all: verify-head still passes on C5 alone.
+R="$(new_repo)"; CLEANUP+=("$R")
+echo "hello" > "$R/src.txt"; git -C "$R" add -A && git -C "$R" commit -qm no-migrations
+assert_exit_cmd 0 "verify-head C2 CONTROL: no app.config AND no migrations ⇒ passes (C5 only)" -- node "$MG" --verify-head --repo "$R"
 
 # ---------------------------------------------------------------------------
 echo "-- Part E: lifecycle-check.mjs de-ziee-ify (a NON-ziee frontend layout) --"
@@ -1739,6 +1776,103 @@ RSEOF
 else
   note "skip: rustfmt not installed — the Rust arm's paired controls need it"
 fi
+
+
+# ===========================================================================
+# INVOCATION INTEGRITY — a run that graded NOTHING must never report OK.
+#
+# Observed defect (fix/gate-integrity): `lifecycle-check.mjs --all --feature C9`
+# — the real flag is `--dir` — printed
+#     lifecycle-check: OK — phases 1..0 complete (0/9)
+# and exited 0. The old parser matched flags with `args.indexOf(name)`, so an
+# unrecognised flag AND its value were silently dropped; `--dir` stayed unset;
+# auto-discovery selected the single `.lifecycle/<epic>/` subdirectory — an EPIC
+# ROOT whose phase artifacts live one level further down — found all nine phases
+# PENDING, and reported a green. A merge agent read that as a passing lifecycle.
+#
+# Three separate holes, each proven here BOTH ways: unknown flag, artifact-less
+# directory, and the all-PENDING "0/9 OK".
+# ===========================================================================
+echo "-- lifecycle-check: invocation integrity --"
+IV="$(new_repo)"; git -C "$IV" checkout -q -b feat/item1
+mkdir -p "$IV/src-app/server/src/modules/item1" "$IV/.lifecycle/epic-x/ITEM-1" "$IV/.lifecycle/epic-x/ITEM-2"
+printf 'pub fn list_item() -> Vec<String> {\n    vec!["a".into(), "b".into()]\n}\n' \
+  > "$IV/src-app/server/src/modules/item1/repository.rs"
+IVD="$IV/.lifecycle/epic-x/ITEM-1"
+cat > "$IVD/PLAN.md" <<'EOF'
+# PLAN — item1
+## Design source
+- `docs/design/item1.md` §1 "Item listing" — this plan realizes the read path.
+## Invariants
+- **INV-1**: `list_item` returns every item row — the listing is never silently truncated.
+## Items
+- **ITEM-1**: Add list_item to the item1 repository.
+## Files to touch
+- `src-app/server/src/modules/item1/repository.rs` — new fn (ITEM-1).
+## Patterns to follow
+- Mirror an existing server repository module.
+EOF
+write_common "$IVD" "src-app/server/src/modules/item1/repository.rs" 3
+cat > "$IVD/TESTS.md" <<'EOF'
+# TESTS — item1
+- **TEST-1** (tier: unit) [acceptance] [invariant: INV-1] [covers: ITEM-1] file: `src-app/server/src/modules/item1/repository.rs` — asserts: list_item returns both seeded rows, not a truncated prefix.
+EOF
+printf '# TEST_RESULTS — item1\n- **TEST-1**: PASS\n' > "$IVD/TEST_RESULTS.md"
+# Epic-level bookkeeping that is NOT a phase artifact — exactly what an epic root holds.
+printf '# GRAPH\nITEM-1 -> ITEM-2\n' > "$IV/.lifecycle/epic-x/GRAPH.md"
+printf '# PLAN — item2 (not started)\n' > "$IV/.lifecycle/epic-x/ITEM-2/PLAN.md"
+git -C "$IV" add -A && git -C "$IV" commit -qm item1-complete
+
+# CONTROL — pointed at the real feature dir, the same tree is green.
+lc 0 "invocation: CONTROL — the correctly-directed run passes" --all --repo "$IV" --dir "$IVD" --base main
+# 1. An unknown flag is FATAL and names itself; it is never dropped.
+lc 1 "invocation: an unknown flag (--feature) is fatal, not silently dropped" --all --repo "$IV" --feature ITEM-1 --base main
+lc_says "unknown flag \`--feature\`" "invocation: the fatal error NAMES the rejected flag" --all --repo "$IV" --feature ITEM-1 --base main
+lc_says -- "--dir" "invocation: the fatal error lists the valid flags" --all --repo "$IV" --feature ITEM-1 --base main
+# 2. A value-taking flag with no value is fatal (it used to silently become `true`).
+lc 1 "invocation: --dir with no value is fatal" --all --repo "$IV" --dir
+# 3. Auto-discovery landing on an EPIC ROOT is fatal, and says so.
+lc 1 "invocation: auto-discovered EPIC ROOT (no artifacts of its own) is fatal" --all --repo "$IV" --base main
+lc_says "EPIC root" "invocation: the epic-root diagnosis names the fix (pass --dir <subdirectory>)" --all --repo "$IV" --base main
+# 4. An existing but artifact-less --dir is fatal, not a vacuous pass.
+mkdir -p "$IV/.lifecycle/epic-x/EMPTY"
+lc 1 "invocation: an existing but artifact-LESS --dir is fatal" --all --repo "$IV" --dir "$IV/.lifecycle/epic-x/EMPTY" --base main
+# 5. `--k=v` is honoured — the old exact-token match dropped it exactly like an unknown flag.
+lc_says "epic-x/EMPTY" "invocation: --dir=<v> is honoured, not dropped" --all --repo "$IV" "--dir=$IV/.lifecycle/epic-x/EMPTY" --base main
+lc 0 "invocation: --dir=<v> CONTROL — the =form reaches the green feature too" --all --repo "$IV" "--dir=$IVD" "--base=main"
+# 6. GRADING NOTHING IS NOT A PASS. A dir holding an artifact but no COMPLETE phase leaves
+#    every phase PENDING; that used to print `OK — phases 1..0 complete (0/9)`, exit 0.
+mkdir -p "$IV/.lifecycle/epic-x/STRAY" && : > "$IV/.lifecycle/epic-x/STRAY/AUDIT_COVERAGE.tsv"
+lc 1 "invocation: all-nine-PENDING is a FAILURE, not 'phases 1..0 complete (0/9)'" --all --repo "$IV" --dir "$IV/.lifecycle/epic-x/STRAY" --base main
+lc_says "every phase is PENDING" "invocation: the all-PENDING failure says no phase was graded" --all --repo "$IV" --dir "$IV/.lifecycle/epic-x/STRAY" --base main
+lc_says "no phase was graded" "invocation: ...and that the run therefore proves nothing" --all --repo "$IV" --dir "$IV/.lifecycle/epic-x/STRAY" --base main
+# 7. --wip inherits every rule above (same runner, same parser).
+lc 1 "invocation: --wip is bound by the same all-PENDING rule" --wip --repo "$IV" --dir "$IV/.lifecycle/epic-x/STRAY" --base main
+lc 1 "invocation: --wip rejects an unknown flag too" --wip --repo "$IV" --feature ITEM-1 --base main
+rm -rf "$IV"
+
+
+# --- merge-gate + epic-check: the same strict-flag rule ------------------------
+# `argv.indexOf(name)` drops an unrecognised flag in EVERY one of these gates. It is
+# loudest in lifecycle-check (it manufactured a 0/9 green), but a merge-gate run with a
+# typo'd `--verify-head` silently becomes a full branch gate, and a typo'd value flag
+# leaves its bare value to be read as the branch name.
+R="$(new_repo)"; CLEANUP+=("$R")
+git -C "$R" checkout -q -b feat/x; echo hi > "$R/f.txt"
+git -C "$R" add -A && git -C "$R" commit -qm x
+assert_exit_cmd 1 "merge-gate: an unknown flag is fatal, not dropped" -- \
+  node "$MG" feat/x --repo "$R" --base main --no-fetch --skip-heavy --feature C9
+assert_exit_cmd 1 "merge-gate: a value-taking flag with no value is fatal" -- \
+  node "$MG" feat/x --repo "$R" --base main --no-fetch --skip-heavy --rev
+assert_exit_cmd 0 "merge-gate CONTROL: the same run without the bogus flag is unchanged" -- \
+  node "$MG" feat/x --repo "$R" --base main --no-fetch --skip-heavy
+assert_exit_cmd 0 "merge-gate: --k=v is honoured, not dropped" -- \
+  node "$MG" feat/x "--repo=$R" "--base=main" --no-fetch --skip-heavy
+
+EPIC_CHECK="$HERE/epic-check.mjs"
+assert_exit_cmd 1 "epic-check: an unknown flag is fatal" -- node "$EPIC_CHECK" --phase 0 --epic e --repo "$R" --feature C9
+assert_exit_cmd 1 "epic-check: a bare positional is fatal" -- node "$EPIC_CHECK" --phase 0 --epic e --repo "$R" C9
+assert_exit_cmd 1 "epic-check CONTROL: a missing epic still fails on its own merits" -- node "$EPIC_CHECK" --phase 0 --epic e --repo "$R"
 
 echo "== $PASS passed, $FAIL failed =="
 [ "$FAIL" -eq 0 ]

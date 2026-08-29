@@ -1284,7 +1284,34 @@ echo 'all:' > "$GOOD/src-app/server/vendor/pgvector/Makefile"
 # a real repo always ships config/dev.example.yaml; check #7 auto-seeds dev.yaml from it.
 printf 'jwt:\n  secret: "dev-secret-change-in-production-min-32-chars-long"\n' \
   > "$GOOD/src-app/server/config/dev.example.yaml"
+# "fully provisioned" now includes the agent pre-push hook (§8): lifecycle-check
+# --wip and merge-gate --verify-head are invoked by nothing until
+# install-agent-hooks.sh has run in the clone, which is a per-clone action a
+# fresh checkout has NOT performed.
+INSTALL_HOOKS="$(cd "$(dirname "$PREFLIGHT")/../scripts" && pwd)/install-agent-hooks.sh"
+(cd "$GOOD" && bash "$INSTALL_HOOKS" >/dev/null 2>&1)
 assert_exit_cmd 0 "preflight: fully-provisioned env passes" -- \
+  env -u DATABASE_URL -u ZIEE_BUILD_DB_PERWORKTREE bash "$PREFLIGHT" --repo "$GOOD"
+
+# --- §8: the three ways the hook can be absent while looking present ---------
+# Each is REFUSED (exit 1); the installed case above is the negative control, so
+# "always refuse" cannot score. The non-executable case matters most: git skips
+# such a hook silently, so nothing anywhere says the gate stopped running.
+HOOK_BAK="$GOOD/pre-push.bak"; cp "$GOOD/.git/hooks/pre-push" "$HOOK_BAK"
+rm -f "$GOOD/.git/hooks/pre-push"
+assert_exit_cmd 1 "preflight §8: a clone with NO pre-push hook is REFUSED" -- \
+  env -u DATABASE_URL -u ZIEE_BUILD_DB_PERWORKTREE bash "$PREFLIGHT" --repo "$GOOD"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$GOOD/.git/hooks/pre-push"
+chmod +x "$GOOD/.git/hooks/pre-push"
+assert_exit_cmd 1 "preflight §8: a pre-push hook that never calls merge-gate is REFUSED" -- \
+  env -u DATABASE_URL -u ZIEE_BUILD_DB_PERWORKTREE bash "$PREFLIGHT" --repo "$GOOD"
+cp "$HOOK_BAK" "$GOOD/.git/hooks/pre-push"; chmod -x "$GOOD/.git/hooks/pre-push"
+assert_exit_cmd 1 "preflight §8: a correct but NON-EXECUTABLE pre-push hook is REFUSED" -- \
+  env -u DATABASE_URL -u ZIEE_BUILD_DB_PERWORKTREE bash "$PREFLIGHT" --repo "$GOOD"
+chmod +x "$GOOD/.git/hooks/pre-push"
+# and the installer is idempotent — re-running it over an installed hook still passes.
+(cd "$GOOD" && bash "$INSTALL_HOOKS" >/dev/null 2>&1)
+assert_exit_cmd 0 "preflight §8: re-running the installer is idempotent and still passes" -- \
   env -u DATABASE_URL -u ZIEE_BUILD_DB_PERWORKTREE bash "$PREFLIGHT" --repo "$GOOD"
 
 # --- placeholder detection is about the VALUE, not one spelling of it --------
@@ -1347,6 +1374,7 @@ echo '{"hub_version":"v0.0.0"}' > "$META/src-app/server/binaries/hub-seed/index.
 echo 'all:' > "$META/src-app/server/vendor/pgvector/Makefile"
 printf 'jwt:\n  secret: "RE.PLACE[ME]*"\n' > "$META/src-app/server/config/dev.example.yaml"
 printf 'jwt:\n  secret: RE.PLACE[ME]*\n' > "$META/src-app/server/config/dev.yaml"
+(cd "$META" && bash "$INSTALL_HOOKS" >/dev/null 2>&1)
 assert_exit_cmd 1 "preflight: a placeholder containing regex metacharacters is matched LITERALLY" -- \
   env -u DATABASE_URL -u ZIEE_BUILD_DB_PERWORKTREE bash "$PREFLIGHT" --repo "$META"
 rm -f "$GOOD/src-app/server/config/dev.yaml"
@@ -1356,6 +1384,7 @@ printf 'jwt:\n  secret: "%s"\n' "$PH" > "$GOOD/src-app/server/config/dev.example
 # + node_modules checks are ACTIVE and fail.
 BAD="$(new_repo)"; CLEANUP+=("$BAD")
 write_ziee_appconfig "$BAD"
+(cd "$BAD" && bash "$INSTALL_HOOKS" >/dev/null 2>&1)
 assert_exit_cmd 1 "preflight: missing hub-seed/node_modules is REFUSED" -- \
   env -u DATABASE_URL -u ZIEE_BUILD_DB_PERWORKTREE bash "$PREFLIGHT" --repo "$BAD"
 
@@ -1363,6 +1392,10 @@ assert_exit_cmd 1 "preflight: missing hub-seed/node_modules is REFUSED" -- \
 # the gate exits 0 on the generic checks only (a fresh app pre-app.config is not
 # hard-blocked by ziee's server prerequisites).
 NOCFG="$(new_repo)"; CLEANUP+=("$NOCFG")
+# §8 is app.config-INDEPENDENT (the hook is lifecycle infrastructure, not an app
+# prerequisite), so this fixture needs one too for the "generic-only" claim to
+# be about the app-specific checks.
+(cd "$NOCFG" && bash "$INSTALL_HOOKS" >/dev/null 2>&1)
 assert_exit_cmd 0 "preflight: NO app.config ⇒ generic-only, exit 0" -- \
   env -u DATABASE_URL -u ZIEE_BUILD_DB_PERWORKTREE bash "$PREFLIGHT" --repo "$NOCFG"
 

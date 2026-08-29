@@ -335,6 +335,61 @@ else
   skip "dev-config seed check (PREFLIGHT_CONFIG_* unset)"
 fi
 
+# ---------------------------------------------------------------------------
+# 8. the agent pre-push hook is INSTALLED — else `lifecycle-check --wip` and
+#    `merge-gate --verify-head` are shipped, working, and INVOKED BY NOTHING.
+#
+#    Both scripts exist and are observed refusing when run by hand; neither one
+#    runs on its own. `scripts/install-agent-hooks.sh` is the installer, and
+#    installing is a PER-CLONE action, so a fresh clone or a `git worktree add`
+#    on a clone nobody ran it in has no enforcement at all — which is how a repo
+#    can carry a working merge gate and still land a duplicate migration prefix
+#    or a leaked `.lifecycle/` tree on main. Phase 1 is where a per-clone setup
+#    gap belongs, next to node_modules and the build DB: it is the one check
+#    that runs before anybody builds anything.
+#
+#    An UNINSTALLED hook is a `bad`, not a `skip`. That distinction is the whole
+#    point — "the gate is absent" and "the gate passed" must never print the
+#    same way. The three refusals below are the three ways it can be absent
+#    while looking present.
+#
+#    The hook lives in the COMMON git dir, so one install covers every worktree
+#    of a clone; a repo-level `core.hooksPath` override is honoured.
+# ---------------------------------------------------------------------------
+HOOKS_DIR="$(git -C "$REPO" config --get core.hooksPath 2>/dev/null || true)"
+if [ -n "$HOOKS_DIR" ]; then
+  case "$HOOKS_DIR" in /*) : ;; *) HOOKS_DIR="$REPO/$HOOKS_DIR" ;; esac
+else
+  # `git -C <dir> rev-parse --git-common-dir` returns a path relative to <dir>
+  # (plain ".git" in an ordinary clone), NOT to the caller's cwd — resolving it
+  # against the wrong directory reports a missing hook in a repo that has one.
+  HOOKS_DIR="$(git -C "$REPO" rev-parse --git-common-dir 2>/dev/null || true)"
+  case "$HOOKS_DIR" in
+    "") HOOKS_DIR="$REPO/.git" ;;
+    /*) : ;;
+    *)  HOOKS_DIR="$REPO/$HOOKS_DIR" ;;
+  esac
+  HOOKS_DIR="$HOOKS_DIR/hooks"
+fi
+# $0 may be reached through a symlink (apps symlink .claude/lifecycle at the
+# submodule), so try the script's own dir first and fall back to the consuming
+# app's submodule path.
+INSTALLER="$(cd "$(dirname "$0")/../scripts" 2>/dev/null && pwd || true)/install-agent-hooks.sh"
+[ -f "$INSTALLER" ] || INSTALLER="$REPO/agent-kit/scripts/install-agent-hooks.sh"
+PREPUSH="$HOOKS_DIR/pre-push"
+if [ ! -f "$PREPUSH" ]; then
+  bad "no pre-push hook in $HOOKS_DIR — lifecycle-check --wip and merge-gate --verify-head are installed but INVOKED BY NOTHING" \
+      "bash $INSTALLER"
+elif ! grep -q "merge-gate.mjs" "$PREPUSH" 2>/dev/null; then
+  bad "$PREPUSH exists but never invokes merge-gate --verify-head — a push to main is ungated for leaked .lifecycle/ artifacts and duplicate migration prefixes" \
+      "bash $INSTALLER   (idempotent; back up the existing hook first if it is yours)"
+elif [ ! -x "$PREPUSH" ]; then
+  bad "$PREPUSH is present but NOT EXECUTABLE — git skips a non-executable hook SILENTLY, so this is the failure mode that looks most like success" \
+      "chmod +x $PREPUSH"
+else
+  ok "pre-push hook installed (lifecycle-check --wip + merge-gate --verify-head)"
+fi
+
 echo ""
 if [ "$FAIL" -ne 0 ]; then
   echo "preflight: $FAIL blocking problem(s) — fix them before building."

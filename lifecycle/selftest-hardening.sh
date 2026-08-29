@@ -1287,6 +1287,71 @@ printf 'jwt:\n  secret: "dev-secret-change-in-production-min-32-chars-long"\n' \
 assert_exit_cmd 0 "preflight: fully-provisioned env passes" -- \
   env -u DATABASE_URL -u ZIEE_BUILD_DB_PERWORKTREE bash "$PREFLIGHT" --repo "$GOOD"
 
+# --- placeholder detection is about the VALUE, not one spelling of it --------
+#
+# The check used to interpolate the placeholder into `secret:[[:space:]]*"…"`
+# — double quotes literally in the pattern — so it saw ONE of the three
+# spellings YAML accepts. Each case below is the SAME unsubstituted secret the
+# server hard-refuses to boot on, and each must be REFUSED (exit 1). The
+# unquoted case is the regression: it used to print
+# "ok  … present with a non-placeholder jwt.secret".
+PH='dev-secret-change-in-production-min-32-chars-long'
+for spelling in 'double' 'bare' 'single' 'trailing-space' 'block-scalar'; do
+  case "$spelling" in
+    double)         printf 'jwt:\n  secret: "%s"\n' "$PH" ;;
+    bare)           printf 'jwt:\n  secret: %s\n' "$PH" ;;
+    single)         printf "jwt:\n  secret: '%s'\n" "$PH" ;;
+    'trailing-space') printf 'jwt:\n  secret: "%s"   \n' "$PH" ;;
+    block-scalar)   printf 'jwt:\n  secret: >-\n    %s\n' "$PH" ;;
+  esac > "$GOOD/src-app/server/config/dev.yaml"
+  assert_exit_cmd 1 "preflight: placeholder jwt.secret ($spelling) is REFUSED" -- \
+    env -u DATABASE_URL -u ZIEE_BUILD_DB_PERWORKTREE bash "$PREFLIGHT" --repo "$GOOD"
+done
+# NEGATIVE CONTROL — without it "refuse everything" would score 5/5. A real
+# secret that merely CONTAINS the word `secret`, and a comment that quotes the
+# placeholder verbatim (documentation, not configuration), must both pass.
+printf 'jwt:\n  # replace "%s" with a random value\n  secret: "kP3q8Zx-not-the-placeholder-just-a-long-random-value-49ch"\n' "$PH" \
+  > "$GOOD/src-app/server/config/dev.yaml"
+assert_exit_cmd 0 "preflight: a real jwt.secret passes (placeholder only in a comment)" -- \
+  env -u DATABASE_URL -u ZIEE_BUILD_DB_PERWORKTREE bash "$PREFLIGHT" --repo "$GOOD"
+
+# --- and the SEED path carried the same quoted-only assumption ---------------
+# `dev.example.yaml` with an UNQUOTED placeholder could not be seeded at all:
+# the guard grepped for `"PLACEHOLDER"` and reported the example as not
+# containing its own placeholder. Seeding must work from every spelling, and
+# the result must be a config that then PASSES.
+for spelling in 'double' 'bare' 'single'; do
+  rm -f "$GOOD/src-app/server/config/dev.yaml"
+  case "$spelling" in
+    double) printf 'jwt:\n  secret: "%s"\n' "$PH" ;;
+    bare)   printf 'jwt:\n  secret: %s\n' "$PH" ;;
+    single) printf "jwt:\n  secret: '%s'\n" "$PH" ;;
+  esac > "$GOOD/src-app/server/config/dev.example.yaml"
+  assert_exit_cmd 0 "preflight: seeds dev.yaml from a $spelling-quoted example" -- \
+    env -u DATABASE_URL -u ZIEE_BUILD_DB_PERWORKTREE bash "$PREFLIGHT" --repo "$GOOD"
+  if [ -f "$GOOD/src-app/server/config/dev.yaml" ] && \
+     ! grep -qF -- "$PH" "$GOOD/src-app/server/config/dev.yaml"; then
+    PASS=$((PASS+1)); printf '  \033[32mok  \033[0m %s\n' "preflight: seeded dev.yaml ($spelling example) has no placeholder left"
+  else
+    FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "preflight: seeded dev.yaml ($spelling example) still holds the placeholder"
+  fi
+done
+# a placeholder full of REGEX METACHARACTERS must be matched literally — the old
+# sed interpolated it into a pattern, so `.`/`*`/`[` matched the wrong span.
+META="$(new_repo)"; CLEANUP+=("$META")
+write_ziee_appconfig "$META"
+sed -i 's|^PREFLIGHT_CONFIG_PLACEHOLDER=.*|PREFLIGHT_CONFIG_PLACEHOLDER=RE.PLACE[ME]*|' "$META/.claude/app.config"
+mkdir -p "$META/src-app/server/binaries/hub-seed" "$META/src-app/server/vendor/pgvector" \
+         "$META/src-app/server/config" "$META/node_modules"
+echo '{"hub_version":"v0.0.0"}' > "$META/src-app/server/binaries/hub-seed/index.json"
+echo 'all:' > "$META/src-app/server/vendor/pgvector/Makefile"
+printf 'jwt:\n  secret: "RE.PLACE[ME]*"\n' > "$META/src-app/server/config/dev.example.yaml"
+printf 'jwt:\n  secret: RE.PLACE[ME]*\n' > "$META/src-app/server/config/dev.yaml"
+assert_exit_cmd 1 "preflight: a placeholder containing regex metacharacters is matched LITERALLY" -- \
+  env -u DATABASE_URL -u ZIEE_BUILD_DB_PERWORKTREE bash "$PREFLIGHT" --repo "$META"
+rm -f "$GOOD/src-app/server/config/dev.yaml"
+printf 'jwt:\n  secret: "%s"\n' "$PH" > "$GOOD/src-app/server/config/dev.example.yaml"
+
 # bad: hub-seed missing (build.rs would PANIC) — app.config present so the seed
 # + node_modules checks are ACTIVE and fail.
 BAD="$(new_repo)"; CLEANUP+=("$BAD")

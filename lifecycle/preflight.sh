@@ -215,6 +215,76 @@ fi
 #    can't boot, and it hard-refuses to boot on the example's placeholder secret.
 #    Auto-fix: seed the real config from the example with a generated secret (only when
 #    absent — non-destructive).
+# PLACEHOLDER MATCHING — compare the VALUE, never one spelling of it.
+#
+# This used to be `grep -qE '^[[:space:]]*secret:[[:space:]]*"$PLACEHOLDER"'`,
+# with the double quotes literally part of the pattern. YAML accepts three
+# spellings of the same scalar and that regex saw exactly one of them:
+#
+#     secret: "REPLACE_ME_…"   → refused      (correct)
+#     secret: REPLACE_ME_…     → "ok  … present with a non-placeholder secret"
+#     secret: 'REPLACE_ME_…'   → same false OK
+#
+# The bare form is the one a human hand-editing YAML is most likely to write,
+# since YAML does not require the quotes. So preflight reported the environment
+# ready for a config the server hard-refuses to boot on — a boot refusal that a
+# green gate walks you straight into.
+#
+# The same quoted-only assumption was in the SEED path two ways: the example was
+# searched for `"PLACEHOLDER"` (an unquoted example could not be seeded at all,
+# and the failure was reported as a missing placeholder) and the substitution was
+# a `sed` whose LHS interpolated $PLACEHOLDER into a regex — a placeholder with a
+# `.` or `*` in it matched the wrong span or nothing.
+#
+# All three helpers below are LITERAL, metacharacter-safe (awk `index`/`==`, no
+# regex over the placeholder) and quote-agnostic.
+
+# ph_secret_line <placeholder> <file> — exit 0 iff a `secret:` line's value,
+# with optional matching single/double quotes and trailing space stripped,
+# EQUALS the placeholder.
+ph_secret_line() {
+  awk -v ph="$1" '
+    /^[[:space:]]*secret:[[:space:]]*/ {
+      v = $0
+      sub(/^[[:space:]]*secret:[[:space:]]*/, "", v)
+      sub(/[[:space:]]+$/, "", v)
+      if (length(v) > 1) {
+        f = substr(v, 1, 1); l = substr(v, length(v), 1)
+        if ((f == "\"" && l == "\"") || (f == "'"'"'" && l == "'"'"'")) v = substr(v, 2, length(v) - 2)
+      }
+      if (v == ph) { found = 1; exit }
+    }
+    END { exit (found ? 0 : 1) }' "$2"
+}
+
+# ph_anywhere <placeholder> <file> — exit 0 iff the placeholder appears on any
+# non-comment line. Catches the block-scalar spellings (`secret: >-` with the
+# value on the following line) that no single-line rule can see, and any OTHER
+# key the example left unfilled.
+ph_anywhere() {
+  awk -v ph="$1" '
+    { line = $0; sub(/^[[:space:]]*/, "", line) }
+    line ~ /^#/ { next }
+    index($0, ph) { found = 1; exit }
+    END { exit (found ? 0 : 1) }' "$2"
+}
+
+# ph_replace <placeholder> <replacement> <file> — literal, every occurrence, to
+# stdout. Quoting in the source is preserved because only the placeholder token
+# itself is replaced: `secret: "PH"` → `secret: "<secret>"`, `secret: PH` →
+# `secret: <secret>`.
+ph_replace() {
+  awk -v ph="$1" -v rep="$2" '
+    {
+      out = ""; rest = $0; n = length(ph)
+      while ((i = index(rest, ph)) > 0) {
+        out = out substr(rest, 1, i - 1) rep
+        rest = substr(rest, i + n)
+      }
+      print out rest
+    }' "$3"
+}
+
 CFG_DIR_REL="$(cfg PREFLIGHT_CONFIG_DIR)"
 CFG_FILE="$(cfg PREFLIGHT_CONFIG_FILE)"
 CFG_EXAMPLE="$(cfg PREFLIGHT_CONFIG_EXAMPLE)"
@@ -238,10 +308,10 @@ if [ -n "$CFG_DIR_REL" ] && [ -n "$CFG_FILE" ] && [ -n "$CFG_EXAMPLE" ] && [ -n 
       #      PREFLIGHT_CONFIG_PLACEHOLDER),
       #  (b) the sed must succeed and produce a non-empty file,
       #  (c) the placeholder must be GONE from the result (the substitution ran).
-      if ! grep -qF "\"$PLACEHOLDER\"" "$DEV_EX"; then
+      if ! grep -qF -- "$PLACEHOLDER" "$DEV_EX"; then
         bad "$CFG_EXAMPLE does not contain the placeholder \"$PLACEHOLDER\" — cannot inject a jwt.secret (check PREFLIGHT_CONFIG_PLACEHOLDER)" \
             "set PREFLIGHT_CONFIG_PLACEHOLDER to the exact placeholder value that appears in $CFG_EXAMPLE"
-      elif sed "s|\"$PLACEHOLDER\"|\"$SECRET\"|" "$DEV_EX" > "$DEV_CFG" && [ -s "$DEV_CFG" ] && ! grep -qF "\"$PLACEHOLDER\"" "$DEV_CFG"; then
+      elif ph_replace "$PLACEHOLDER" "$SECRET" "$DEV_EX" > "$DEV_CFG" && [ -s "$DEV_CFG" ] && ! grep -qF -- "$PLACEHOLDER" "$DEV_CFG"; then
         ok "bootstrapped $CFG_DIR_REL/$CFG_FILE from $CFG_EXAMPLE (generated a random jwt.secret; edit for an external DB)"
       else
         rm -f "$DEV_CFG"
@@ -252,9 +322,12 @@ if [ -n "$CFG_DIR_REL" ] && [ -n "$CFG_FILE" ] && [ -n "$CFG_EXAMPLE" ] && [ -n 
       bad "$CFG_DIR_REL/$CFG_FILE missing and no $CFG_EXAMPLE to seed from" \
           "author $DEV_CFG manually — the server will not boot without it"
     fi
-  elif grep -qE "^[[:space:]]*secret:[[:space:]]*\"$PLACEHOLDER\"" "$DEV_CFG"; then
+  elif ph_secret_line "$PLACEHOLDER" "$DEV_CFG"; then
     bad "$CFG_DIR_REL/$CFG_FILE still has the placeholder jwt.secret — the server refuses to boot" \
         "set jwt.secret to a random >=32-char value:  openssl rand -base64 48"
+  elif ph_anywhere "$PLACEHOLDER" "$DEV_CFG"; then
+    bad "$CFG_DIR_REL/$CFG_FILE still contains the placeholder value \"$PLACEHOLDER\" (not on a \`secret:\` line — a block scalar, or another key the example left unfilled)" \
+        "replace every occurrence with a real value; for a secret:  openssl rand -base64 48"
   else
     ok "$CFG_DIR_REL/$CFG_FILE present with a non-placeholder jwt.secret"
   fi

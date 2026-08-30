@@ -236,11 +236,33 @@ if (artifactsPresent(featureDir).length === 0) {
       });
     } catch { return []; }
   })();
-  fail(
-    `${featureDir} contains no lifecycle artifacts (none of ${ARTIFACT_NAMES.join(', ')}, DRIFT-<n>.md, FIX_ROUND-<n>.md) — ` +
-    `there is nothing here to grade, and grading nothing is not a pass.` +
-    (subs.length ? ` Its subdirectories DO carry artifacts (${subs.join(', ')}) — this looks like an EPIC root; pass --dir <that subdirectory>.` : ''),
-  );
+  // AUTO-DESCEND into a nested epic's single item, but ONLY when the answer is
+  // unambiguous AND the directory was DISCOVERED rather than passed.
+  //
+  // Refusing here made the whole tool unusable on a nested epic: `.lifecycle/`
+  // holds one dir (the epic), the epic holds GRAPH.md/RECONCILE.md and one item,
+  // and every by-hand `--wip` / `--all` died on this message. The pre-push hook
+  // was taught to descend first; a builder checking the same branch by hand still
+  // got the refusal, concluded the gate was broken, and pushed with --no-verify —
+  // which is worse than the failure, because it also skips the COMPLETED phases
+  // the hook would have graded. Measured on ziee-ai/comic's `ssr-v1`: every
+  // nested item hit it.
+  //
+  // An EXPLICIT `--dir` that lands on an epic root still fails: that is a typo or
+  // a stale path, i.e. an error about the invocation, and guessing past it is how
+  // a run grades something other than what it was asked to grade.
+  if (!dirArg && subs.length === 1) {
+    featureDir = join(featureDir, subs[0]);
+    process.stderr.write(
+      `lifecycle-check: nested epic layout — grading ${subs[0]} (pass --dir to override)\n`,
+    );
+  } else {
+    fail(
+      `${featureDir} contains no lifecycle artifacts (none of ${ARTIFACT_NAMES.join(', ')}, DRIFT-<n>.md, FIX_ROUND-<n>.md) — ` +
+      `there is nothing here to grade, and grading nothing is not a pass.` +
+      (subs.length ? ` Its subdirectories DO carry artifacts (${subs.join(', ')}) — this looks like an EPIC root; pass --dir <that subdirectory>.` : ''),
+    );
+  }
 }
 
 // Resolve the diff base. Worktrees are cut from origin/main, and a stale local

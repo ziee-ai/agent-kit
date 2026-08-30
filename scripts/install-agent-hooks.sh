@@ -56,8 +56,34 @@ if [ -d "$TOP/.lifecycle" ]; then
     # stage's open round cannot fail this owner's push.
     SCOPE_ARGS=""
     [ -n "${LIFECYCLE_SCOPE:-}" ] && SCOPE_ARGS="--scope $LIFECYCLE_SCOPE"
+
+    DIR_ARGS=""
+    _lc_has_artifacts() {
+      for _f in PLAN.md PLAN_AUDIT.md DESIGN_FIDELITY.md TESTS.md DECISIONS.md \
+                LEDGER.jsonl AUDIT_COVERAGE.tsv TEST_RESULTS.md HUMAN_FEEDBACK.md; do
+        [ -f "$1/$_f" ] && return 0
+      done
+      for _f in "$1"/DRIFT-*.md "$1"/FIX_ROUND-*.md; do [ -f "$_f" ] && return 0; done
+      return 1
+    }
+    _lc_n=0; _lc_sole=""
+    for _d in "$TOP/.lifecycle"/*/; do
+      [ -d "$_d" ] || continue
+      _lc_n=$((_lc_n + 1)); _lc_sole="${_d%/}"
+    done
+    if [ "$_lc_n" = "1" ] && ! _lc_has_artifacts "$_lc_sole"; then
+      _lc_m=0; _lc_item=""
+      for _d in "$_lc_sole"/*/; do
+        [ -d "$_d" ] || continue
+        if _lc_has_artifacts "${_d%/}"; then _lc_m=$((_lc_m + 1)); _lc_item="${_d%/}"; fi
+      done
+      if [ "$_lc_m" = "1" ]; then
+        DIR_ARGS="--dir $_lc_item"
+        echo "pre-push: nested epic layout — grading $_lc_item" >&2
+      fi
+    fi
     # shellcheck disable=SC2086
-    node "$CHECK" --wip --repo "$TOP" $SCOPE_ARGS || {
+    node "$CHECK" --wip --repo "$TOP" $SCOPE_ARGS $DIR_ARGS || {
       echo "pre-push: lifecycle-check --wip FAILED — a COMPLETED phase has gaps (the phase in progress is exempt)." >&2
       echo "          Fix the gaps above, or push a genuine WIP checkpoint with --no-verify naming each failing gate in the commit body." >&2
       exit 1

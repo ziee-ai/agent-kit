@@ -28,10 +28,31 @@
 // child_process.
 
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, cpSync, rmSync, readdirSync, readFileSync, statSync, symlinkSync, realpathSync, lstatSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, cpSync, rmSync, readdirSync, readFileSync, statSync, symlinkSync, realpathSync, lstatSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 
+
+// ---------------------------------------------------------------------------
+// sentinel file — lets wait loops key on the VERDICT instead of process
+// existence, so a gate that hangs after finishing does not block the fleet
+// (#291).
+// ---------------------------------------------------------------------------
+function writeVerdictSentinel(verdict) {
+  const dir = resolve(process.env.HOME || '/tmp', '.merge-gate');
+  mkdirSync(dir, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const sentinelPath = join(dir, \`merge-gate-verdict-\${branch || 'unknown'}-\${stamp}-\${verdict}.ok\`);
+  writeFileSync(sentinelPath, \`merge-gate: \${verdict}  branch=\${branch}  base=\${base}\n\`, 'utf8');
+  // Clean up old sentinels older than 1 hour
+  try {
+    for (const f of readdirSync(dir)) {
+      if (!f.startsWith('merge-gate-verdict-')) continue;
+      const p = join(dir, f);
+      if (statSync(p).mtimeMs < Date.now() - 3600000) rmSync(p, { force: true });
+    }
+  } catch {}
+}
 // ---------------------------------------------------------------------------
 // arg parsing (mirrors lifecycle-check.mjs)
 // ---------------------------------------------------------------------------
@@ -915,7 +936,10 @@ function gateC7() {
     const out = (r.stdout || '') + (r.stderr || '');
     record('C7', 'repo-check', 'FAIL',
       `${CHECK_CMD} FAILED on the merged tree (exit ${r.status}). This is the gate set the app itself defines — a lint, a doc-reference check or a typecheck that C1/C3 do not run. Tail:\n`
-      + out.split(/\n/).filter((l) => l.trim()).slice(-14).join('\n'));
+      // npm's failure epilogue is exactly 14 lines, so slice(-14) truncates
+      // the actual error away. Use a generous tail so the actionable lines
+      // (the first error, the test name, the assertion message) survive.
+      + out.split(/\n/).filter((l) => l.trim()).slice(-200).join('\n'));
     return;
   }
   record('C7', 'repo-check', 'PASS', `${CHECK_CMD} green on the merged tree`);
@@ -960,7 +984,12 @@ for (const r of results) {
 if (KEEP_STAGING && stagingCreated) process.stdout.write(`  staging worktree kept at: ${staging}\n`);
 if (anyFail) {
   process.stderr.write('merge-gate: FAIL — do NOT push this merge to main until the gates above are green.\n');
+  // Write sentinel file so wait loops can key on the verdict instead of process existence.
+  // This prevents a hung-gate scenario where a gate prints OK then sits with no children
+  // forever, blocking the entire fleet (#291).
+  try { writeVerdictSentinel('FAIL'); } catch {}
   process.exit(1);
 }
 process.stdout.write('merge-gate: OK — the merge onto current ' + base + ' is clean.\n');
+try { writeVerdictSentinel('OK'); } catch {}
 process.exit(0);

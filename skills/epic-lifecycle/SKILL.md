@@ -93,6 +93,51 @@ executor cannot weaken.** This skill is that fix, applied to an epic's DAG.
 
 ---
 
+## Why every plan is produced BLIND (and why that is what makes reconcile worth running)
+
+**Plan each item with a FRESH agent that has not read any other item's plan.** Not
+for independence theatre — for **coverage**.
+
+A planning pass is an exploration. One agent greps its way to a handful of files,
+grounds its contracts in what it happened to open, and writes a plan that is
+correct *about the part of the codebase it looked at*. A second agent, given the
+same item and no sight of the first plan, opens a **different** set of files — a
+different entry point, a different grep, a different call chain — and grounds its
+contracts in that. Neither exploration is complete; the two are **partially
+disjoint**.
+
+So reconciliation (Phase 3) does **two** jobs, not one:
+
+1. **Match contracts** — the consumer-driven, anti-descope job this skill was
+   built for.
+2. **MERGE COVERAGE** — a fact one planner found and another missed enters the
+   epic through the matrix. The union of N blind explorations is strictly larger
+   than any single pass, and Phase 3 is the only place that union is ever formed.
+
+Job 2 evaporates the moment a planner reads another planner's `PLAN.md`. Anchored,
+it re-treads the same files and confirms the same contracts, and its "independent"
+verdict adds nothing — the two explorations collapse onto one. **Blindness is what
+preserves the diversity that makes the matrix informative**, exactly as
+`feature-lifecycle`'s Phase 6 spawns blind, multi-angle auditors over a diff for
+the same reason: one reviewer's blind spot is another's finding, and only the merge
+sees both.
+
+Practical consequences:
+
+- Dispatch each item's planning to a **fresh agent** (no shared context, no sight
+  of sibling plans). Give it the item's brief, the invariants, the substrate
+  contracts it may bind to, and — for a dependent — its providers' frozen
+  `Provides` and nothing else of theirs (§ Phase 2's interface-not-implementation
+  rule already says this; blindness is how it is *enforced* rather than trusted).
+- **Do not hand a planner the orchestrator's own draft.** If a draft exists, move
+  it aside first. A plan written to be "checked" by a later agent gets confirmed,
+  not audited.
+- When two blind plans disagree about the same seam, that is **signal, not noise**
+  — it is usually one of them having read a file the other did not. Record both
+  readings in the matrix before resolving.
+
+---
+
 ## The layered stack (know where you are)
 
 | Skill | Scope | Produces |
@@ -231,7 +276,9 @@ open because closing them was never wired into the flow. Wire it in — at Phase
 ## Phase 1 — Plan the leaves (full planning half: feature-lifecycle 1–4)
 
 For each leaf, run `feature-lifecycle` **phases 1–4** (PLAN → PLAN_AUDIT → TESTS →
-DECISIONS — do NOT build; stop before phase 5). A leaf depends on nothing, so its
+DECISIONS — do NOT build; stop before phase 5), **in a FRESH agent per leaf, blind
+to every sibling plan** (see *Why every plan is produced BLIND*). Leaves are
+mutually independent, so they dispatch in parallel. A leaf depends on nothing, so its
 phase-2 audit runs FULLY against the real codebase and its phase-3 tests are real —
 its `Provides` contracts come out maximally grounded + expressed as acceptance
 tests. ADD to its `PLAN.md`:
@@ -276,8 +323,10 @@ Phase 3.
 ## Phase 2 — Plan dependents against ASSUMED-BUILT providers
 
 Walk the topological order (dependencies are fully planned before their dependents,
-so you never plan against an unstable provider). For each non-leaf item, run
-`feature-lifecycle` **phases 1–4**, treating **every dependency as already built** —
+so you never plan against an unstable provider) — this is also why dependents cannot
+be dispatched in the same wave as their providers. For each non-leaf item, run
+`feature-lifecycle` **phases 1–4** **in a FRESH agent, blind to every sibling
+plan**, treating **every dependency as already built** —
 its FROZEN `## Provides` contracts are the assumed substrate (need-driven design:
 stating your need designs the dependency's interface). Its phase-2 audit runs
 against the real codebase for its OWN touch points and against the providers'
@@ -326,7 +375,16 @@ non-leaf has ≥1 `CONS`.
 ## Phase 3 — Reconcile (the anti-descope core) → `RECONCILE.md`
 
 Build the **contract matrix**: for every `CONS` across the epic, find the `PROV` it
-binds to, write a verdict (MATCH / GAP / DRIFT). Resolution rules:
+binds to, write a verdict (MATCH / GAP / DRIFT).
+
+**Reconcile is also where the blind explorations MERGE** — see *Why every plan is
+produced BLIND*. Read the plans for facts as well as for contracts: a file one
+planner grounded against and another never opened is coverage this epic now has,
+and it belongs in the matrix even when the edge itself verdicts MATCH. An edge that
+matches on prose while the two planners were looking at different code is not
+settled; it is unexamined.
+
+Resolution rules:
 
 - **A GAP grows the PROVIDER, not the consumer.** The default fix for "the leaf
   doesn't provide what I need" is to make the leaf provide it — because a real

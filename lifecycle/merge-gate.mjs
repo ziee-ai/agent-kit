@@ -915,7 +915,12 @@ function gateC7() {
     const out = (r.stdout || '') + (r.stderr || '');
     record('C7', 'repo-check', 'FAIL',
       `${CHECK_CMD} FAILED on the merged tree (exit ${r.status}). This is the gate set the app itself defines — a lint, a doc-reference check or a typecheck that C1/C3 do not run. Tail:\n`
-      + out.split(/\n/).filter((l) => l.trim()).slice(-14).join('\n'));
+      // npm's failure epilogue is itself ~14 lines (the `npm error` block naming
+      // the workspace, the command and the log path), so slice(-14) reliably
+      // truncated the ACTUAL error away — the first failing assertion, the test
+      // name, the type error — and left only the epilogue. Keep a generous tail
+      // so the actionable lines survive.
+      + out.split(/\n/).filter((l) => l.trim()).slice(-200).join('\n'));
     return;
   }
   record('C7', 'repo-check', 'PASS', `${CHECK_CMD} green on the merged tree`);

@@ -212,23 +212,23 @@ turn**, not by how many workers you spawn. Two rules follow:
   worker coordinator uses — it applies to the orchestrator too, and this is where
   the spend now concentrates. (One measured session was adding ~40–60K new tokens
   of context PER TURN, almost all from direct large reads.)
-- **Compact early and often.** A long interactive session sits near a full window,
-  so every turn re-caches a huge context. Force earlier auto-compaction by setting
-  **`CLAUDE_CODE_AUTO_COMPACT_WINDOW`** (a token count) BELOW the model's max window
-  — auto-compact then triggers at that threshold instead of near the full window
-  (it's the min of the setting and the model window). Set it in the launching env
-  or `settings.json` (`autoCompactWindow`). **Pick the value from MEASURED numbers,
-  not a guess: these Opus sessions run a ~1,000,000-token window (measured peak
-  resident ~1M), and the fixed FLOOR — Claude's system prompt + tools + a big
-  `CLAUDE.md` (ziee's is ~33K tok) + loaded skills — is already ~60–115K tokens. So
-  set the window to roughly HALF the model window (~400–500K): it ~halves per-turn
-  cache-write (the cost driver) while leaving ~300–400K working room above the
-  floor. Do NOT set it near the floor (e.g. 140K) — the session would hit it
-  immediately and compact on almost every turn (churn + a summarization call each
-  time), which costs MORE.** Also `/compact` manually at natural
+- **Compact while the cache is still WARM, not aggressively early.** Set
+  **`autoCompactWindow: 0.75`** — auto-compact at ~75% of the model window (compaction
+  is itself a full-context summarization call, cheap only while the cache is warm; too
+  early or cold costs MORE, and our measured cache is already warm ~39:1 read:write, so
+  aggressive low thresholds are the wrong move). **CHECK and SET this PER-PROJECT** in
+  the repo's **`.claude/settings.json`** (`"autoCompactWindow": 0.75`) — NOT the global
+  `~/.claude/settings.json` (each project decides; a global value bleeds into unrelated
+  sessions). At session start, confirm it's present for this project; add it if missing.
+  (A fraction like `0.75` is model-window-relative, so it's correct regardless of
+  whether the session is on a 200K or ~1M window; a raw token count would need
+  per-model tuning — don't. Do NOT set it near the fixed floor — system prompt + tools
+  + `CLAUDE.md` + skills is already ~60–115K tokens; a low threshold would compact on
+  almost every turn.) **This is a MINOR lever** — the big wins are model routing (above)
+  and not accumulating one giant long-lived session. Also `/compact` manually at natural
   breakpoints (after a feature merges, before switching campaigns), and prefer
   `/clear` + a fresh self-contained message over resuming an hours-old session for
-  a NEW task — a 6-week resumed session carries its whole history into every turn.
+  a NEW task — a long resumed session carries its whole history into every turn.
 
 ## The task list must survive compaction — it lives on DISK, not in context
 Compaction summarizes context, so **anything you only remember in-context can be

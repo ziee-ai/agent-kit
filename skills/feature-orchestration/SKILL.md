@@ -12,11 +12,26 @@ description: >
 
 # Feature Orchestration (orchestrator playbook)
 
-You drive a fleet of interactive agent sessions (zellij: `claude-live`,
-`claude-live2` … `claude-live8`) that each implement one feature via the
-**feature-lifecycle** skill. Your job: dispatch work, keep sessions honest, and
+You drive a fleet of worker agents that each implement one feature via the
+**feature-lifecycle** skill. Your job: dispatch work, keep workers honest, and
 merge their output to `main` cleanly. **Nothing merges to main without the
 human's go** unless they've said otherwise.
+
+### Where this sits — the layering (super-epic → epic → feature → worker)
+- **Super-epic / epic (>1 interdependent feature, up to 50+ items):** planned by
+  the **`epic-lifecycle`** skill FIRST (the DAG in `.lifecycle/<epic>/GRAPH.md`,
+  per-item `PLAN.md`, the `RECONCILE.md` contract matrix, a GitHub issue per node).
+  This orchestration skill then DRIVES that graph in topological order — one feature
+  dispatched per ready (deps-met) node. For a super-epic, the durable STATUS ledger
+  + "re-derive from the board after every compaction" rule below is mandatory, not
+  optional — you cannot hold 50 items' state in context.
+- **Feature:** one node = one worker running `feature-lifecycle` in its own worktree.
+- **Worker backend = the `bridge-coordinator`** (spawned via the Task/Agent tool),
+  which dispatches **dsh workers** (`/data/pbya/dsh-local.sh`, local DeepSeek,
+  effectively free) for implementation + first-line verification. The coordinator
+  reports ready; YOU run the merge-gate and merge. (The older interactive-zellij
+  `claude-liveN --remote-control` fleet is **retired** — do not launch it; the rest
+  of this doc's "worker/session" guidance now means coordinator/dsh workers.)
 
 ## The one rule that everything else serves
 **Verify; do not trust.** A session saying "8/8, ready to push" is a *claim*, not
@@ -26,36 +41,32 @@ types, plan-trimming, and a merge-gate bug — all by re-verifying instead of
 trusting. This is the P1 discipline; it is non-negotiable.
 
 ## Dispatching feature work
-- One feature per session, in its own worktree off `origin/main`, via
-  `/feature-lifecycle`. Big/architectural features (store refactors, new
-  runtimes) → **Opus 4.8 xhigh** + a **plan-first pause** (run phases 1–4, then
-  `SendMessage main` + HALT for the human to approve the design before code).
-- Tell every session: **report ready, never self-push** — you run the merge-gate
-  and merge. (The pre-push hook exempts `main`, so a self-push bypasses the gate.)
-- Launch sessions with cwd = the main repo (so CLAUDE.md + memory load); they
-  edit in their worktree. Spawn a fresh zellij session with a real PTY:
-  `setsid bash -c 'script -qfc "zellij attach --create claude-liveN" /tmp/…'`
-  then write the `claude --model … --effort … --dangerously-skip-permissions
-  --remote-control` launch line.
+- One feature per **bridge-coordinator** dispatch (Task/Agent tool), each in its
+  own worktree off `origin/main`, running `feature-lifecycle`. The coordinator owns
+  the lifecycle + spawns dsh workers; see its own definition for the mechanics.
+- Big/architectural features (store refactors, new runtimes) → **plan-first pause**:
+  have the coordinator produce phases 1–4 (plan/plan-audit/tests/decisions), then
+  **HALT and surface the plan for the human to approve before any code**. Genuine
+  architecture judgment on the plan is an **explicit Opus judgment-subagent** call
+  (see Model routing) — not the whole coordinator on Opus.
+- **Workers report ready, never self-push** — YOU run the merge-gate and merge.
+  (The pre-push hook exempts `main`, so a self-push bypasses the gate. This is a
+  HARD CONSTRAINT in the coordinator too: workers never merge/push.)
 
-### `/clear` discipline — a cleared session is amnesiac; the message must carry everything
-`/clear` wipes ALL prior context — the session no longer knows what it built, what
-feature it owns, or where its worktree is. (This bit us: a cleared live session
-was handed a new task and had no idea what it had been working on.) So whenever
-you `/clear` before re-dispatching, the very next message MUST be **fully
-self-contained** — never say "continue your feature" or "you built X" as if it
-remembers. Include, explicitly:
-- **What the feature IS** — one or two sentences naming it and what it does (not
-  just "your feature"), even for iteration mode on its own prior work.
-- **Its status** — merged (and the commit) / in-flight / held-for-manual-test.
+### Self-contained briefs — a worker is context-blind by construction
+Every dsh worker starts with FRESH context (no memory of prior work), so there is
+no "continue your feature" — the brief MUST be fully self-contained. This is the
+coordinator's job, but the orchestrator's dispatch to the coordinator follows the
+same rule. Every brief states explicitly:
+- **What the feature IS** — one or two sentences naming it and what it does.
+- **Its status** — merged (+commit) / in-flight / held-for-manual-test.
 - **The exact worktree path + branch**, and that its `.lifecycle/<feature>/`
-  artifacts (PLAN/TESTS/DECISIONS/HUMAN_FEEDBACK) are restored there — tell it to
-  **read those + the merged code to reconstruct its mental model** (the ledger is
-  the durable memory across a clear; see Iteration mode).
+  artifacts (PLAN/TESTS/DECISIONS/HUMAN_FEEDBACK) are there — tell the worker to
+  **read those + the code to reconstruct its mental model** (the ledger is the
+  durable memory; the worker holds none across dispatches).
 - **The task** — what to do now, and the plan-first/no-self-push rules.
-Prefer NOT clearing a session that is mid-iteration and whose context is still
-useful; only clear when the context is heavy/stale AND the artifacts+message can
-fully rehydrate it. If in doubt, keep the context.
+(This replaces the old `/clear`-an-interactive-session discipline: dsh workers are
+disposable per dispatch, so "self-contained brief" IS the rehydration mechanism.)
 
 ## Keeping sessions honest — the catalog of dodges
 Sessions systematically avoid the hardest, most-verifiable work (running the
@@ -79,12 +90,14 @@ cycle) and **legit external gates** (a real published-release / API-key
 dependency — mark it clearly, do the non-blocked work).
 
 ## The keep-honest loop (when the human asks for it)
-Every ~20 min, per session: dump screen + run `lifecycle-check --all` yourself +
-check commits/uncommitted + `%idle`. Diagnose progress vs done-waiting vs a dodge
-above. Handle each **specifically** (no broadcast — tailored to that session's
-actual state). Dismiss survey popups (`0` + Enter). Hold any self-push. Leave
-genuinely-done-waiting sessions alone. Reschedule the next tick. Wind down when
-fully static for 2+ cycles.
+Every ~20 min, per in-flight coordinator/worktree, check the DURABLE signals (not a
+screen — dsh workers have no interactive screen): the worker's `.bc-report-*.md`
+verdict + `.bc-dispatch.log`, `git log`/uncommitted in the worktree, `%idle`, and
+**`detect-worker-loops.py`** for a stuck worker. Run `lifecycle-check --all`
+YOURSELF (don't trust the report). Diagnose progress vs done-waiting vs a dodge
+below. Handle each **specifically** (tailored to that worktree's actual state).
+Hold any self-push. Leave genuinely-done-waiting work alone. Reschedule the next
+tick. Wind down when fully static for 2+ cycles.
 
 ## The merge protocol (do this yourself, per feature)
 Merge via a **staging worktree off *current* `origin/main`** — never merge from a
@@ -156,6 +169,95 @@ permission, verify the four gating layers (slot → route → `<Can>` →
 `usePermission`) hide the whole surface for a user lacking the permission — not
 just 403-on-use. The **A10 gate** now requires a restricted-user e2e for any new
 permission. When in doubt, run a loop-until-dry frontend audit for the class.
+
+## Model routing — Sonnet orchestrator + Opus only for judgment (MEASURED #1 rate lever)
+Opus ≈5× Sonnet, ≈15× Haiku per token, and a measured audit found the biggest
+avoidable line-item was **an expensive model doing cheap conducting work** (an
+inherited-Opus subagent doing dispatch; the interactive orchestrator on Opus for
+every turn). Most orchestration — dispatch, status tracking, the merge protocol,
+reading worker verdicts, the keep-honest loop — is **Sonnet-tier**. Reserve Opus
+for GENUINE judgment: epic architecture, a hard adjudication, gnarly debugging.
+
+- **Default the orchestrator to Sonnet.** Run the driving loop on Sonnet.
+- **Spend Opus as an explicit JUDGMENT SUBAGENT, not by running the whole session
+  on Opus.** When a genuinely Opus-worthy decision arrives, spawn a one-shot
+  env-stripped `claude --model opus` for THAT decision and take its verdict — the
+  same pattern the bridge-coordinator uses for its Phase-5 finding-verify. This
+  buys Opus judgment without paying Opus rates on every dispatch turn.
+- **Do NOT flip `/model` mid-session to "use Opus just for the hard turn"** — a
+  model switch INVALIDATES the prompt cache (full uncached re-read). Pick one model
+  per session; escalate via a subagent instead.
+- **The bridge-coordinator subagent runs `model: sonnet`** for the same reason
+  (conducting is Sonnet-tier; its Phase-5 verify is explicit Opus).
+- **VALIDATE, don't assume:** the orchestrator's "verify, don't trust" catching is
+  its core value (it caught real main-reds). Run one campaign on the Sonnet+Opus-
+  judgment structure and confirm with `ccusage` (cost dropped) AND that the
+  catch-rate held (it still caught the dodges) before making it the blanket default.
+
+## Context cost — the orchestrator's own bill is the biggest lever (MEASURED)
+The orchestrator runs on the expensive model (Opus). Delegating the *work* to
+cheap/free workers does NOT move the orchestrator's own per-turn cost — and a
+measured 4h sample found **~85% of Opus spend was the long-lived interactive
+orchestrator sessions, not the workers** (the worker subagents were $19–24 each;
+the orchestrators were $89–174). The dominant component was **cache-WRITE (~60%)**,
+not output (~11%): cache-write is billed every time a turn ADDS new content to
+context, so the cost is driven by **how much you pull into your own context each
+turn**, not by how many workers you spawn. Two rules follow:
+
+- **Keep big content OUT of your own context — delegate inspection.** Never read a
+  large file, a full diff, a worker transcript, or a long log into the orchestrator
+  directly (each big read is a big cache-write, re-billed as the context grows).
+  Dispatch a worker/subagent to read it and return a short verdict/summary; read
+  only that. This is the same "read the verdict, not the transcript" discipline the
+  worker coordinator uses — it applies to the orchestrator too, and this is where
+  the spend now concentrates. (One measured session was adding ~40–60K new tokens
+  of context PER TURN, almost all from direct large reads.)
+- **Compact early and often.** A long interactive session sits near a full window,
+  so every turn re-caches a huge context. Force earlier auto-compaction by setting
+  **`CLAUDE_CODE_AUTO_COMPACT_WINDOW`** (a token count) BELOW the model's max window
+  — auto-compact then triggers at that threshold instead of near the full window
+  (it's the min of the setting and the model window). Set it in the launching env
+  or `settings.json` (`autoCompactWindow`). **Pick the value from MEASURED numbers,
+  not a guess: these Opus sessions run a ~1,000,000-token window (measured peak
+  resident ~1M), and the fixed FLOOR — Claude's system prompt + tools + a big
+  `CLAUDE.md` (ziee's is ~33K tok) + loaded skills — is already ~60–115K tokens. So
+  set the window to roughly HALF the model window (~400–500K): it ~halves per-turn
+  cache-write (the cost driver) while leaving ~300–400K working room above the
+  floor. Do NOT set it near the floor (e.g. 140K) — the session would hit it
+  immediately and compact on almost every turn (churn + a summarization call each
+  time), which costs MORE.** Also `/compact` manually at natural
+  breakpoints (after a feature merges, before switching campaigns), and prefer
+  `/clear` + a fresh self-contained message over resuming an hours-old session for
+  a NEW task — a 6-week resumed session carries its whole history into every turn.
+
+## The task list must survive compaction — it lives on DISK, not in context
+Compaction summarizes context, so **anything you only remember in-context can be
+lost** — for a super-epic (>50 items) that is catastrophic: the orchestrator forgets
+what's done, what's in flight, and what's next. Rule: **the task list and its live
+status are a durable EXTERNAL ledger; your context is disposable.** Never hold "where
+I am in the epic" only in your head.
+
+- **Source of truth = the GitHub issue board + the epic's on-disk graph.** One issue
+  per epic node (`epic-lifecycle` mandates this); status lives in issue state +
+  labels (`blocked-by` edges, `in-progress`/`done`). The DAG + topo order + leaf set
+  are in `.lifecycle/<epic>/GRAPH.md`. Together these encode done / ready / blocked /
+  next WITHOUT any context.
+- **Keep a one-line-per-item STATUS ledger** at `.lifecycle/<epic>/STATUS.md`
+  (`ITEM — todo|in-progress(worktree)|in-review|merged|blocked(by X) — <note>`),
+  updated as a coordination artifact each time an item changes state, and committed.
+  It is the cheap, human- and orchestrator-readable mirror of the board; a worker
+  never writes it (you do).
+- **RE-DERIVE state after every compaction / `/clear` / resume — do not trust
+  memory.** First action of a fresh or just-compacted orchestrator turn: read the
+  board (`gh issue list --state open` + closed for the epic) and `GRAPH.md`/
+  `STATUS.md`, and reconstruct "done / ready-now (deps met) / blocked / in-flight"
+  from THAT. This is cheap (statuses, not the work) and it is the whole reason the
+  ledger exists. **Update the board/STATUS the instant an item changes state**, so a
+  compaction that lands the next second loses nothing.
+- The point of aggressive compaction (above) is only SAFE because of this: you can
+  compact freely precisely because the plan and progress are reconstructable from
+  disk. If you ever find yourself reluctant to compact "because I'll forget the
+  list", that means the ledger is stale — fix the ledger, then compact.
 
 ## Hygiene
 - Merge deletes the remote branch AND removes the local worktree (else worktrees

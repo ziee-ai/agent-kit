@@ -49,9 +49,11 @@ trusting. This is the P1 discipline; it is non-negotiable.
   **HALT and surface the plan for the human to approve before any code**. Genuine
   architecture judgment on the plan is an **explicit Opus judgment-subagent** call
   (see Model routing) — not the whole coordinator on Opus.
-- **Workers report ready, never self-push** — YOU run the merge-gate and merge.
-  (The pre-push hook exempts `main`, so a self-push bypasses the gate. This is a
-  HARD CONSTRAINT in the coordinator too: workers never merge/push.)
+- **`main` is the only gated branch.** Workers may push their work branch and merge
+  freely on **feature/epic branches** (node → epic integration branch, etc.) — that's
+  normal work. But **never push/merge to `main`**: workers report ready, and YOU run
+  the merge-gate + land to `main`. (The pre-push hook exempts `main`, so a self-push
+  THERE bypasses the gate — that's the one path that's forbidden.)
 
 ### Self-contained briefs — a worker is context-blind by construction
 Every dsh worker starts with FRESH context (no memory of prior work), so there is
@@ -64,7 +66,8 @@ same rule. Every brief states explicitly:
   artifacts (PLAN/TESTS/DECISIONS/HUMAN_FEEDBACK) are there — tell the worker to
   **read those + the code to reconstruct its mental model** (the ledger is the
   durable memory; the worker holds none across dispatches).
-- **The task** — what to do now, and the plan-first/no-self-push rules.
+- **The task** — what to do now, and the plan-first / no-push-to-`main` rules
+  (feature/epic-branch pushes are fine; only `main` is held for you).
 (This replaces the old `/clear`-an-interactive-session discipline: dsh workers are
 disposable per dispatch, so "self-contained brief" IS the rehydration mechanism.)
 
@@ -96,7 +99,8 @@ verdict + `.bc-dispatch.log`, `git log`/uncommitted in the worktree, `%idle`, an
 **`detect-worker-loops.py`** for a stuck worker. Run `lifecycle-check --all`
 YOURSELF (don't trust the report). Diagnose progress vs done-waiting vs a dodge
 below. Handle each **specifically** (tailored to that worktree's actual state).
-Hold any self-push. Leave genuinely-done-waiting work alone. Reschedule the next
+Hold any push/merge to `main` (feature/epic-branch pushes are fine). Leave
+genuinely-done-waiting work alone. Reschedule the next
 tick. Wind down when fully static for 2+ cycles.
 
 ## The merge protocol (do this yourself, per feature)

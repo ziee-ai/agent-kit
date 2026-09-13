@@ -2130,6 +2130,154 @@ function phase7() {
   return { present: true, gaps: g, notes };
 }
 
+// A13: MEASURE AGAINST THE TIP YOU WILL MERGE INTO, not the one you branched from.
+//
+// A result measured on a stale base is not evidence about what will merge. Measured:
+// a branch sat 43 commits behind its epic and reported "10 reds -> 1"; a test merge onto
+// the actual tip conflicted in 8 hunks across 4 files, and the most-conflicted file was
+// the very one holding the reds the branch existed to retire. The conflict resolution —
+// not the branch — would decide whether any of that number survived. The headline was
+// evidence about a tree that no longer existed.
+//
+// Finding the integration branch mechanically: a remote ref R is this branch's
+// integration target when `merge-base(HEAD, R) == base` — i.e. HEAD diverged from R
+// exactly at the base being graded. That signature excludes unrelated refs (origin/main
+// typically shares a much older merge-base), so it does not fire on every busy remote.
+// If ANY such ref is still at the base, the base is current and the check passes.
+function integrationCandidates() {
+  let baseSha;
+  try { baseSha = git(repo, 'rev-parse', baseRef); } catch { return []; }
+  let refs = [];
+  try {
+    refs = git(repo, 'for-each-ref', '--format=%(refname:short)', 'refs/remotes/')
+      .split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  } catch { return []; }
+  const behind = [];
+  for (const r of refs) {
+    if (r.endsWith('/HEAD')) continue;
+    let mb;
+    try { mb = git(repo, 'merge-base', 'HEAD', r); } catch { continue; }
+    if (mb !== baseSha) continue;            // not this branch's integration target
+    let ahead = 0;
+    try { ahead = parseInt(git(repo, 'rev-list', '--count', `HEAD..${r}`), 10) || 0; } catch { continue; }
+    if (ahead === 0) return [];              // the base IS that ref's tip — current
+    behind.push({ ref: r, ahead });
+  }
+  const RE_INTEGRATION0 = /(?:^|\/)(?:main|master|develop|trunk)$|(?:^|\/)(?:epic|release|integration)\//i;
+  behind.sort((a, b) => (RE_INTEGRATION0.test(a.ref) ? 0 : 1) - (RE_INTEGRATION0.test(b.ref) ? 0 : 1) || a.ahead - b.ahead);
+  return behind;
+}
+function checkA13StaleBase() {
+  // SIBLING BRANCHES SHARE THE MERGE-BASE, so "diverged at the base" alone cannot tell an
+  // integration target from a peer feature branch cut off the same point — the first
+  // version of this check confidently named a sibling `dsh/*` branch as the thing to
+  // reconcile onto. integrationCandidates() ranks integration-shaped names first, then by
+  // fewest commits ahead; the alternatives are SHOWN rather than the pick being presented
+  // as certain.
+  const behind = integrationCandidates();
+  if (!behind.length) return [];
+  let baseSha = baseRef;
+  try { baseSha = git(repo, 'rev-parse', baseRef); } catch { /* keep the ref as written */ }
+  const { ref, ahead } = behind[0];
+  const others = behind.slice(1, 4).map((b) => `${b.ref} (+${b.ahead})`);
+  return [
+    `A13: the graded base (${baseRef} = ${baseSha.slice(0, 9)}) is ${ahead} commit(s) BEHIND ${ref}` +
+    (others.length ? ` [other refs that diverged at this same base: ${others.join(', ')} — if one of THOSE is your real target, reconcile onto it instead]` : '') +
+    `, the most integration-shaped branch that diverged from HEAD exactly at this base. ` +
+    `Every measurement recorded here describes a tree that will not be the merged tree — ` +
+    `reconcile first (fetch, then merge or rebase ${ref}), resolve whatever conflicts, and re-measure ` +
+    `on the reconciled artifact. A result taken before reconciliation is evidence about a tree that no longer exists.`,
+  ];
+}
+
+// A14: a VERSION CLAIM must be checked against the SIBLINGS, not only against the tip.
+//
+// Measured, four times in one epic: a harness picks the next version by looking at what is
+// taken on the integration tip, and never at what OTHER OPEN BRANCHES have already claimed.
+// Two branches then both declare 0.3.4 and the second to merge is a hand-fixed conflict —
+// and the package's pin test means every bump has THREE halves (manifest `version:`, the
+// changelog entry, and the pin's function name + asserted string), so a partial fix goes
+// red in a way that looks unrelated. A sibling collision is invisible from the tip; it is
+// only visible by reading the siblings.
+//
+// Second leg: a version that is not AHEAD of the integration tip is not a bump at all. A
+// branch carrying a stale manifest (or touching none) merges and silently keeps the tip's
+// version, landing substantial work with no version of its own.
+const RE_MANIFEST = /(?:^|\/)manifest\.ya?ml$/;
+const semver = (s) => {
+  const m = /^(\d+)\.(\d+)\.(\d+)/.exec(String(s).trim());
+  return m ? [+m[1], +m[2], +m[3]] : null;
+};
+const cmpVer = (a, b) => (a[0] - b[0]) || (a[1] - b[1]) || (a[2] - b[2]);
+const declaredVersionAt = (ref, path) => {
+  try {
+    const body = git(repo, 'show', `${ref}:${path}`);
+    const m = /^version\s*:\s*["']?([^"'\s]+)/m.exec(body);
+    return m ? m[1] : null;
+  } catch { return null; }
+};
+function checkA14VersionSiblings() {
+  const g = [];
+  let touched = [];
+  try { touched = changedFilePaths(); } catch { return []; }
+  // The manifests to check are the ones OWNING the touched files, not the ones IN the
+  // diff. Selecting by "a manifest appears in the diff" misses the defect this check
+  // exists for: a branch that rewrites a package and never opens its manifest merges
+  // cleanly and silently keeps whatever version the tip had, landing substantial work
+  // with no version of its own. (MEASURED: a branch with +1171/-180 of source, retiring
+  // 8 real failures, declared a version three releases STALE and touched no manifest —
+  // so nothing anywhere flagged it.)
+  const manifests = new Set(touched.filter((p) => RE_MANIFEST.test(p)));
+  for (const p of touched) {
+    const parts = p.split('/');
+    for (let i = parts.length - 1; i > 0; i--) {
+      const cand = parts.slice(0, i).join('/') + '/manifest.yaml';
+      if (existsSync(`${repo}/${cand}`)) { manifests.add(cand); break; }
+    }
+  }
+  if (!manifests.size) return [];
+  const cands = integrationCandidates();
+  const target = cands.length ? cands[0].ref : null;
+  for (const path of manifests) {
+    const mine = declaredVersionAt('HEAD', path);
+    if (!mine) continue;
+    const mineV = semver(mine);
+    // (a) NOT AHEAD OF THE TIP — merging would keep the tip's version.
+    if (target) {
+      const theirs = declaredVersionAt(target, path);
+      const theirsV = theirs && semver(theirs);
+      if (mineV && theirsV && cmpVer(mineV, theirsV) <= 0)
+        g.push(
+          `A14: ${path} declares version ${mine}, which is NOT AHEAD of ${target}'s ${theirs}` +
+          (mine === theirs
+            ? ` — this branch changes the package but never bumps it, so merging lands the work under the EXISTING version, with no version of its own.`
+            : ` (it is BEHIND — the manifest is stale, inherited from an old base, and merging would keep ${target}'s value while landing this work unversioned).`) +
+          ` Bump it, and remember the bump has THREE halves: the manifest \`version:\`, a changelog entry, ` +
+          `and the pin test's function NAME plus its asserted string. Moving fewer than three turns the pin test red in a way that reads as unrelated.`,
+        );
+    }
+    // (b) COLLISION with an open sibling branch.
+    let siblings = [];
+    try {
+      siblings = git(repo, 'branch', '-r', '--no-merged', target || baseRef, '--format=%(refname:short)')
+        .split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+    } catch { siblings = []; }
+    const headSha = (() => { try { return git(repo, 'rev-parse', 'HEAD'); } catch { return ''; } })();
+    for (const s of siblings) {
+      if (s.endsWith('/HEAD')) continue;
+      try { if (git(repo, 'rev-parse', s) === headSha) continue; } catch { continue; }
+      const sv = declaredVersionAt(s, path);
+      if (sv && sv === mine)
+        g.push(
+          `A14: ${path} declares version ${mine}, and the OPEN branch ${s} claims the SAME version. ` +
+          `Whichever merges second must be renumbered across all three halves. Checking only the integration tip ` +
+          `cannot see this — a sibling's claim is invisible from the tip, and this exact collision has been shipped four times.`,
+        );
+    }
+  }
+  return g;
+}
+
 // A12: the change must be LOAD-BEARING — a terminal self-revert proof.
 //
 // The gap this closes, found the expensive way. A node shipped a consolidation
@@ -2269,6 +2417,8 @@ function phase8() {
   for (const x of checkA10Enumeration()) g.push(x); // A10: restricted-user e2e must be enumerated
   for (const x of checkR2_5()) g.push(x);
   for (const x of checkA12SelfRevert()) g.push(x); // A12: the change must be load-bearing
+  for (const x of checkA13StaleBase()) g.push(x);   // A13: measured against the tip you will merge into
+  for (const x of checkA14VersionSiblings()) g.push(x); // A14: version claim vs siblings, not just the tip
   const tests = parseTests();
   if (!tests) return { present: true, gaps: ['TESTS.md missing — cannot verify results'] };
   const results = new Map();

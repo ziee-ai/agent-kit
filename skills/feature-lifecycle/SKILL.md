@@ -1038,6 +1038,22 @@ so budget for them — they are not optional polish:
   The record must be **committed** (A2 enforces that: an uncommitted stop record is not a
   record). *Measured: a node stopped at a failing phase-7 gate, never ran 8-9, and its
   defect — a mechanism whose removal reddened nothing — reached review anyway.*
+- **A13** you must measure against **the tip you will merge into**, not the one you branched
+  from. A result taken on a stale base is evidence about a tree that will not exist. The gate
+  finds your integration branch mechanically (the remote ref that diverged from HEAD *exactly
+  at* the graded base, preferring integration-shaped names) and fails when it is ahead of you.
+  *Measured: a branch 43 commits behind its epic reported "10 reds → 1"; a test merge onto the
+  real tip conflicted in 8 hunks across 4 files, and the most-conflicted file was the one
+  holding the reds it existed to retire — the conflict resolution, not the branch, would have
+  decided whether the number survived.* Reconcile, resolve, **then** re-measure.
+- **A14** a **version claim is checked against the open SIBLING branches**, not only the tip —
+  a sibling's claim is invisible from the tip. It also fails when a package you changed is not
+  bumped at all (merging then lands the work under the tip's existing version, with no version
+  of its own). *Measured: the same collision shipped four times; and a branch with `+1171/−180`
+  retiring 8 real failures declared a version three releases stale while touching no manifest,
+  so nothing flagged it.* Remember a bump has **three halves** — manifest `version:`, the
+  changelog entry, and the pin test's function **name** plus its asserted string; moving fewer
+  turns the pin red in a way that reads as unrelated.
 - **A12** the change must be **load-bearing**: revert your own fix commit whole,
   re-run the suite, and record the `## SELF-REVERT PROOF` above. **If nothing
   reddens, the change has no enforcement and phase 8 FAILS** — fix it; it is

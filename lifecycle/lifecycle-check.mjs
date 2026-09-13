@@ -38,6 +38,7 @@ const FLAG_SPEC = {
   // is CURRENTLY WORKING may be in progress. See `runAll` for the frontier rule and why this
   // is a separate flag rather than a loosening of `--all`.
   '--wip': { value: false, help: 'mid-round push gate (the frontier phase may be in progress)' },
+  '--assert-terminal': { value: false, help: 'a run must have FINISHED or recorded why it stopped (STOPPED.md)' },
   '--phase': { value: true, help: '<1-9>  grade exactly one phase' },
   '--dir': { value: true, help: '<path>  the feature dir (default: the sole .lifecycle/<feature>)' },
   '--base': { value: true, help: '<ref>  diff base (default: origin/main, else main)' },
@@ -74,6 +75,7 @@ for (let i = 0; i < args.length; i++) {
 }
 const wantAll = OPTS['--all'] === true;
 const wantWip = OPTS['--wip'] === true;
+const wantTerminal = OPTS['--assert-terminal'] === true;
 const phaseArg = OPTS['--phase'];
 const baseArg = OPTS['--base']; // resolved after repo is known (default: origin/main if it exists)
 let dirArg = OPTS['--dir'];
@@ -214,6 +216,9 @@ if (!statSync(featureDir).isDirectory()) fail(`--dir is not a directory: ${featu
 const ARTIFACT_NAMES = [
   'PLAN.md', 'PLAN_AUDIT.md', 'DESIGN_FIDELITY.md', 'TESTS.md', 'DECISIONS.md',
   'LEDGER.jsonl', 'AUDIT_COVERAGE.tsv', 'TEST_RESULTS.md', 'HUMAN_FEEDBACK.md',
+  // --assert-terminal's stop record. A node holding only this one is a run that stopped
+  // before writing anything else — unusual, but a real node, not an empty directory.
+  'STOPPED.md',
 ];
 const ARTIFACT_SERIES = /^(?:DRIFT|FIX_ROUND)-(?:[a-z0-9]+-)?\d+\.md$/;
 function artifactsPresent(dir) {
@@ -2473,7 +2478,7 @@ process.stdout.write(`  tier ${TIER.tier}: ${TIER.reasons.join('; ')}\n`);
 //
 // `--all` is left BYTE-FOR-BYTE unchanged in behaviour, so the merge path, CI, and the
 // orchestrator's pre-merge step keep demanding everything and no existing caller shifts.
-function runAll({ wip }) {
+function runAll({ wip, terminal }) {
   const results = [];
   const glob = checkA1(); // A1 runs globally, regardless of --dir
   if (glob.length) results.push({ n: 0, name: 'GLOBAL', present: true, gaps: glob });
@@ -2529,11 +2534,69 @@ function runAll({ wip }) {
     );
     process.exit(1);
   }
+  // --assert-terminal: A RUN MAY NOT SILENTLY STOP.
+  //
+  // The gap this closes, and it is the one A12 cannot reach. A12 gates a run that CLAIMS
+  // TO BE FINISHED: it demands the self-revert proof inside TEST_RESULTS.md. A run that
+  // dies at phase 5 never writes TEST_RESULTS.md at all, so phase 8 is PENDING, no gate
+  // fires, and this very function prints `OK — phases 1..5 complete (5/9)` and exits 0.
+  // "Stopped early" and "finished badly" need different detectors and there was only the
+  // second. (MEASURED: a node stopped at a failing phase-7 gate, never ran phases 8-9, and
+  // its defect — a mechanism whose removal reddened nothing — reached review anyway.)
+  //
+  // A detector cannot fire on an absence, so this converts the absence into an artifact:
+  // a run is terminal when it either reached 9/9 or RECORDED that it stopped. Silence is
+  // then a missing file, which is the only shape a gate can actually see.
+  if (terminal && highest < 9) {
+    const s = read('STOPPED.md');
+    if (s == null) {
+      process.stderr.write(
+        `lifecycle-check: FAIL (--assert-terminal) — this run neither FINISHED nor recorded that it stopped.\n` +
+        `  reached phase ${highest}/9 in ${featureDir.replace(repo + '/', '')} and then went quiet.\n` +
+        `  An abandoned run and an in-progress one are indistinguishable from outside, so\n` +
+        `  stopping is only legitimate when it is WRITTEN DOWN. Either finish the lifecycle,\n` +
+        `  or commit STOPPED.md in the node dir with all four fields:\n` +
+        `      - **stopped at**: phase ${highest + 1}\n` +
+        `      - **reason**: <why it stopped — a failing gate, a cap, a blocked decision>\n` +
+        `      - **unresolved**: <what is still open; every finding not fixed>\n` +
+        `      - **next**: <what a human should do with this branch>\n`,
+      );
+      process.exit(1);
+    }
+    // Each field's VALUE must be on the field's OWN line. `\s` matches a newline, so a
+    // naive `:\s*\S` accepts an EMPTY value by consuming the line break and matching the
+    // next bullet's `-` — i.e. `- **reason**:` with nothing after it passes, which is
+    // precisely the shrug this check exists to reject. (Caught by the fixture, not by
+    // reading: case 5 exited 0 when it had to exit 1.) So: anchor each field to a line
+    // start (`m`), and allow only HORIZONTAL whitespace between the colon and the value.
+    const field = (name) => new RegExp(String.raw`^[^\S\n]*-[^\S\n]*\*\*${name}\*\*[^\S\n]*:[^\S\n]*\S`, 'im');
+    const need = [
+      ['stopped at', field('stopped at')],
+      ['reason', field('reason')],
+      ['unresolved', field('unresolved')],
+      ['next', field('next')],
+    ];
+    const missing = need.filter(([, re]) => !re.test(s)).map(([k]) => k);
+    if (missing.length) {
+      process.stderr.write(
+        `lifecycle-check: FAIL (--assert-terminal) — STOPPED.md is present but incomplete: missing ${missing.map((m) => `**${m}**`).join(', ')}.\n` +
+        `  A stop record that does not say what is unresolved is not a record, it is a shrug.\n`,
+      );
+      process.exit(1);
+    }
+    process.stdout.write(
+      `lifecycle-check: STOPPED (recorded) — phases 1..${highest} complete (${highest}/9), and this run\n` +
+      `  declared that it stopped rather than finishing. This is NOT a pass: the branch is\n` +
+      `  incomplete by its own account. Read STOPPED.md before doing anything with it.\n`,
+    );
+    process.exit(0);
+  }
   process.stdout.write(`lifecycle-check: OK — phases 1..${highest} complete (${highest}/9).\n`);
   process.exit(0);
 }
 
-if (wantAll || wantWip) runAll({ wip: wantWip && !wantAll });
+if (wantAll || wantWip || wantTerminal)
+  runAll({ wip: wantWip && !wantAll && !wantTerminal, terminal: wantTerminal });
 
 if (phaseArg) {
   const n = parseInt(phaseArg, 10);

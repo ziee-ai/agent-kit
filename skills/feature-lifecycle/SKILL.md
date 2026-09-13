@@ -1020,6 +1020,24 @@ so budget for them — they are not optional polish:
 - **A3** no diff-added `#[ignore]`/`.skip`/`.only`; **A4** no cosmetic/always-true
   assertion (`assert!(true)`, `expect(x).toBe(x)`).
 - **A5** TESTS.md may not shrink — a previously-enumerated TEST-ID cannot vanish.
+- **A RUN MAY NOT SILENTLY STOP** (`--assert-terminal`). A12 below gates a run that
+  *claims to be finished*. A run that dies at phase 5 never writes `TEST_RESULTS.md`, so
+  phase 8 is PENDING, no gate fires, and `--all` prints `OK — phases 1..5 complete (5/9)`
+  and exits **0**. *"Stopped early" and "finished badly" need different detectors.*
+  A detector cannot fire on an absence, so stopping must become an **artifact**: a run is
+  terminal when it reached 9/9 **or** committed `STOPPED.md` in the node dir with all four
+  fields, each with a value **on its own line**:
+  ```
+  - **stopped at**: phase 7
+  - **reason**: fix-round cap reached with findings open
+  - **unresolved**: F1 (mechanism unpinned), F3-F6 deferred to #561
+  - **next**: human triage — F1 blocks merge
+  ```
+  `--assert-terminal` then exits 1 when it finds neither, and reports **STOPPED (recorded)
+  — this is NOT a pass** when it finds the record. An empty value is a shrug and fails.
+  The record must be **committed** (A2 enforces that: an uncommitted stop record is not a
+  record). *Measured: a node stopped at a failing phase-7 gate, never ran 8-9, and its
+  defect — a mechanism whose removal reddened nothing — reached review anyway.*
 - **A12** the change must be **load-bearing**: revert your own fix commit whole,
   re-run the suite, and record the `## SELF-REVERT PROOF` above. **If nothing
   reddens, the change has no enforcement and phase 8 FAILS** — fix it; it is

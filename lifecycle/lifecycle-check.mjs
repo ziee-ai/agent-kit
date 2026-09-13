@@ -2125,6 +2125,125 @@ function phase7() {
   return { present: true, gaps: g, notes };
 }
 
+// A12: the change must be LOAD-BEARING — a terminal self-revert proof.
+//
+// The gap this closes, found the expensive way. A node shipped a consolidation
+// with ~325 lines of NEW tests that did not detect the removal of the mechanism
+// they were written to protect: replacing the mechanism's body with a passthrough
+// left the suite BYTE-IDENTICAL (8 failed before, 8 after, zero new failures).
+//
+// The defect was not undetected. The blind audit FOUND it, graded it `medium`,
+// and the run deferred it to a follow-up issue and reported success — which is
+// the real lesson: an audit finding is a thing someone may defer, and a gate is
+// a thing that cannot pass. So this is a gate, not a finding. A severity label
+// of low/medium on "no test detects the removal of the feature" is wrong by
+// construction, and grading it correctly would not have helped: the run was
+// still free to defer it.
+//
+// Scope: skipped when the branch changed no source at all — `changedFilePaths()`
+// already excludes `.lifecycle/`, so a docs/artifact-only node has no mechanism
+// whose removal a test could detect, and demanding a proof there would be noise.
+//
+// This validates EVIDENCE, and validates it mechanically wherever it can: the
+// cited commit must resolve, must be an ancestor of HEAD, and must itself touch
+// real source. That does not make a fabricated record impossible — nothing that
+// reads an artifact can — but it makes the cheap fabrications fail, and it puts
+// the claim on the branch where a reviewer can re-run it.
+//
+// Grammar in TEST_RESULTS.md:
+//   ## SELF-REVERT PROOF
+//   - **commit**: <sha of the fix commit that was reverted>
+//   - **reddened**: TEST-3 FAILED   (or a concrete node: tests/x.py::test_y FAILED)
+//   - **restored**: `git diff --quiet HEAD` clean
+function checkA12SelfRevert() {
+  const g = [];
+  let touched = [];
+  try { touched = changedFilePaths(); } catch { return []; }
+  if (!touched.length) return []; // nothing behavioural to prove
+  // Prose-only nodes are exempt for the same reason: a paragraph has no
+  // mechanism whose removal a test could detect, so demanding a revert proof
+  // would be pure noise on a docs change. Kept deliberately NARROW — markdown /
+  // text / a docs tree only. Anything else (config, fixtures, schema, code)
+  // still owes a proof.
+  const isProse = (p) => /\.(?:md|markdown|txt|rst|adoc)$/i.test(p) || /^docs?\//i.test(p);
+  if (touched.every(isProse)) return [];
+  const t = read('TEST_RESULTS.md');
+  if (t == null) return []; // phase8 already reports the missing artifact
+
+  const lines = t.split(/\r?\n/);
+  const start = lines.findIndex((l) => /^#{2,}\s*SELF-?REVERT PROOF\b/i.test(l));
+  if (start < 0) {
+    g.push('A12: TEST_RESULTS.md has no `## SELF-REVERT PROOF` section — the change is not proven load-bearing. Revert the WHOLE fix commit (`git checkout <fix>^ -- $(git diff-tree --no-commit-id --name-only -r <fix>)`), re-run the gated suite, and record which test went RED. If NOTHING reddens, the change has no enforcement: fix that before phase 8 — it is not deferrable to a follow-up.');
+    return g;
+  }
+  const body = [];
+  for (let j = start + 1; j < lines.length && !/^#{2,}\s/.test(lines[j]); j++) body.push(lines[j]);
+  const text = body.join('\n');
+
+  const mCommit = /-\s*\*\*commit\*\*\s*:\s*`?([0-9a-fA-F]{7,40})`?/.exec(text);
+  const mRed = /-\s*\*\*reddened\*\*\s*:\s*(.+)/i.exec(text);
+  const mRestored = /-\s*\*\*restored\*\*\s*:\s*\S/i.exec(text);
+
+  if (!mCommit) {
+    g.push('A12: SELF-REVERT PROOF has no `- **commit**: <sha>` naming the fix commit that was reverted.');
+  } else {
+    const sha = mCommit[1];
+    let type = null;
+    try { type = git(repo, 'cat-file', '-t', sha); } catch { type = null; }
+    if (type !== 'commit') {
+      g.push(`A12: SELF-REVERT PROOF cites commit ${sha}, which does not resolve in this repo — the proof describes work that is not on this branch.`);
+    } else {
+      let onBranch = true;
+      try {
+        git(repo, 'merge-base', '--is-ancestor', sha, 'HEAD');
+      } catch {
+        onBranch = false;
+        g.push(`A12: SELF-REVERT PROOF cites ${sha}, which is NOT an ancestor of HEAD — a proof must be about a commit this branch actually contains.`);
+      }
+      // …and it must be one of THIS branch's commits, not any old ancestor.
+      // Without this, citing the merge-base (or any pre-existing commit) passes
+      // every other check: it resolves, it is an ancestor, and it touches source.
+      // The proof would then be about work the branch did not do.
+      if (onBranch) {
+        let inBase = false;
+        try { git(repo, 'merge-base', '--is-ancestor', sha, baseRef); inBase = true; } catch { inBase = false; }
+        if (inBase)
+          g.push(`A12: SELF-REVERT PROOF cites ${sha}, which is already contained in the base ref (${baseRef}) — that is pre-existing work, not this branch's change. Cite the fix commit from this branch (\`git log ${baseRef}..HEAD\`).`);
+      }
+      let paths = [];
+      try {
+        paths = git(repo, 'diff-tree', '--no-commit-id', '--name-only', '-r', sha)
+          .split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+      } catch { /* leave empty */ }
+      const src = paths.filter((p) => !p.startsWith('.lifecycle/'));
+      if (paths.length && !src.length)
+        g.push(`A12: SELF-REVERT PROOF cites ${sha}, which touches only .lifecycle/ artifacts — reverting it could not redden a test, so it is not the fix commit.`);
+    }
+  }
+
+  const redText = (mRed && mRed[1] ? mRed[1].trim() : '');
+  if (!redText) {
+    g.push('A12: SELF-REVERT PROOF has no `- **reddened**: <test>` naming what FAILED under the revert.');
+  } else if (/\b(none|nothing|n\/?a|no\s+tests?)\b/i.test(redText)) {
+    g.push(`A12: SELF-REVERT PROOF records that NOTHING reddened ("${redText}") — that is the failure condition itself, not a passing proof. The change has no enforcement: some test must fail when the change is removed. Do NOT defer this as a finding and do NOT file it as a follow-up; it is exempt from the fix-round cap precisely because a capped count must never ship a change that does nothing.`);
+  } else {
+    const declared = new Set();
+    for (const m of (read('TESTS.md') || '').matchAll(/\b(TEST-[A-Za-z0-9._-]+)\b/g)) declared.add(m[1]);
+    const cited = [...redText.matchAll(/\b(TEST-[A-Za-z0-9._-]+)\b/g)].map((m) => m[1]);
+    const knownCited = cited.filter((c) => declared.has(c));
+    const looksLikeNode = /::|\.(?:py|ts|tsx|rs|mjs|js)\b/.test(redText);
+    if (!knownCited.length && !looksLikeNode)
+      g.push(`A12: SELF-REVERT PROOF's reddened test ("${redText}") names neither a TEST-id enumerated in TESTS.md nor a concrete test node (path::name) — an unidentifiable test is not evidence.`);
+    if (!/\b(fail|failed|failing|red|error)\b/i.test(redText))
+      g.push(`A12: SELF-REVERT PROOF's reddened entry ("${redText}") does not state a FAILURE — record the observed result, not just the test name.`);
+  }
+
+  if (!mRestored)
+    g.push('A12: SELF-REVERT PROOF has no `- **restored**: …` line. `git checkout <sha> -- <paths>` STAGES the revert, so assert the mutant is gone (`git diff --quiet HEAD`) before moving on — otherwise it leaks into the next run and every later result is measured against a mutated tree.');
+
+  return g;
+}
+
 function phase8() {
   const g = [];
   const t = read('TEST_RESULTS.md');
@@ -2144,6 +2263,7 @@ function phase8() {
   for (const x of checkA9()) g.push(x);
   for (const x of checkA10Enumeration()) g.push(x); // A10: restricted-user e2e must be enumerated
   for (const x of checkR2_5()) g.push(x);
+  for (const x of checkA12SelfRevert()) g.push(x); // A12: the change must be load-bearing
   const tests = parseTests();
   if (!tests) return { present: true, gaps: ['TESTS.md missing — cannot verify results'] };
   const results = new Map();

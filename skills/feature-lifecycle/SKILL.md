@@ -190,6 +190,16 @@ Match these line formats precisely or the gate will not pass.
   There is **no `AUDIT_COVERAGE.tsv`** — it was removed; the ledger is the record.
 - **Fix round** (`FIX_ROUND-1.md`) — a `**New confirmed findings:** <N>` line
 - **Test result** (`TEST_RESULTS.md`) — `- **TEST-2**: PASS`
+- **Self-revert proof** (`TEST_RESULTS.md`, REQUIRED once the diff touches
+  anything but prose) — a `## SELF-REVERT PROOF` section with three lines:
+  ```
+  ## SELF-REVERT PROOF
+  - **commit**: <sha of THIS branch's fix commit that was reverted>
+  - **reddened**: TEST-3 FAILED        (or a node: tests/x.py::test_y FAILED)
+  - **restored**: `git diff --quiet HEAD` clean
+  ```
+  The commit must resolve, be an ancestor of `HEAD`, and **not** already be in
+  the base ref — it has to be work this branch did.
 - **Frontend gate line** (`TEST_RESULTS.md`, REQUIRED once the diff touches a UI
   workspace) — `npm run check (ui): PASS` — one line per touched workspace; the
   label is `ui` (→ `src-app/ui`) or `desktop/ui` (→ `src-app/desktop/ui`)
@@ -1004,6 +1014,24 @@ so budget for them — they are not optional polish:
 - **A3** no diff-added `#[ignore]`/`.skip`/`.only`; **A4** no cosmetic/always-true
   assertion (`assert!(true)`, `expect(x).toBe(x)`).
 - **A5** TESTS.md may not shrink — a previously-enumerated TEST-ID cannot vanish.
+- **A12** the change must be **load-bearing**: revert your own fix commit whole,
+  re-run the suite, and record the `## SELF-REVERT PROOF` above. **If nothing
+  reddens, the change has no enforcement and phase 8 FAILS** — fix it; it is
+  *not* deferrable to a follow-up issue and is **exempt from the fix-round cap**,
+  because a capped count must never ship a change that does nothing. A `low`/
+  `medium` severity on "no test detects the removal of the feature" is wrong by
+  construction. Revert the **whole** commit, never one file of it (a partial
+  revert of a producer/consumer change is a *directional* false green reading as
+  "the fix wasn't load-bearing"), and note `git checkout <sha> -- <paths>`
+  **stages** the revert — clean up with
+  `git restore --source=HEAD --staged --worktree` and assert
+  `git diff --quiet HEAD`, or the mutant leaks into the next run.
+  Prose-only diffs (`.md`/`.txt`/`docs/`) are exempt — no mechanism to prove.
+  *Why a gate and not an audit item: this exact defect WAS found by a blind
+  audit, graded `medium`, and deferred to a follow-up by a run that then reported
+  success. ~325 lines of new tests did not detect the removal of the mechanism
+  they were written to protect (8 failed before the revert, 8 after, zero new).
+  A finding someone may defer is weaker than a gate that cannot pass.*
 - **Acceptance** every `[acceptance]` test (a design-invariant proof) must be
   recorded PASS in `TEST_RESULTS.md` — a design invariant left unproven fails
   phase 8. This is stricter than "all TESTs pass": it names the invariant proofs

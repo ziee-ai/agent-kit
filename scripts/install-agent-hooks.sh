@@ -32,10 +32,11 @@ if [ "$PUSHES_MAIN" = "1" ] && [ -f "$MG" ]; then
   case "$REV" in *[!0]*) : ;; *) REV="HEAD" ;; esac
   node "$MG" --verify-head --rev "$REV" --repo "$TOP" || {
     echo "pre-push: merge-gate --verify-head FAILED — fix before pushing to main." >&2
-    echo "          Do NOT re-run this with --no-verify. A bypass is the human's to grant," >&2
-    echo "          and --no-verify disables EVERY leg of this hook, not the one that failed." >&2
-    echo "          If you believe the push is correct: report the output above verbatim and" >&2
-    echo "          ask the human to push (or to authorise the bypass explicitly)." >&2
+    echo "          There is NO bypass for this leg. I_MIGHT_GET_FIRED_FOR_THIS does not apply" >&2
+    echo "          here: main is the gated branch, and this check is the gate." >&2
+    echo "          Do NOT reach for 'git push --no-verify' either — a bypass is the human's to" >&2
+    echo "          grant, never yours, and that flag skips EVERY leg of this hook, not this one." >&2
+    echo "          Report the output above verbatim and hand the push to the human." >&2
     exit 1
   }
 fi
@@ -62,18 +63,60 @@ if [ -d "$TOP/.lifecycle" ]; then
     [ -n "${LIFECYCLE_SCOPE:-}" ] && SCOPE_ARGS="--scope $LIFECYCLE_SCOPE"
     # shellcheck disable=SC2086
     node "$CHECK" --wip --repo "$TOP" $SCOPE_ARGS || {
-      echo "pre-push: lifecycle-check --wip FAILED — a COMPLETED phase has gaps (the phase in progress is exempt)." >&2
-      echo "          Fix the gaps above. Do NOT re-run this with --no-verify: a bypass is the" >&2
-      echo "          human's to grant, and --no-verify disables EVERY leg of this hook — including" >&2
-      echo "          the pinned-guard integrity check, which is almost certainly passing." >&2
-      echo "          If the message above says this looks like an EPIC ROOT, the gate is MIS-SCOPED," >&2
-      echo "          not failing: re-run it with --dir <node-subdir>, or set LIFECYCLE_SCOPE=<name>," >&2
-      echo "          and report the hook's own invocation as a tooling defect." >&2
-      echo "          Otherwise: report this output verbatim and ask the human to push." >&2
-      exit 1
+      # The sanctioned escape is an env var, NOT --no-verify. The difference matters:
+      # --no-verify makes git skip this hook ENTIRELY, so the pinned-guard integrity
+      # leg above is skipped too — collateral nobody intends. This var bypasses only
+      # THIS leg, leaves every other check running, and names itself loudly in any
+      # transcript or shell history that contains it.
+      if [ -n "${I_MIGHT_GET_FIRED_FOR_THIS:-}" ]; then
+        echo "" >&2
+        echo "  ########################################################################" >&2
+        echo "  #  GATE BYPASSED ON PURPOSE — I_MIGHT_GET_FIRED_FOR_THIS is set.       #" >&2
+        echo "  #                                                                      #" >&2
+        echo "  #  A COMPLETED lifecycle phase has gaps and this push is going out     #" >&2
+        echo "  #  anyway. This is a HUMAN's decision to make. If you are an agent and #" >&2
+        echo "  #  you set this variable yourself, you have just granted yourself a    #" >&2
+        echo "  #  permission that was not yours — stop, and tell the human.           #" >&2
+        echo "  #                                                                      #" >&2
+        echo "  #  Name every failing gate, and why, in the commit body.               #" >&2
+        echo "  ########################################################################" >&2
+        echo "    bypassed by : $(git config user.name 2>/dev/null || echo unknown) <$(git config user.email 2>/dev/null || echo unknown)>" >&2
+        echo "    at          : $(date -u +%Y-%m-%dT%H:%M:%SZ)" >&2
+        echo "    branch      : $(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')  head: $(git rev-parse --short HEAD 2>/dev/null || echo '?')" >&2
+        echo "" >&2
+      else
+        echo "pre-push: lifecycle-check --wip FAILED — a COMPLETED phase has gaps (the phase in progress is exempt)." >&2
+        echo "          Fix the gaps above." >&2
+        echo "" >&2
+        echo "          'git push --no-verify' is the WRONG escape for THIS failure: the gate ran" >&2
+        echo "          and found gaps, and that flag would skip this hook ENTIRELY — including the" >&2
+        echo "          pinned-guard integrity check that is currently passing. (--no-verify is the" >&2
+        echo "          right tool when the hook CANNOT RUN at all; that is not the case here.)" >&2
+        echo "          Either way a bypass is the HUMAN's to grant, not yours." >&2
+        echo "" >&2
+        echo "          If the message above says this looks like an EPIC ROOT, the gate is" >&2
+        echo "          MIS-SCOPED rather than failing: re-run with --dir <node-subdir> or set" >&2
+        echo "          LIFECYCLE_SCOPE=<name>, and report the hook's invocation as a defect." >&2
+        echo "" >&2
+        echo "          If you are an AGENT: stop here. Report this output verbatim and ask the" >&2
+        echo "          human to push, or to authorise the bypass explicitly." >&2
+        echo "          If you are the HUMAN and you accept the consequences:" >&2
+        echo "              I_MIGHT_GET_FIRED_FOR_THIS=1 git push ..." >&2
+        echo "          (that keeps every OTHER check running, unlike --no-verify)" >&2
+        exit 1
+      fi
     }
   else
-    echo "pre-push: .lifecycle/ present but lifecycle-check.mjs missing — run scripts/install-agent-hooks.sh from a clone with .claude/lifecycle committed." >&2
+    echo "pre-push: .lifecycle/ present but lifecycle-check.mjs missing — the gate CANNOT RUN." >&2
+    echo "          Most often this is a fresh 'git worktree add', which initialises NO submodules," >&2
+    echo "          so a gate symlinked into one simply is not there. Fix the cause first:" >&2
+    echo "              git submodule update --init --recursive" >&2
+    echo "          (or run scripts/install-agent-hooks.sh from a clone with .claude/lifecycle committed)." >&2
+    echo "" >&2
+    echo "          I_MIGHT_GET_FIRED_FOR_THIS does NOT apply here — it bypasses a gate that RAN" >&2
+    echo "          and failed, and this gate never ran. If the cause genuinely cannot be fixed," >&2
+    echo "          'git push --no-verify' is the correct tool for THIS case — and it is still the" >&2
+    echo "          HUMAN's call. If you are an agent: say the gate is absent and why, and ask." >&2
     exit 1
   fi
 fi

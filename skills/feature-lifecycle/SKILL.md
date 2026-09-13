@@ -1325,8 +1325,46 @@ hook blocks a push you believe is correct:
    **without running the hook at all**, so it proves nothing; probe with a real ref
    update (`git commit --allow-empty`) if you need to see the hook run.
 3. **File it as an issue** if it is a tooling defect, so it stops being folklore.
-4. **Ask**: *"the hook blocks this push — please push it, or authorise `--no-verify`
-   explicitly."* One message, and the decision sits with the person who owns the repo.
+4. **Ask**: *"the hook blocks this push — please push it, or authorise the bypass."*
+   One message, and the decision sits with the person who owns the repo.
+
+**The sanctioned escape is an env var, and it is the HUMAN's to set:**
+
+```bash
+I_MIGHT_GET_FIRED_FOR_THIS=1 git push ...     # human-only; never an agent
+```
+
+It is deliberately named so it cannot appear in a transcript, a shell history or a CI log
+without being obvious. For a **lifecycle-leg failure** it is better than `--no-verify`:
+it bypasses only that leg, leaves **every other check running** (the pinned-guard
+integrity check keeps working), and prints a loud banner naming who bypassed what, on
+which branch, at what time.
+
+### `--no-verify` is still the right tool sometimes — just not YOUR tool
+
+It is not forbidden, and pretending otherwise would be a lie that gets ignored the first
+time it is inconvenient. Use it when **the hook cannot run at all**, which the env var
+cannot help with because the hook never reaches that check:
+
+- `lifecycle-check.mjs` is **missing** — e.g. a fresh `git worktree add`, which
+  initialises no submodules, so a symlinked gate simply is not there. (Fix the cause
+  first: `git submodule update --init --recursive`.)
+- no `node` on PATH, or the gate crashes rather than failing.
+- a branch **deletion** push, or another ref update with nothing to grade.
+- a genuine emergency where the repo state is broken and the fix has to land.
+
+**In every one of those cases it is still the human's call, not the agent's.** The split
+is not "env var good, flag bad" — it is:
+
+| failure | escape |
+|---|---|
+| a lifecycle phase genuinely has gaps | `I_MIGHT_GET_FIRED_FOR_THIS=1` (keeps other checks) |
+| the hook or gate cannot run at all | `--no-verify`, after fixing the cause if you can |
+| merge-gate on `main` | **no bypass** — main is the gated branch; that check *is* the gate |
+
+If you are an agent and you find yourself reaching for either one, you are granting
+yourself a permission that was not yours. Stop, report the verbatim output, and ask.
+The hook says the same thing when it blocks you.
 
 **This holds even when your diagnosis is right and the hook is genuinely broken.** Being
 correct about the cause does not make the bypass yours to authorise, and a self-granted

@@ -28,10 +28,16 @@ read them. `<feature>` is a short kebab slug (e.g. `project-search`).
 `.lifecycle/<feature>/` artifacts (plan, decisions, ledger, fix rounds) are real,
 often-large work; a machine move or a lost worktree wipes anything only committed
 locally. Push `feat/<slug>` to origin for durability/portability — it is a WIP
-branch, never merged to main without sign-off, so a backup push
-(`git push --no-verify -u origin feat/<slug>`) is correct: the pre-push gate exists
-to block *merges to main*, not backup pushes of in-progress branches. Re-push after
-each round of work so the backup stays current.
+branch, never merged to main without sign-off. **Push it normally** (`git push -u
+origin feat/<slug>`): the pre-push hook runs `lifecycle-check --wip`, which exists
+so an honest mid-round push PASSES — the phases you have COMPLETED must be green,
+the one in progress is exempt. Re-push after each round so the backup stays current.
+
+**If that push is refused, do NOT reach for `--no-verify`** (see *Never bypass a
+hook yourself*, below). A `--wip` failure means a **completed** phase has a gap,
+which is a real signal about your branch, not hook noise. Fix the gap; if the repo
+is running an epic, check `--dir`/`LIFECYCLE_SCOPE` first, because a mis-scoped
+gate is a tooling defect to report rather than route around.
 
 **PASS `--dir` WHENEVER THE REPO IS RUNNING AN EPIC.** `--dir` may be omitted only
 when `.lifecycle/` holds exactly one directory and that directory holds the phase
@@ -1308,10 +1314,36 @@ artifacts and a peer stage's open round cannot fail your push.
 `--all` (every phase, no exemption) is the **pre-merge** gate — run it yourself before
 handing the branch over, as above.
 
-`git push --no-verify` remains the right tool for a genuine WIP checkpoint that cannot
-pass `--wip`; **name every failing gate and why in the commit body** when you use it.
-It exists so you are never stuck — but reaching for it reflexively is how a guard stops
-being there on the day it matters, which is the reason `--wip` was added.
+### Never bypass a hook yourself — hand the push to the human
+
+**`git push --no-verify` is not yours to use.** A bypass is the human's to grant. If a
+hook blocks a push you believe is correct:
+
+1. **Stop.** Do not push, and do not look for another route around it.
+2. **Report precisely** — the exact command, the **verbatim** hook output, and which leg
+   failed. Diagnose honestly: `git push --dry-run` on an up-to-date branch exits 0
+   **without running the hook at all**, so it proves nothing; probe with a real ref
+   update (`git commit --allow-empty`) if you need to see the hook run.
+3. **File it as an issue** if it is a tooling defect, so it stops being folklore.
+4. **Ask**: *"the hook blocks this push — please push it, or authorise `--no-verify`
+   explicitly."* One message, and the decision sits with the person who owns the repo.
+
+**This holds even when your diagnosis is right and the hook is genuinely broken.** Being
+correct about the cause does not make the bypass yours to authorise, and a self-granted
+bypass is indistinguishable from one that hid a real failure.
+
+The concrete harm is not hypothetical: **`--no-verify` disables the ENTIRE hook, not the
+leg that failed.** *Measured*: an epic's pre-push hook ran `lifecycle-check --wip` without
+`--dir`, so it auto-discovered an epic ROOT holding ~48 node subdirectories and refused —
+every node branch in that epic was being pushed with `--no-verify`, by more than one
+session, and the **pinned-guard integrity check — which was passing — was skipped on every
+one of those pushes.** Nobody intended that; it was collateral from one leg that could not
+run. A guard bypassed for a good reason is just as absent as one bypassed for a bad one.
+
+`--wip` exists so you should rarely be here at all: it passes an honest mid-round push and
+fails only a regression in a COMPLETED phase. If `--wip` fails, that is signal about your
+branch. If the gate is mis-scoped on an epic (`--dir` / `LIFECYCLE_SCOPE`), that is a
+tooling defect to report.
 
 ## Notes
 

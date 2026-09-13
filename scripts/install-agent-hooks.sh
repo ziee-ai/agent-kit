@@ -31,7 +31,11 @@ if [ "$PUSHES_MAIN" = "1" ] && [ -f "$MG" ]; then
   # a zero sha (branch deletion) has nothing to verify
   case "$REV" in *[!0]*) : ;; *) REV="HEAD" ;; esac
   node "$MG" --verify-head --rev "$REV" --repo "$TOP" || {
-    echo "pre-push: merge-gate --verify-head FAILED — fix before pushing to main (or: git push --no-verify)." >&2
+    echo "pre-push: merge-gate --verify-head FAILED — fix before pushing to main." >&2
+    echo "          Do NOT re-run this with --no-verify. A bypass is the human's to grant," >&2
+    echo "          and --no-verify disables EVERY leg of this hook, not the one that failed." >&2
+    echo "          If you believe the push is correct: report the output above verbatim and" >&2
+    echo "          ask the human to push (or to authorise the bypass explicitly)." >&2
     exit 1
   }
 fi
@@ -59,7 +63,13 @@ if [ -d "$TOP/.lifecycle" ]; then
     # shellcheck disable=SC2086
     node "$CHECK" --wip --repo "$TOP" $SCOPE_ARGS || {
       echo "pre-push: lifecycle-check --wip FAILED — a COMPLETED phase has gaps (the phase in progress is exempt)." >&2
-      echo "          Fix the gaps above, or push a genuine WIP checkpoint with --no-verify naming each failing gate in the commit body." >&2
+      echo "          Fix the gaps above. Do NOT re-run this with --no-verify: a bypass is the" >&2
+      echo "          human's to grant, and --no-verify disables EVERY leg of this hook — including" >&2
+      echo "          the pinned-guard integrity check, which is almost certainly passing." >&2
+      echo "          If the message above says this looks like an EPIC ROOT, the gate is MIS-SCOPED," >&2
+      echo "          not failing: re-run it with --dir <node-subdir>, or set LIFECYCLE_SCOPE=<name>," >&2
+      echo "          and report the hook's own invocation as a tooling defect." >&2
+      echo "          Otherwise: report this output verbatim and ask the human to push." >&2
       exit 1
     }
   else

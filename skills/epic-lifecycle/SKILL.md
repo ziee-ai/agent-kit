@@ -159,10 +159,17 @@ Under `.lifecycle/<epic>/` (committed on an `epic/<slug>` planning branch).
 (the graph, the reconciled contracts, the whole plan) are the deliverable; a
 machine move or a lost worktree wipes local-only work. Push `epic/<slug>` to origin
 as you go so the plan is durable and portable across machines — it is a WIP branch,
-NEVER merged to main, so a backup push (`git push --no-verify -u origin epic/<slug>`,
-bypassing the mid-lifecycle pre-push gate, which exists to block *merges* to main,
-not backups) is the correct move. Same for each item's `feat/<slug>` build branch
-once building starts.
+NEVER merged to main. **Push it normally** (`git push -u origin epic/<slug>`); the
+pre-push hook runs `lifecycle-check --wip`, which passes an honest in-progress push.
+Same for each item's `feat/<slug>` build branch once building starts.
+
+**Do NOT bypass the hook with `--no-verify` if it refuses** — a bypass is the human's
+to grant, not yours, and it disables the ENTIRE hook (including checks that were
+passing), not just the leg that failed. Stop, report the verbatim hook output, file a
+tooling defect if that is what it is, and ask the human to push. On an epic this is
+most often a SCOPING problem — the gate auto-discovering the epic root instead of one
+node — so check `--dir` / `LIFECYCLE_SCOPE` before concluding anything else. See
+*Never bypass a hook yourself* in the feature-lifecycle skill.
 
 - `GRAPH.md` — the dependency DAG, topological order, leaf set, assumed-available
   substrate (already-shipped code + external blockers — boundary inputs, not

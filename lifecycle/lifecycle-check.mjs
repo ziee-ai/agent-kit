@@ -1757,9 +1757,11 @@ function phase6() {
   // in-flight branches to enforce bookkeeping, which is the same trade this whole
   // reform is removing. Ledgers without the fields are accepted; the skill asks
   // for them, and this fires only when they are present but nothing qualifies.
-  const usesCorroboration = ledger.some((r) => r.corroborated_by !== undefined || r.oracle_confirmed !== undefined || r.promoted !== undefined);
+  // Angle-records are not findings: a clean angle must not be asked to promote itself.
+  const findingRows = ledger.filter((r) => !isAngleRecord(r));
+  const usesCorroboration = findingRows.some((r) => r.corroborated_by !== undefined || r.oracle_confirmed !== undefined || r.promoted !== undefined);
   if (usesCorroboration) {
-    const promoted = ledger.filter(isPromotedFinding);
+    const promoted = findingRows.filter(isPromotedFinding);
     if (promoted.length === 0)
       g.push('LEDGER.jsonl: records corroboration fields but no finding qualifies as promoted (corroborated_by >= 2, oracle_confirmed, or severity in {security,data-loss,authz,high}) — the fix loop should work from promoted findings, not the raw union of every angle.');
   }
@@ -1833,6 +1835,32 @@ const T1_MIN_OBSERVED = 5;   // distinct findings in the scoped round
 const T1_MIN_OVERLAP = 2;    // findings both angles reported
 // A finding becomes WORK (see phase 6) when corroborated by >=2 angles,
 // oracle-confirmed, or high-severity. One predicate, used by phase 6 and T1.
+// A row that merely RECORDS THAT AN ANGLE RAN AND FOUND NOTHING. It counts toward
+// audit breadth but is not a finding, and must not be fed to the promotion check.
+//
+// Why this exists: phase 6 counted ROWS to establish that >= 2 angles ran, so "an angle
+// ran and found nothing" could only be expressed by writing a pseudo-finding. Honesty had
+// to disguise itself as a defect to be counted — and then the promotion check complained
+// that nothing qualified. (MEASURED: a run's second angle genuinely probed all four
+// AST-parse readers, found nothing, and wrote exactly such a row with `triage: rejected`.
+// A reviewer's verdict was the right one: "the row is honest and the counter is wrong.")
+const isAngleRecord = (r) =>
+  r.no_findings === true || Number(r.findings) === 0 || /^(?:angle[-_ ]?record|no[-_ ]?findings)$/i.test(String(r.kind || ''));
+
+// A CONFIRMED finding that is still open. The set of states that count as settled is
+// deliberately generous — the check is about findings nobody dispositioned at all.
+const RESOLVED_STATES = /^(?:fixed|closed|resolved|wontfix|won-?t-?fix|obsolete|superseded|rejected|invalid|duplicate)$/i;
+function isUnresolvedConfirmed(r) {
+  if (isAngleRecord(r)) return false;
+  const confirmed = r.oracle_confirmed === true
+    || r.promoted === true
+    || /^confirmed$/i.test(String(r.triage || ''));
+  if (!confirmed) return false;
+  const state = String(r.resolution_state ?? '').trim();
+  if (!state) return false; // no state recorded at all — not this check's business
+  return !RESOLVED_STATES.test(state);
+}
+
 function isPromotedFinding(r) {
   return r.promoted === true
     || Number(r.corroborated_by) >= 2
@@ -2572,6 +2600,30 @@ function phase8() {
 // [generalizable: yes] item into the lifecycle skill.
 function phase9() {
   const t = read('HUMAN_FEEDBACK.md');
+  // A CONFIRMED FINDING THAT NOBODY DISPOSITIONED BLOCKS COMPLETION, whatever round it
+  // arrived in. The fix-loop check reads the LAST fix round, so a finding raised AFTER it
+  // — an adjudication in round 2 following a round-1 loop that converged at zero — was
+  // never asked about again, and the node reported `phases 1..9 complete` while carrying
+  // six open CONFIRMED findings, two of them medium. From outside, that is indistinguishable
+  // from a clean run: the precise failure this tooling exists to remove, reappearing in the
+  // gate itself. Dispositioning is cheap (fixed / wontfix / obsolete, or file it and mark it
+  // superseded); leaving a confirmed finding in limbo is what is not allowed.
+  const led = parseLedger();
+  if (Array.isArray(led)) {
+    const openConfirmed = led.filter(isUnresolvedConfirmed);
+    if (openConfirmed.length) {
+      const shown = openConfirmed.slice(0, 5).map((r) => {
+        const where = r.file ? ` ${r.file}${r.line ? `:${r.line}` : ''}` : '';
+        return `      - [${r.severity || '?'}]${where} ${String(r.finding || '').slice(0, 90)}`;
+      });
+      return {
+        present: true,
+        gaps: [
+          `LEDGER.jsonl: ${openConfirmed.length} CONFIRMED finding(s) still unresolved — a node may not be complete while a finding nobody dispositioned is open (this holds regardless of which ROUND raised it; the fix-loop check only reads the last round):\n${shown.join('\n')}${openConfirmed.length > 5 ? `\n      … and ${openConfirmed.length - 5} more` : ''}\n      Resolve each, or set resolution_state to fixed / wontfix / obsolete with the reason recorded.`,
+        ],
+      };
+    }
+  }
   if (t == null)
     return {
       present: false,

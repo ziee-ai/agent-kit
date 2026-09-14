@@ -1063,6 +1063,20 @@ so budget for them — they are not optional polish:
   not clear phase 8 because two branches the owner had explicitly retired still declared the
   same version — the finding was true and the block was wrong. A gate nothing can satisfy
   trains people to bypass it, which is the failure this check exists downstream of.*
+- **A CONFIRMED FINDING NOBODY DISPOSITIONED BLOCKS PHASE 9**, whatever round raised it.
+  The fix-loop check reads the LAST fix round, so a finding raised *after* it — an
+  adjudication in round 2 following a round-1 loop that converged at zero — was never asked
+  about again. *Measured: a node reported `phases 1..9 complete` while carrying six open
+  CONFIRMED findings, two of them medium; from outside that is indistinguishable from a clean
+  run.* Resolve each, or set `resolution_state` to `fixed` / `wontfix` / `obsolete` with the
+  reason recorded. Dispositioning is cheap; limbo is what is not allowed.
+- **An angle that ran and found NOTHING is recorded as an angle-record, not a finding.**
+  Phase 6 counts angles from ledger rows, so a clean angle used to have to pose as a
+  pseudo-finding to be counted — and the promotion check then complained that nothing
+  qualified. Write `{"angle": "correctness", "round": 2, "no_findings": true, "note": "…"}`:
+  it counts toward breadth and is excluded from the promotion population. *A reviewer's
+  verdict on the row that prompted this: "the row is honest and the counter is wrong."*
+  Breadth is still enforced — one clean angle is still one angle.
 - **A12** the change must be **load-bearing**: revert your own fix commit whole,
   re-run the suite, and record the `## SELF-REVERT PROOF` above. **If nothing
   reddens, the change has no enforcement and phase 8 FAILS** — fix it; it is

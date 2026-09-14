@@ -1054,6 +1054,15 @@ so budget for them — they are not optional polish:
   so nothing flagged it.* Remember a bump has **three halves** — manifest `version:`, the
   changelog entry, and the pin test's function **name** plus its asserted string; moving fewer
   turns the pin red in a way that reads as unrelated.
+  A sibling collision is **waivable per-ref, with a reason**, because *unmerged* is not
+  *will merge* — an abandoned branch claims its version forever, and without this a live
+  branch can be blocked by a dead one. Name the ref and say why in `DECISIONS.md`:
+  `- **version-collision-waived**: origin/dsh/560-x — retired by owner redirect; will not merge`.
+  Per-ref and reason-bearing on purpose: a blanket "ignore A14" would be the same hole in a
+  different shape. *Measured: a re-implementation reaching **1000 passed / 0 failed** could
+  not clear phase 8 because two branches the owner had explicitly retired still declared the
+  same version — the finding was true and the block was wrong. A gate nothing can satisfy
+  trains people to bypass it, which is the failure this check exists downstream of.*
 - **A12** the change must be **load-bearing**: revert your own fix commit whole,
   re-run the suite, and record the `## SELF-REVERT PROOF` above. **If nothing
   reddens, the change has no enforcement and phase 8 FAILS** — fix it; it is

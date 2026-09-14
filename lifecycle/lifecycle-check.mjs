@@ -2238,6 +2238,20 @@ function checkA14VersionSiblings() {
   if (!manifests.size) return [];
   const cands = integrationCandidates();
   const target = cands.length ? cands[0].ref : null;
+  // Waivers: one line per ref in DECISIONS.md, each carrying a reason. Parsed once.
+  // The reason is REQUIRED — a waiver with no justification is just a suppression, and
+  // the whole point is that a reviewer can see which claims were dismissed and why.
+  const waivedRefs = new Set();
+  for (const ln of (read('DECISIONS.md') || '').split(/\r?\n/)) {
+    const m = /^[^\S\n]*-[^\S\n]*\*\*version-collision-waived\*\*[^\S\n]*:[^\S\n]*(\S[^\n]*)$/i.exec(ln);
+    if (!m) continue;
+    const rest = m[1].trim();
+    // `<ref> — <reason>` / `<ref> - <reason>` / `<ref>: <reason>`
+    const parts = rest.split(/\s+(?:—|--|-|:)\s+/);
+    const ref = (parts[0] || '').trim().replace(/^[`'"]|[`'"]$/g, '');
+    const reason = parts.slice(1).join(' ').trim();
+    if (ref && reason) waivedRefs.add(ref);
+  }
   for (const path of manifests) {
     const mine = declaredVersionAt('HEAD', path);
     if (!mine) continue;
@@ -2267,12 +2281,32 @@ function checkA14VersionSiblings() {
       if (s.endsWith('/HEAD')) continue;
       try { if (git(repo, 'rev-parse', s) === headSha) continue; } catch { continue; }
       const sv = declaredVersionAt(s, path);
-      if (sv && sv === mine)
+      if (sv && sv === mine) {
+        // WAIVABLE, per-ref, with a REASON — because "unmerged" is not the same as
+        // "will merge". An abandoned branch kept for reference claims its version
+        // forever, so without this a live branch can be blocked by a dead one and the
+        // gate becomes unsatisfiable. (MEASURED: a re-implementation that took the suite
+        // to 1000 passed / 0 failed could not clear phase 8, because two branches the
+        // owner had explicitly retired still declared the same version. The finding was
+        // true and the block was wrong.) This is the mirror of the already-merged phantom
+        // hits excluded from the artifact sweep: merged refs collide never, abandoned
+        // refs collide forever.
+        //
+        // A gate nothing can satisfy trains people to bypass it, which is the failure this
+        // whole check exists downstream of. So it stays REFUSABLE but not IMPASSABLE: name
+        // the specific ref and say why it is not a live claimant, in DECISIONS.md:
+        //   - **version-collision-waived**: origin/dsh/560-x — retired by owner redirect; will not merge
+        // Per-ref and reason-bearing on purpose: a blanket "ignore A14" would be the same
+        // hole in a different shape.
+        if (waivedRefs.has(s)) continue;
         g.push(
           `A14: ${path} declares version ${mine}, and the OPEN branch ${s} claims the SAME version. ` +
           `Whichever merges second must be renumbered across all three halves. Checking only the integration tip ` +
-          `cannot see this — a sibling's claim is invisible from the tip, and this exact collision has been shipped four times.`,
+          `cannot see this — a sibling's claim is invisible from the tip, and this exact collision has been shipped four times. ` +
+          `If ${s} is ABANDONED and will never merge, say so explicitly in DECISIONS.md and this stops blocking you: ` +
+          `\`- **version-collision-waived**: ${s} — <why it is not a live claimant>\``,
         );
+      }
     }
   }
   return g;

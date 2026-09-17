@@ -76,7 +76,23 @@ const section = (txt, name) => {
 // and a downstream CONS binding the dropped PROV saw a phantom GAP. (Found when
 // T4 first bound PROV-T3-2.)
 const RE_PROV = /^\s*-\s*\*\*PROV-([A-Za-z0-9._-]+)\*\*\s*(?:\([^)]*\)\s*)?:/gim;
-const RE_CONS = /^\s*-\s*\*\*CONS-([A-Za-z0-9._-]+)\*\*\s*\[from\s+([A-Za-z0-9._-]+)\]\s*\[expects:\s*PROV-([A-Za-z0-9._-]+)\]/gim;
+// `[expects: NONE]` — the consumer needs something NO provider declares.
+//
+// The epic-lifecycle skill orders this row to exist: "If you need something no provider lists
+// as a PROV, write the CONS anyway — that is a GAP for Phase 3 to resolve by growing the
+// provider; do NOT silently re-implement the missing capability." Until now the grammar had no
+// way to say it. A planner obeying the skill had to either invent a PROV id that does not exist
+// — the worse outcome, since a fabricated id reads as a real binding — or write prose and have
+// the row reported as MALFORMED. Measured in dental 2026-09-17: 4 of 28 "won't bind" rows were
+// correct plans being told they were broken, e.g.
+//     - **CONS-LAB-CASES-9** [from catalogue] [expects: none declared — GAP]: the lab master…
+// `catalogue` is a real node, it declares no such contract, and saying so is the honest row.
+//
+// STRICTLY ADDITIVE: a `[expects: PROV-x]` row parses exactly as before (group 3 is the id).
+// A NONE row leaves group 3 undefined, and the code below treats that as a DECLARED GAP — a
+// real Phase-3 obligation to grow the provider, not a pass and not a malformation. Trailing
+// prose after NONE is allowed so the row can say why.
+const RE_CONS = /^\s*-\s*\*\*CONS-([A-Za-z0-9._-]+)\*\*\s*\[from\s+([A-Za-z0-9._-]+)\]\s*\[expects:\s*(?:PROV-([A-Za-z0-9._-]+)|NONE\b[^\]]*)\]/gim;
 const RE_RECON = /^\s*-\s*\*\*CONS-([A-Za-z0-9._-]+)\s*↔\s*PROV-([A-Za-z0-9._-]+)\*\*\s*—\s*verdict:\s*(MATCH|GAP|DRIFT)\b/gim;
 // LOUD tripwire: a line that LOOKS like a contract declaration (opens `- **PROV-`
 // / `- **CONS-`) but does NOT match the strict grammar above. Silent-drop is the
@@ -128,11 +144,11 @@ function items() {
     const provSec = section(t, 'Provides');
     const consSec = section(t, 'Consumes');
     const prov = all(RE_PROV, provSec).map((m) => `PROV-${m[1]}`);
-    const cons = all(RE_CONS, consSec).map((m) => ({ id: `CONS-${m[1]}`, from: m[2], expects: `PROV-${m[3]}` }));
+    const cons = all(RE_CONS, consSec).map((m) => ({ id: `CONS-${m[1]}`, from: m[2], expects: m[3] ? `PROV-${m[3]}` : null }));
     for (const bad of malformed(RE_PROV_LOOSE, RE_PROV, provSec))
       g(`${d}: PROV-${bad} won't bind — needs \`- **PROV-${bad}**[ (tag)]: text\` (colon after the id/tag)`);
     for (const bad of malformed(RE_CONS_LOOSE, RE_CONS, consSec, /↔/))
-      g(`${d}: CONS-${bad} won't bind — needs \`- **CONS-${bad} [from <dir>] [expects: PROV-x]: text\``);
+      g(`${d}: CONS-${bad} won't bind — needs \`- **CONS-${bad}** [from <dir>] [expects: PROV-x | NONE]: text\``);
     map[d] = { t, prov, cons };
   }
   return map;
@@ -168,7 +184,20 @@ if (phase >= 2) {
   for (const [d, x] of Object.entries(it)) {
     for (const c of x.cons) {
       const inEpic = !!it[c.from];
-      const isExternal = !inEpic && subProv.has(c.expects); // a cross-epic substrate contract, pinned in GRAPH
+      // A DECLARED GAP (`[expects: NONE]`) names a real provider and states that it declares
+      // nothing. It is a Phase-3 obligation to GROW that provider — reported here so it blocks
+      // freeze exactly like a missing PROV, and never treated as satisfied. It must not reach
+      // the `subProv.has()` / `prov.includes()` tests below, both of which would be asking
+      // whether a null id is provided.
+      // ORDER MATTERS. A declared gap whose provider is ALSO unresolvable has two problems, and
+      // the unresolvable NAME is the more actionable one: "grow `finance`" is unfollowable when
+      // `finance` is not a node in the graph. So the provider-name check runs first, and the
+      // declared-gap message is reserved for a row whose provider genuinely exists.
+      if (c.expects === null && inEpic) {
+        g(`${d}/PLAN.md: ${c.id} declares that ${c.from} provides NO contract for what it needs — a GAP to close by GROWING ${c.from}, never by building it here`);
+        continue;
+      }
+      const isExternal = !inEpic && c.expects !== null && subProv.has(c.expects); // a cross-epic substrate contract, pinned in GRAPH
       if (!inEpic && !isExternal) {
         g(`${d}/PLAN.md: ${c.id} names provider "${c.from}" which is neither an in-epic item nor an external substrate PROV declared in GRAPH.md — pin the cross-epic interface as a PROV-<EXT> in GRAPH's substrate section (it must NOT be left unpinned in ASSUMPTIONS.md)`);
       } else if (inEpic && !it[c.from].prov.includes(c.expects)) {
@@ -202,7 +231,7 @@ if (phase >= 4) {
   const recon = read('RECONCILE.md') ?? '';
   if (!/\*\*Frozen:\*\*/i.test(recon)) g('RECONCILE.md: missing "**Frozen:** ..." freeze line (Phase 4)');
   // every downstream-bound PROV must be named by an [acceptance] test in its item's PLAN
-  const boundProv = new Set(Object.values(it).flatMap((x) => x.cons.map((c) => c.expects)));
+  const boundProv = new Set(Object.values(it).flatMap((x) => x.cons.map((c) => c.expects).filter(Boolean)));
   for (const [d, x] of Object.entries(it)) {
     for (const p of x.prov) {
       if (!boundProv.has(p)) continue; // only downstream-bound contracts must be pinned

@@ -26,10 +26,15 @@ human's go** unless they've said otherwise.
   + "re-derive from the board after every compaction" rule below is mandatory, not
   optional — you cannot hold 50 items' state in context.
 - **Feature:** one node = one worker running `feature-lifecycle` in its own worktree.
-- **Worker backend = the `bridge-coordinator`** (spawned via the Task/Agent tool),
-  which dispatches **dsh workers** (`/data/pbya/dsh-local.sh`, local DeepSeek,
-  effectively free) for implementation + first-line verification. The coordinator
-  reports ready; YOU run the merge-gate and merge. (The older interactive-zellij
+- **Worker backend = `dsh-orchestrate`** (`/data/pbya/dsh-orchestrate.sh "<goal>"`,
+  launched detached with a hard `timeout`, per-run ledger under `.dsh-orchestration/`).
+  Its DRIVING LOOP runs inside dsh (local DeepSeek, free) and dispatches **dsh workers**
+  (`/data/pbya/dsh-local.sh`) for implementation + first-line verification; Claude is
+  only shelled out to for discrete judgement (`claude --model opus -p`). The run
+  reports ready in its ledger; YOU run the merge-gate and merge. **Do NOT dispatch via
+  the `bridge-coordinator` agent** (Task/Agent tool): its driving loop runs on Sonnet —
+  measured 2026-09-23 in dental, ~200–500K Sonnet tokens per dispatch for conducting
+  work dsh does for free. (The older interactive-zellij
   `claude-liveN --remote-control` fleet is **retired** — do not launch it; the rest
   of this doc's "worker/session" guidance now means coordinator/dsh workers.)
 
@@ -41,9 +46,10 @@ types, plan-trimming, and a merge-gate bug — all by re-verifying instead of
 trusting. This is the P1 discipline; it is non-negotiable.
 
 ## Dispatching feature work
-- One feature per **bridge-coordinator** dispatch (Task/Agent tool), each in its
-  own worktree off `origin/main`, running `feature-lifecycle`. The coordinator owns
-  the lifecycle + spawns dsh workers; see its own definition for the mechanics.
+- One feature per **`dsh-orchestrate`** run, each in its own worktree off
+  `origin/main`, running `feature-lifecycle`. The run owns the lifecycle + spawns dsh
+  workers; see the script's own brief for the mechanics. Record every run at LAUNCH:
+  a queue/board row, the brief in a durable place, the branch pushed.
 - Big/architectural features (store refactors, new runtimes) → **plan-first pause**:
   have the coordinator produce phases 1–4 (plan/plan-audit/tests/decisions), then
   **HALT and surface the plan for the human to approve before any code**. Genuine
@@ -186,13 +192,13 @@ for GENUINE judgment: epic architecture, a hard adjudication, gnarly debugging.
 - **Spend Opus as an explicit JUDGMENT SUBAGENT, not by running the whole session
   on Opus.** When a genuinely Opus-worthy decision arrives, spawn a one-shot
   env-stripped `claude --model opus` for THAT decision and take its verdict — the
-  same pattern the bridge-coordinator uses for its Phase-5 finding-verify. This
+  same pattern dsh-orchestrate uses for its adversarial finding-verify. This
   buys Opus judgment without paying Opus rates on every dispatch turn.
 - **Do NOT flip `/model` mid-session to "use Opus just for the hard turn"** — a
   model switch INVALIDATES the prompt cache (full uncached re-read). Pick one model
   per session; escalate via a subagent instead.
-- **The bridge-coordinator subagent runs `model: sonnet`** for the same reason
-  (conducting is Sonnet-tier; its Phase-5 verify is explicit Opus).
+- **Conducting runs on free dsh, not on a Claude model at all** (`dsh-orchestrate`);
+  only its adversarial verify shells out to explicit Opus.
 - **VALIDATE, don't assume:** the orchestrator's "verify, don't trust" catching is
   its core value (it caught real main-reds). Run one campaign on the Sonnet+Opus-
   judgment structure and confirm with `ccusage` (cost dropped) AND that the

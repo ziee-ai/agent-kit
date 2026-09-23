@@ -176,6 +176,8 @@ const STAGING_COPY_FILES = (APP.MERGE_STAGING_COPY_FILES || '').split(/\s+/).fil
 const STAGING_LINK_DIRS = (APP.MERGE_STAGING_LINK_DIRS || '').split(/\s+/).filter(Boolean);
 // C7: the app's OWN check recipe, run on the merged tree. See gateC7.
 const CHECK_CMD = APP.MERGE_CHECK_CMD || null;
+// C8: an app command run on the merged tree BEFORE C5 strips `.lifecycle/`. See gateC8.
+const PRE_STRIP_CMD = APP.MERGE_PRE_STRIP_CMD || null;
 
 // ---------------------------------------------------------------------------
 // --verify-head — the fast subset safe to run in a pre-push hook on a push to
@@ -683,6 +685,7 @@ function gateMergeAndP2C5() {
       (conflicts ? ` Conflicted: ${conflicts.split(/\n/).join(', ')}` : ''));
     // P2/C5 depend on a merged tree; skip them
     record('P2', 'merge-completeness', 'SKIP', 'merge did not complete');
+    record('C8', 'pre-strip-check', 'SKIP', 'merge did not complete');
     record('C5', 'lifecycle-strip', 'SKIP', 'merge did not complete');
     return;
   }
@@ -705,6 +708,9 @@ function gateMergeAndP2C5() {
   } else {
     record('P2', 'merge-completeness', 'PASS', `all ${branchFiles.length} branch file(s) present in the merge`);
   }
+
+  // --- C8 pre-strip: the last moment the branch's `.lifecycle/` is readable.
+  gateC8();
 
   // --- C5 lifecycle-strip: perform + verify the `.lifecycle/` removal the merge
   // to main REQUIRES (process artifacts must never land on main).
@@ -919,6 +925,40 @@ function gateC7() {
     return;
   }
   record('C7', 'repo-check', 'PASS', `${CHECK_CMD} green on the merged tree`);
+}
+
+// ---------------------------------------------------------------------------
+// C8 — the app's PRE-STRIP command, run on the merged tree while `.lifecycle/`
+// is still present (immediately before C5 removes it).
+//
+// WHY THIS EXISTS: `.lifecycle/` holds the branch's audit ledger (LEDGER.jsonl)
+// and C5 deletes it from everything that lands. C7 runs AFTER the strip, so no
+// app check can ever read those findings at merge time: a confirmed, open
+// finding that was never fixed and never recorded anywhere durable simply
+// vanishes with the directory. This hook lets the app refuse that — e.g. a
+// check that every open finding in the ledger is linked to a durable follow-up.
+// It is light and runs even under --skip-heavy, because losing a finding is not
+// a performance question. Unset → SKIP.
+// ---------------------------------------------------------------------------
+function gateC8() {
+  if (!PRE_STRIP_CMD) {
+    record('C8', 'pre-strip-check', 'SKIP', 'MERGE_PRE_STRIP_CMD unset (no pre-strip check configured)');
+    return;
+  }
+  const [cmd, ...args] = PRE_STRIP_CMD.split(/\s+/);
+  const r = spawnSync(cmd, args, { cwd: staging, encoding: 'utf8', stdio: 'pipe', maxBuffer: 64 * 1024 * 1024 });
+  if (r.error || r.status === null) {
+    record('C8', 'pre-strip-check', 'FAIL', `${PRE_STRIP_CMD} could not run: ${r.error ? r.error.message : 'process did not exit normally'} (is "${cmd}" installed?)`);
+    return;
+  }
+  if (r.status !== 0) {
+    const out = (r.stdout || '') + (r.stderr || '');
+    record('C8', 'pre-strip-check', 'FAIL',
+      `${PRE_STRIP_CMD} FAILED on the merged tree before the .lifecycle/ strip (exit ${r.status}). What it guards is deleted by C5 the moment this passes. Tail:\n`
+      + out.split(/\n/).filter((l) => l.trim()).slice(-14).join('\n'));
+    return;
+  }
+  record('C8', 'pre-strip-check', 'PASS', `${PRE_STRIP_CMD} green before the .lifecycle/ strip`);
 }
 
 // ---------------------------------------------------------------------------

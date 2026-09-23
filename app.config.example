@@ -122,6 +122,15 @@ MERGE_STAGING_LINK_DIRS=node_modules src-app/ui/node_modules
 # Unset SKIPS the gate.
 MERGE_CHECK_CMD=just check
 
+# ── C8: an app command run BEFORE C5 strips `.lifecycle/` ──────────────────
+# C5 deletes the branch's `.lifecycle/` (and its audit LEDGER.jsonl) from what
+# lands, and C7 runs after that — so no app check could read a branch's open
+# findings at merge time, and an unfixed, unrecorded finding vanished with the
+# directory. This command runs on the merged tree while `.lifecycle/` is still
+# there; non-zero fails the merge. Runs even under --skip-heavy.
+# Unset SKIPS the gate.
+# MERGE_PRE_STRIP_CMD=node spec/lint/followups-check.mjs
+
 # ── lifecycle-check.mjs (per-phase gate) ──────────────────────────────────
 # lifecycle-check is otherwise app-agnostic; only these three ziee-specific
 # values are read from app.config. EACH KEY DEFAULTS TO ZIEE'S HISTORICAL

@@ -1269,6 +1269,89 @@ assert_exit_cmd 0 "merge-gate C3+C6: a COMPLETE MERGE_GENERATED list on a correc
   node "$MG" feat/regen --repo "$R" --base main --no-fetch
 
 # ---------------------------------------------------------------------------
+# C9 — the app's OWN test recipe, run on the MERGED tree (a heavy C7 mirror).
+#
+# C7/C8 are not self-tested here (their consumer runs pin them), but C9's
+# contract is exactly what this suite's merge-gate section exists for, and the
+# fixture is the one already in pattern: a fixture repo + .claude/app.config + a
+# committed stub command standing in for `just test`, the same way regen.sh
+# stands in for `just openapi-regen`. Every branch of the contract is proven:
+# the recipe RUNS IN STAGING (the stub prints $PWD, which holds `.merge-gate-*`)
+# and PASSes; a non-zero stub FAILs red carrying its output tail; --skip-heavy
+# SKIPs it even when configured (heavy, like C7 — NOT C8, the pre-strip check);
+# unset SKIPs it, never a fake PASS.
+# ---------------------------------------------------------------------------
+C9R="$(new_repo)"; CLEANUP+=("$C9R"); mkdir -p "$C9R/.claude"
+cat > "$C9R/test.sh" <<'EOF'
+#!/usr/bin/env bash
+# stands in for `just test`: the app's own test recipe.
+echo "C9_SELFTEST_CWD=$PWD"
+echo "C9_SELFTEST_TEST_RAN"
+exit 0
+EOF
+chmod +x "$C9R/test.sh"
+cat > "$C9R/.claude/app.config" <<'CFGEOF'
+MERGE_TEST_CMD=./test.sh
+CFGEOF
+git -C "$C9R" add -A && git -C "$C9R" commit -qm base-c9
+git -C "$C9R" checkout -q -b feat/c9
+echo work > "$C9R/w.txt"; git -C "$C9R" add -A && git -C "$C9R" commit -qm work-c9
+assert_exit_cmd 0 "merge-gate C9: a green app test recipe PASSes" -- \
+  node "$MG" feat/c9 --repo "$C9R" --base main --no-fetch
+# On PASS the recipe's own output is captured, not echoed (only the FAIL tail
+# carries it), so the PASS line is the proof here: it is recorded only after a
+# successful spawn — a spawn problem records FAIL 'could not run' instead.
+if grep -qE "C9 .*repo-test .*PASS" "$LC_SELFTEST_OUT"; then
+  PASS=$((PASS+1)); printf '  \033[32mok  \033[0m %s\n' "merge-gate C9: a green test recipe records PASS"
+else
+  FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "merge-gate C9: no PASS recorded"
+  sed 's/^/        | /' "$LC_SELFTEST_OUT"
+fi
+# non-zero ⇒ FAIL, and the failure carries the output tail (the C7/C3 shape).
+# The tail also carries the recipe's $PWD — the proof it ran IN STAGING (the
+# worktree dir is named `.merge-gate-*`) rather than the source repo.
+cat > "$C9R/test.sh" <<'EOF'
+#!/usr/bin/env bash
+# stands in for `just test` going RED.
+echo "C9_SELFTEST_FAIL_MARKER: expected failure line"
+echo "C9_SELFTEST_CWD=$PWD"
+exit 3
+EOF
+git -C "$C9R" commit -qam c9-failing-test
+assert_exit_cmd 1 "merge-gate C9: a FAILING app test recipe FAILs the merge" -- \
+  node "$MG" feat/c9 --repo "$C9R" --base main --no-fetch
+if grep -qE "C9 .*repo-test .*FAIL" "$LC_SELFTEST_OUT" \
+   && grep -qF "C9_SELFTEST_FAIL_MARKER" "$LC_SELFTEST_OUT" \
+   && grep -qE "C9_SELFTEST_CWD=.*\.merge-gate-" "$LC_SELFTEST_OUT"; then
+  PASS=$((PASS+1)); printf '  \033[32mok  \033[0m %s\n' "merge-gate C9: the FAIL names the exit code, carries the output tail, and proves it ran from STAGING"
+else
+  FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "merge-gate C9: FAIL missing exit reasoning, output tail, or the staging-cwd proof"
+  sed 's/^/        | /' "$LC_SELFTEST_OUT"
+fi
+# HEAVY ⇒ --skip-heavy skips it even when configured (C7's rule, NOT C8's).
+assert_exit_cmd 0 "merge-gate C9: --skip-heavy SKIPs the test recipe instead of running it" -- \
+  node "$MG" feat/c9 --repo "$C9R" --base main --no-fetch --skip-heavy
+if grep -qE "C9 .*repo-test .*SKIP" "$LC_SELFTEST_OUT" \
+   && ! grep -qF "C9_SELFTEST_FAIL_MARKER" "$LC_SELFTEST_OUT"; then
+  PASS=$((PASS+1)); printf '  \033[32mok  \033[0m %s\n' "merge-gate C9: the --skip-heavy run records SKIP and did NOT run the recipe"
+else
+  FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "merge-gate C9: --skip-heavy did not SKIP the recipe"
+  sed 's/^/        | /' "$LC_SELFTEST_OUT"
+fi
+# UNSET ⇒ SKIP (never a fake PASS): drop the key and run full.
+printf '# no test recipe configured\n' > "$C9R/.claude/app.config"
+git -C "$C9R" commit -qam c9-unset
+assert_exit_cmd 0 "merge-gate C9: MERGE_TEST_CMD unset ⇒ SKIP (no fake PASS)" -- \
+  node "$MG" feat/c9 --repo "$C9R" --base main --no-fetch
+if grep -qE "C9 .*repo-test .*SKIP" "$LC_SELFTEST_OUT" \
+   && grep -qF "MERGE_TEST_CMD unset" "$LC_SELFTEST_OUT"; then
+  PASS=$((PASS+1)); printf '  \033[32mok  \033[0m %s\n' "merge-gate C9: the unset run records SKIP naming the key"
+else
+  FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "merge-gate C9: unset did not SKIP with the key named"
+  sed 's/^/        | /' "$LC_SELFTEST_OUT"
+fi
+
+# ---------------------------------------------------------------------------
 echo "-- Part C: preflight.sh (env gate) --"
 # ---------------------------------------------------------------------------
 # good: hub-seed + pgvector + node_modules present (+ ziee-shaped app.config so

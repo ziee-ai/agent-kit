@@ -178,6 +178,8 @@ const STAGING_LINK_DIRS = (APP.MERGE_STAGING_LINK_DIRS || '').split(/\s+/).filte
 const CHECK_CMD = APP.MERGE_CHECK_CMD || null;
 // C8: an app command run on the merged tree BEFORE C5 strips `.lifecycle/`. See gateC8.
 const PRE_STRIP_CMD = APP.MERGE_PRE_STRIP_CMD || null;
+// C9: the app's OWN test recipe, run on the merged tree. See gateC9.
+const TEST_CMD = APP.MERGE_TEST_CMD || null;
 
 // ---------------------------------------------------------------------------
 // --verify-head — the fast subset safe to run in a pre-push hook on a push to
@@ -962,6 +964,43 @@ function gateC8() {
 }
 
 // ---------------------------------------------------------------------------
+// C9 — the app's OWN test recipe, run on the MERGED tree.
+//
+// WHY THIS EXISTS: C1 is `cargo check`, C3 is regen parity, and C7 runs the
+// app's own check recipe — typically a lint/typecheck aggregate. NONE of them
+// RUN the test suite: a merged tree can build, regenerate and lint clean while
+// carrying a failing test, and nothing at merge time would say so. C9 is the
+// behavior half of C7 — the app's own test target, on the tree that actually
+// lands. It is deliberately the app's OWN recipe rather than a list of commands
+// here, for the same reason as C7: a second list in this file would drift.
+//
+// Heavy: a real test suite is a performance question, so it honors
+// --skip-heavy like C7 — NOT C8, where losing a finding is not a performance
+// question.
+// ---------------------------------------------------------------------------
+function gateC9() {
+  if (SKIP_HEAVY) { record('C9', 'repo-test', 'SKIP', '--skip-heavy'); return; }
+  if (!TEST_CMD) {
+    record('C9', 'repo-test', 'SKIP', 'MERGE_TEST_CMD unset (no repo test configured)');
+    return;
+  }
+  const [cmd, ...args] = TEST_CMD.split(/\s+/);
+  const r = spawnSync(cmd, args, { cwd: staging, encoding: 'utf8', stdio: 'pipe', maxBuffer: 256 * 1024 * 1024 });
+  if (r.error || r.status === null) {
+    record('C9', 'repo-test', 'FAIL', `${TEST_CMD} could not run: ${r.error ? r.error.message : 'process did not exit normally'} (is "${cmd}" installed?)`);
+    return;
+  }
+  if (r.status !== 0) {
+    const out = (r.stdout || '') + (r.stderr || '');
+    record('C9', 'repo-test', 'FAIL',
+      `${TEST_CMD} FAILED on the merged tree (exit ${r.status}). This is the test suite the app itself defines — the behavior proof that C1/C3/C7 do not run. Tail:\n`
+      + out.split(/\n/).filter((l) => l.trim()).slice(-14).join('\n'));
+    return;
+  }
+  record('C9', 'repo-test', 'PASS', `${TEST_CMD} green on the merged tree`);
+}
+
+// ---------------------------------------------------------------------------
 // run
 // ---------------------------------------------------------------------------
 process.stdout.write(`merge-gate  branch=${branch}  base=${base}  merge-base=${mergeBase.slice(0, 10)}\n`);
@@ -969,13 +1008,14 @@ try {
   gateC4();
   gateC2();
   gateMergeAndP2C5();
-  // C1/C3 only run on a completed merge
+  // C1/C3/C7/C9 only run on a completed merge
   const merged = results.find((r) => r.id === 'MERGE')?.status === 'PASS';
-  if (merged) { gateC3(); gateC1(); gateC7(); }
+  if (merged) { gateC3(); gateC1(); gateC7(); gateC9(); }
   else {
     record('C3', 'regen-parity', 'SKIP', 'merge did not complete');
     record('C1', 'clean-build', 'SKIP', 'merge did not complete');
     record('C7', 'repo-check', 'SKIP', 'merge did not complete');
+    record('C9', 'repo-test', 'SKIP', 'merge did not complete');
   }
 } finally {
   if (stagingCreated && !KEEP_STAGING) {

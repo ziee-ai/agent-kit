@@ -131,6 +131,18 @@ MERGE_CHECK_CMD=just check
 # Unset SKIPS the gate.
 # MERGE_PRE_STRIP_CMD=node spec/lint/followups-check.mjs
 
+# ── C9: the app's OWN test recipe, run on the MERGED tree ────────────────
+# C1 is `cargo check`, C3 is regen parity and C7 is the app's own check recipe
+# (typically a lint/typecheck aggregate). NONE of them RUN the test suite: a
+# merged tree can build, regenerate cleanly and pass every lint while carrying a
+# failing test, and nothing at merge time would say so. C9 is the behavior half
+# of C7 — the app's own test target, on the tree that actually lands.
+# Runs after C3/C1/C7, only on a completed merge; skipped by --skip-heavy (a
+# test suite is a performance question, so this honors --skip-heavy like C7,
+# NOT like C8).
+# Unset SKIPS the gate.
+# MERGE_TEST_CMD=just test
+
 # ── lifecycle-check.mjs (per-phase gate) ──────────────────────────────────
 # lifecycle-check is otherwise app-agnostic; only these three ziee-specific
 # values are read from app.config. EACH KEY DEFAULTS TO ZIEE'S HISTORICAL

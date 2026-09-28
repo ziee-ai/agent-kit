@@ -900,6 +900,53 @@ EOF
 git -C "$R" commit -qam add-negperm-mig
 lc 0 "A10: the migration grant WITH a restricted-user e2e passes (phase 8)" --phase 8 --repo "$R" --dir "$D" --base main
 
+# --- A10 plan-forecast vs diff (agent-kit#16): a backend-only item whose plan
+#     CITES a pre-existing gating string ("never gated by service::manage") and
+#     names a permissions.rs, while introducing only a non-user-facing string.
+a10_cite_plan() {  # $1 = lifecycle dir: add the permissions.rs + the verbatim citation to PLAN.md
+  cat >> "$1/PLAN.md" <<'EOF'
+- `src-app/server/src/modules/bar/permissions.rs` — new server-only string `bar::seed` (ITEM-1).
+## Contract (frozen, verbatim)
+- The seed op is never gated by the pre-existing `service::manage`; it has no UI surface.
+EOF
+}
+# A10-6: the forecast alone (phase 3, nothing in the diff yet) still FIRES — the
+#        plan names a permissions.rs and a ::manage token, and nothing waives it.
+R="$(build_be)"; D="$R/.lifecycle/bar"; a10_cite_plan "$D"; git -C "$R" commit -qam cite-plan
+lc 1 "A10: plan forecast (permissions.rs + ::manage token, no diff yet) still REFUSED without a waiver (phase 3)" --phase 3 --repo "$R" --dir "$D" --base main
+lc_says "A10: the diff introduces a user-facing permission" "A10: plan forecast (permissions.rs + ::manage token, no diff yet) still REFUSED without a waiver (phase 3) — diagnosis is A10" --phase 3 --repo "$R" --dir "$D" --base main
+# A10-7: a reasoned `**a10-not-applicable**` line in DECISIONS.md waives the FORECAST.
+printf '\n- **a10-not-applicable**: backend-only item, Surfaces: none; service::manage is cited as the gate it must NOT use\n' >> "$D/DECISIONS.md"
+git -C "$R" commit -qam a10-na
+lc 0 "A10: a reasoned a10-not-applicable line waives the plan forecast (phase 3)" --phase 3 --repo "$R" --dir "$D" --base main
+# A10-8: an EMPTY/one-word waiver is not a waiver.
+R="$(build_be)"; D="$R/.lifecycle/bar"; a10_cite_plan "$D"
+printf '\n- **a10-not-applicable**: n/a\n' >> "$D/DECISIONS.md"
+git -C "$R" commit -qam a10-na-empty
+lc 1 "A10: a reasonless a10-not-applicable line does NOT waive (phase 3)" --phase 3 --repo "$R" --dir "$D" --base main
+lc_says "A10: the diff introduces a user-facing permission" "A10: a reasonless a10-not-applicable line does NOT waive (phase 3) — diagnosis is A10" --phase 3 --repo "$R" --dir "$D" --base main
+# A10-9 (the #16 repro, phase 8): once the diff touches permissions.rs, the DIFF decides —
+#        it adds only `bar::seed`, so the citation in the plan no longer fires A10, with NO waiver.
+R="$(build_be)"; D="$R/.lifecycle/bar"; a10_cite_plan "$D"
+cat > "$R/src-app/server/src/modules/bar/permissions.rs" <<'EOF'
+// A caller lacking bar::seed is denied (403).
+pub struct BarSeed;
+impl PermissionCheck for BarSeed {
+    const PERMISSION: &'static str = "bar::seed";
+}
+EOF
+git -C "$R" add -A && git -C "$R" commit -qm add-server-only-perm
+FIX="$(git -C "$R" rev-parse --short HEAD)"
+printf '\n## SELF-REVERT PROOF\n- **commit**: %s\n- **reddened**: TEST-1 FAIL (reverting the fix removes bar::seed; the seed op is no longer gated)\n- **restored**: TEST-1 PASS\n' "$FIX" >> "$D/TEST_RESULTS.md"
+git -C "$R" commit -qam self-revert-proof
+lc 0 "A10: diff adds only a non-user-facing string — the plan's citation no longer fires A10 (phase 8, #16)" --phase 8 --repo "$R" --dir "$D" --base main
+# A10-10: a waiver can NEVER silence the diff: build_perm's diff introduces foo::use.
+R="$(build_perm)"; D="$R/.lifecycle/foo"
+printf '\n- **a10-not-applicable**: trying to waive a real user-facing permission — must be ignored\n' >> "$D/DECISIONS.md"
+git -C "$R" commit -qam a10-na-on-real-perm
+lc 1 "A10: a10-not-applicable does NOT override a diff that introduces foo::use (phase 8)" --phase 8 --repo "$R" --dir "$D" --base main
+lc_says "A10: the diff introduces a user-facing permission" "A10: ...and the refusal IS A10 (not an unrelated gate)" --phase 8 --repo "$R" --dir "$D" --base main
+
 # --- A7: a UI diff whose results omit the boot/runtime canary -> phase 8 FAIL
 R="$(new_repo)"; CLEANUP+=("$R")
 git -C "$R" checkout -q -b feat/ui

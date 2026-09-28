@@ -458,6 +458,17 @@ the FRONTEND half of the authz proof — paired with the backend deny test
 > a floor, not a ceiling. Under-covering here is exactly how live2/live3/live4
 > shipped ungated surfaces past a green 8/8 lifecycle.
 
+> **Forecast vs diff (agent-kit#16).** Before code exists, A10 *forecasts* an
+> introduction from PLAN.md (it names a `permissions.rs`/migration AND a
+> `::use/::read/::manage` token). Once the diff touches a `permissions.rs` or
+> migration, **the diff decides** — a plan that merely *cites* a pre-existing
+> gating string (e.g. "never gated by `service::manage`") no longer trips A10
+> when the diff adds only non-user-facing strings. For a genuinely backend-only
+> item at phase 3, add a reasoned line to DECISIONS.md:
+> `- **a10-not-applicable**: <why — e.g. Surfaces: none; the ::manage token is a citation>`.
+> It waives the FORECAST only; it can never silence a diff that introduces a
+> `::use/::read/::manage` string.
+
 Gate: `--phase 3` (fails loudly if any ITEM is unmapped, any `INV-N` has no
 `[acceptance]` test, a UI diff has no e2e test, or a new permission has no
 restricted-user `[negative-perm]` e2e).

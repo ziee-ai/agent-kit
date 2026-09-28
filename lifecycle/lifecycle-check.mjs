@@ -1304,8 +1304,25 @@ function planIntroducesGatingPerm() {
   const touchesPermFile = /modules\/[A-Za-z0-9_]+\/permissions\.rs|migrations\/[^\s`"']+\.sql/.test(t);
   return touchesPermFile && RE_GATING_PERM_TOKEN.test(t);
 }
+// Once the diff touches a permissions.rs / migration, the DIFF is authoritative:
+// the plan's tokens were only ever a pre-implementation forecast, and a plan may
+// legitimately CITE a pre-existing gating string (e.g. "never gated by the
+// existing service::manage") while introducing only non-user-facing strings
+// (agent-kit#16). Before that — phase 3 — the forecast stands, unless DECISIONS.md
+// carries an explicit, reasoned `**a10-not-applicable**: <why>` line. That line
+// is honoured ONLY by the forecast; it can never silence the diff-based check.
+function diffTouchesPermFile() {
+  return diffAddedLines().some((a) => RE_PERM_SRC.test(a.file) || RE_MIGRATION.test(a.file));
+}
+function a10NotApplicable() {
+  const t = read('DECISIONS.md');
+  if (t == null) return false;
+  return t.split(/\r?\n/).some((ln) => /^[^\S\n]*-[^\S\n]*\*\*a10-not-applicable\*\*[^\S\n]*:[^\S\n]*\S.{9,}$/i.test(ln));
+}
 function introducesGatingPerm() {
-  return diffIntroducesGatingPerm() || planIntroducesGatingPerm();
+  if (diffIntroducesGatingPerm()) return true;
+  if (diffTouchesPermFile()) return false;
+  return planIntroducesGatingPerm() && !a10NotApplicable();
 }
 // The enumerated RESTRICTED-USER e2e specs (tier e2e + [negative-perm] tag).
 function negPermE2eTests(tests) {

@@ -1284,9 +1284,15 @@ const RE_GATING_PERM = /["'`][a-z][a-z0-9_]*(?:::[a-z0-9_]+)*::(?:use|read|manag
 // one. Scoping to those two file kinds is what keeps the trigger precise.
 const RE_PERM_SRC = /(?:^|\/)modules\/[^/]+\/permissions\.rs$/;
 const RE_MIGRATION = /(?:^|\/)migrations\/[^/]+\.sql$/;
+// A COMMENT that cites an existing gating string (e.g. "never gated by the
+// existing `service::manage`") introduces nothing — same class as the plan-citation
+// false positive (agent-kit#16). Only code/SQL lines count: skip `//` / `/*` / `*`
+// lines in permissions.rs and `--` lines in migrations.
+const RE_COMMENT_LINE = /^\s*(?:\/\/|\/\*|\*|--)/;
 function diffIntroducesGatingPerm() {
   for (const a of diffAddedLines()) {
     if (!RE_PERM_SRC.test(a.file) && !RE_MIGRATION.test(a.file)) continue;
+    if (RE_COMMENT_LINE.test(a.text)) continue;
     if (RE_GATING_PERM.test(a.text)) return true;
   }
   return false;

@@ -946,6 +946,22 @@ printf '\n- **a10-not-applicable**: trying to waive a real user-facing permissio
 git -C "$R" commit -qam a10-na-on-real-perm
 lc 1 "A10: a10-not-applicable does NOT override a diff that introduces foo::use (phase 8)" --phase 8 --repo "$R" --dir "$D" --base main
 lc_says "A10: the diff introduces a user-facing permission" "A10: ...and the refusal IS A10 (not an unrelated gate)" --phase 8 --repo "$R" --dir "$D" --base main
+# A10-11: a COMMENT in permissions.rs citing an existing gating string introduces nothing
+#         (the catalogue/seed-and-version shape: "never gated by the existing `service::manage`").
+R="$(build_be)"; D="$R/.lifecycle/bar"; a10_cite_plan "$D"
+cat > "$R/src-app/server/src/modules/bar/permissions.rs" <<'EOF'
+// A caller lacking bar::seed is denied (403). Never gated by the existing
+//     `service::manage` — that string is cited, not introduced.
+pub struct BarSeed;
+impl PermissionCheck for BarSeed {
+    const PERMISSION: &'static str = "bar::seed";
+}
+EOF
+git -C "$R" add -A && git -C "$R" commit -qm add-server-only-perm-with-citing-comment
+FIX="$(git -C "$R" rev-parse --short HEAD)"
+printf '\n## SELF-REVERT PROOF\n- **commit**: %s\n- **reddened**: TEST-1 FAIL (reverting the fix removes bar::seed; the seed op is no longer gated)\n- **restored**: TEST-1 PASS\n' "$FIX" >> "$D/TEST_RESULTS.md"
+git -C "$R" commit -qam self-revert-proof
+lc 0 "A10: a comment in permissions.rs citing \`service::manage\` does not count as introducing it (phase 8)" --phase 8 --repo "$R" --dir "$D" --base main
 
 # --- A7: a UI diff whose results omit the boot/runtime canary -> phase 8 FAIL
 R="$(new_repo)"; CLEANUP+=("$R")

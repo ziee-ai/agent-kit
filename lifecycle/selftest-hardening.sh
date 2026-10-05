@@ -104,6 +104,37 @@ CFGEOF
 }
 
 # ---------------------------------------------------------------------------
+# add_srp <repo> <featuredir> — append a VALID `## SELF-REVERT PROOF` section and
+# commit it. A12 (phase 8) requires every non-prose branch to record which test
+# reddened when the fix commit was reverted, so WITHOUT this every clean phase-8
+# fixture in this suite fails on A12 instead of on the gate it is probing.
+#
+# This existed as a real regression: A12 landed as a phase-8 gate and the fixtures
+# were never updated, so 28 of this suite's own assertions went red and the suite's
+# baseline silently became "28 failures are normal". A gate that reddens its own
+# test suite trains the reader to ignore the suite.
+#
+# The cited sha is HEAD BEFORE this extra commit: an ancestor of HEAD, absent from
+# the base ref, and touching real source — exactly what A12 asks of a real branch.
+# ---------------------------------------------------------------------------
+add_srp() {
+  local R="$1" D="$2" sha c base="${3:-main}"
+  # Cite the newest branch commit that touches REAL SOURCE. Citing HEAD blindly is wrong
+  # whenever the fixture's last commit only rewrote .lifecycle artifacts: A12 rejects such
+  # a commit on the grounds that reverting it could not redden anything — which is correct,
+  # and is the same reasoning the gate exists to enforce. So the helper has to honour it
+  # rather than route around it.
+  sha=""
+  for c in $(git -C "$R" rev-list "$base..HEAD" 2>/dev/null); do
+    if git -C "$R" diff-tree --no-commit-id --name-only -r "$c" 2>/dev/null \
+       | grep -qv '^\.lifecycle/'; then sha="$c"; break; fi
+  done
+  [ -n "$sha" ] || sha="$(git -C "$R" rev-parse HEAD)"
+  printf '\n## SELF-REVERT PROOF\n- **commit**: %s\n- **reddened**: TEST-1 (asserted the reverted behaviour and failed)\n- **restored**: TEST-1 PASS after re-applying\n' "$sha" >> "$D/TEST_RESULTS.md"
+  git -C "$R" add -A && git -C "$R" commit -qm srp
+}
+
+# ---------------------------------------------------------------------------
 # build_be — a fully-valid BACKEND feature repo on branch feat/bar, committed
 # clean. Echoes the repo root. The single source file is
 # src-app/server/src/modules/bar/repository.rs (entirely diff-added vs main).
@@ -142,6 +173,7 @@ EOF
 - **TEST-1**: PASS
 EOF
   git -C "$R" add -A && git -C "$R" commit -qm feat-bar
+  add_srp "$R" "$D"
   echo "$R"
 }
 
@@ -263,6 +295,7 @@ npm run check (ui): PASS
 gate:ui (ui): PASS
 EOF
   git -C "$R" add -A && git -C "$R" commit -qm feat-perm
+  add_srp "$R" "$D"
   echo "$R"
 }
 
@@ -898,6 +931,7 @@ npm run check (ui): PASS
 gate:ui (ui): PASS
 EOF
 git -C "$R" commit -qam add-negperm-mig
+add_srp "$R" "$D"
 lc 0 "A10: the migration grant WITH a restricted-user e2e passes (phase 8)" --phase 8 --repo "$R" --dir "$D" --base main
 
 # --- A7: a UI diff whose results omit the boot/runtime canary -> phase 8 FAIL
@@ -959,6 +993,7 @@ cat > "$D/TEST_RESULTS.md" <<'EOF'
 npm run check (ui): PASS
 EOF
 git -C "$R" add -A && git -C "$R" commit -qm feat-ui-no-canary
+add_srp "$R" "$D"
 lc 1 "A7: UI results missing the boot/runtime canary line is REFUSED" --phase 8 --repo "$R" --dir "$D" --base main
 printf 'gate:ui (ui): PASS\n' >> "$D/TEST_RESULTS.md"
 git -C "$R" commit -qam add-canary
@@ -1003,6 +1038,7 @@ npm run check (ui): PASS
 gate:ui (ui): PASS
 EOF
 git -C "$R" add -A && git -C "$R" commit -qm feat-mock-ghost
+add_srp "$R" "$D"
 lc 1 "R2-5: e2e mock of an unknown /api/ route is REFUSED" --phase 8 --repo "$R" --dir "$D" --base main
 # fix the mock to a live route
 sed 's#\*\*/api/ghosts#**/api/things#' "$R/src-app/ui/tests/e2e/foo/foo.spec.ts" > "$R/tmp.ts" && mv "$R/tmp.ts" "$R/src-app/ui/tests/e2e/foo/foo.spec.ts"
@@ -1510,6 +1546,7 @@ npm run check (webapp): PASS
 gate:ui (webapp): PASS
 EOF
 git -C "$R" add -A && git -C "$R" commit -qm webmock
+add_srp "$R" "$D"
 # WITHOUT app.config: ziee-default OPENAPI_SPECS (src-app/…) absent ⇒ R2-5 SKIPs
 # AND webapp/ is not a known FE workspace ⇒ FE npm-check gate SKIPs ⇒ exit 0
 # (the ghost mock is NOT flagged — the ziee paths simply don't exist here).
@@ -1569,6 +1606,7 @@ cat > "$D/TEST_RESULTS.md" <<'EOF'
 - **TEST-2**: PASS
 EOF
 git -C "$R" add -A && git -C "$R" commit -qm webfe
+add_srp "$R" "$D"
 # WITHOUT app.config: webapp/ is NOT a recognized FE workspace (ziee default map
 # is src-app/…) ⇒ the touch reads as non-frontend ⇒ no `npm run check` line is
 # required ⇒ exit 0 (the FE gate is app.config-driven, not baked to src-app).
@@ -1588,6 +1626,7 @@ npm run check (webapp): PASS
 gate:ui (webapp): PASS
 EOF
 git -C "$R" commit -qam webfe-results-complete
+add_srp "$R" "$D"
 lc 0 "lifecycle-check: webapp FE workspace satisfied by 'npm run check (webapp): PASS'" --phase 8 --repo "$R" --dir "$D" --base main
 
 # ---------------------------------------------------------------------------
@@ -1715,6 +1754,7 @@ EOF
   { printf '# TEST_RESULTS — foo\n- **TEST-1**: PASS\n- **TEST-2**: PASS\nnpm run check (ui): PASS\n'
     for l in "$@"; do printf '%s\n' "$l"; done; } > "$D/TEST_RESULTS.md"
   git -C "$R" add -A && git -C "$R" commit -qm feat-ui7
+  add_srp "$R" "$D"
   echo "$R"
 }
 
@@ -1803,6 +1843,70 @@ cat >> "$D/TEST_RESULTS.md" <<'EOF'
 EOF
 git -C "$R" commit -qam negperm-prose
 lc 0 "A10: the positive control is recognized from the asserts prose (no tag required)" --phase 8 --repo "$R" --dir "$D" --base main
+
+# --- A14 (b): a version collision with an OPEN sibling, and the ancestor exclusion ---
+#
+# The sibling list is built with `--no-merged <integration target>`, which answers a
+# different question than the one A14 asks. "Not merged into the epic tip" does NOT mean
+# "not in this branch's history": an integration HEAD that just merged five feature
+# branches is, by construction, the one place where every one of them is simultaneously
+# an ancestor of HEAD and unmerged into the tip. Each then collides with ITSELF.
+# (MEASURED, ziee-ai/agent-kit#14: 3 of 5 hits on one run, 6 of 9 on another — every one
+# a phantom the run had to hand-waive, which is how a gate teaches people to bypass it.)
+#
+# Built as a MATCHED PAIR so the exclusion cannot be a blanket mute: the ancestor sibling
+# must go quiet while a genuinely-divergent sibling with the same version still fires.
+build_a14() { # $1 = "ancestor" | "divergent"  -> echoes repo root
+  local R mode="$1"; R="$(build_be)"
+  local M=src-app/server/src/modules/bar/manifest.yaml
+  # A sibling branch off main that declares version 1.2.0 for the same package.
+  git -C "$R" checkout -q -b sib main
+  mkdir -p "$R/src-app/server/src/modules/bar"
+  printf 'name: bar\nversion: 1.2.0\n' > "$R/$M"
+  echo "pub fn sib() {}" > "$R/src-app/server/src/modules/bar/sib.rs"
+  git -C "$R" add -A && git -C "$R" commit -qm sib-1.2.0
+  # Publish it as a remote ref. It is deliberately NOT merged into main, so it is an
+  # "open sibling" from the tip's point of view in both arms of the pair.
+  git -C "$R" update-ref refs/remotes/origin/sib "$(git -C "$R" rev-parse sib)"
+  git -C "$R" checkout -q feat/bar
+  printf 'name: bar\nversion: 1.2.0\n' > "$R/$M"
+  git -C "$R" add -A && git -C "$R" commit -qm feat-manifest-1.2.0
+  # The ONLY difference between the arms: whether the sibling is in our history.
+  [ "$mode" = ancestor ] && git -C "$R" merge -q --no-edit sib -m "merge sib"
+  echo "$R"
+}
+
+# Negative control FIRST — if this does not fire, the pair proves nothing about the
+# exclusion, only that A14 is silent in general.
+R="$(build_a14 divergent)"; D="$R/.lifecycle/bar"
+lc 1 "A14: an OPEN sibling claiming the same version is REFUSED" --phase 8 --repo "$R" --dir "$D" --base main
+lc_says "origin/sib" "A14: the refusal NAMES the colliding ref (not a generic version gripe)" \
+  --phase 8 --repo "$R" --dir "$D" --base main
+
+# The fix: a sibling already merged INTO HEAD is our own claim, not a competitor.
+R="$(build_a14 ancestor)"; D="$R/.lifecycle/bar"
+lc 0 "A14: a sibling that is an ANCESTOR of HEAD is not a competing claimant" --phase 8 --repo "$R" --dir "$D" --base main
+
+# LOAD-BEARING PROOF. A gate change that passes its own test may simply be inert: the
+# clean arm above would also pass if A14 never fired at all, or if the fixture never
+# reached the collision branch. So delete the one line the fix adds, on a COPY of the
+# checker, and require the clean arm to REDDEN. If it stays green the exclusion is not
+# what made it pass and this test is decoration.
+# (This project has shipped a "fix" whose test passed identically with the fix reverted;
+# the rule earned from it is that a change must be observed to be necessary, not just
+# sufficient.)
+A14_SRC="$CHECK"; A14_TMP="$(mktemp -d)"; CLEANUP+=("$A14_TMP")
+grep -v "merge-base', '--is-ancestor', s, 'HEAD'" "$A14_SRC" > "$A14_TMP/lifecycle-check.mjs"
+if cmp -s "$A14_SRC" "$A14_TMP/lifecycle-check.mjs"; then
+  FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "A14: mutation harness could not find the ancestor line to remove (test is vacuous)"
+else
+  if node "$A14_TMP/lifecycle-check.mjs" --phase 8 --repo "$R" --dir "$D" --base main >/dev/null 2>&1; then
+    FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "A14: clean arm STILL passes with the ancestor exclusion removed — the fix is not load-bearing"
+  else
+    PASS=$((PASS+1)); printf '  \033[32mok  \033[0m %s\n' "A14: removing the ancestor exclusion REDDENS the clean arm (fix is load-bearing)"
+  fi
+fi
+
 echo "-- Part G: staleness-check.mjs (stale state that answers CONFIDENTLY WRONG) --"
 # ---------------------------------------------------------------------------
 # Every check below is proven BOTH ways: it fires on a genuinely stale fixture and
@@ -2114,6 +2218,7 @@ printf '# TEST_RESULTS — item1\n- **TEST-1**: PASS\n' > "$IVD/TEST_RESULTS.md"
 printf '# GRAPH\nITEM-1 -> ITEM-2\n' > "$IV/.lifecycle/epic-x/GRAPH.md"
 printf '# PLAN — item2 (not started)\n' > "$IV/.lifecycle/epic-x/ITEM-2/PLAN.md"
 git -C "$IV" add -A && git -C "$IV" commit -qm item1-complete
+add_srp "$IV" "$IVD"
 
 # CONTROL — pointed at the real feature dir, the same tree is green.
 lc 0 "invocation: CONTROL — the correctly-directed run passes" --all --repo "$IV" --dir "$IVD" --base main

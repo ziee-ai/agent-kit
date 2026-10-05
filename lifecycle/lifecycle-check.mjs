@@ -2308,6 +2308,17 @@ function checkA14VersionSiblings() {
     for (const s of siblings) {
       if (s.endsWith('/HEAD')) continue;
       try { if (git(repo, 'rev-parse', s) === headSha) continue; } catch { continue; }
+      // A REF ALREADY IN THIS BRANCH'S HISTORY IS NOT A COMPETING CLAIMANT — its version
+      // claim IS ours. The sibling list is built with `--no-merged <integration target>`,
+      // which is the wrong reference point: a ref can be unmerged into the epic tip while
+      // already merged into the HEAD being graded (because HEAD merged it). It then
+      // "collides" with itself. (MEASURED, ziee-ai/agent-kit#14: grading an epic tip after
+      // merging five dsh/* branches, A14 fired five times and 3 of 5 were ancestors of
+      // HEAD; a later run reported 9 hits of which 6 were ancestors — every one a phantom
+      // the run then had to hand-waive.) Same error as counting already-merged refs in the
+      // artifact sweep, which this file already avoids; the reasoning simply was not
+      // carried across.
+      try { git(repo, 'merge-base', '--is-ancestor', s, 'HEAD'); continue; } catch { /* genuinely not in our history */ }
       const sv = declaredVersionAt(s, path);
       if (sv && sv === mine) {
         // WAIVABLE, per-ref, with a REASON — because "unmerged" is not the same as

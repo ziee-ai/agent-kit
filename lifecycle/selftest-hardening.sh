@@ -103,36 +103,6 @@ MERGE_GENERATED=src-app/ui/openapi/openapi.json src-app/ui/src/api-client/types.
 CFGEOF
 }
 
-# ---------------------------------------------------------------------------
-# add_srp <repo> <featuredir> — append a VALID `## SELF-REVERT PROOF` section and
-# commit it. A12 (phase 8) requires every non-prose branch to record which test
-# reddened when the fix commit was reverted, so WITHOUT this every clean phase-8
-# fixture in this suite fails on A12 instead of on the gate it is probing.
-#
-# This existed as a real regression: A12 landed as a phase-8 gate and the fixtures
-# were never updated, so 28 of this suite's own assertions went red and the suite's
-# baseline silently became "28 failures are normal". A gate that reddens its own
-# test suite trains the reader to ignore the suite.
-#
-# The cited sha is HEAD BEFORE this extra commit: an ancestor of HEAD, absent from
-# the base ref, and touching real source — exactly what A12 asks of a real branch.
-# ---------------------------------------------------------------------------
-add_srp() {
-  local R="$1" D="$2" sha c base="${3:-main}"
-  # Cite the newest branch commit that touches REAL SOURCE. Citing HEAD blindly is wrong
-  # whenever the fixture's last commit only rewrote .lifecycle artifacts: A12 rejects such
-  # a commit on the grounds that reverting it could not redden anything — which is correct,
-  # and is the same reasoning the gate exists to enforce. So the helper has to honour it
-  # rather than route around it.
-  sha=""
-  for c in $(git -C "$R" rev-list "$base..HEAD" 2>/dev/null); do
-    if git -C "$R" diff-tree --no-commit-id --name-only -r "$c" 2>/dev/null \
-       | grep -qv '^\.lifecycle/'; then sha="$c"; break; fi
-  done
-  [ -n "$sha" ] || sha="$(git -C "$R" rev-parse HEAD)"
-  printf '\n## SELF-REVERT PROOF\n- **commit**: %s\n- **reddened**: TEST-1 (asserted the reverted behaviour and failed)\n- **restored**: TEST-1 PASS after re-applying\n' "$sha" >> "$D/TEST_RESULTS.md"
-  git -C "$R" add -A && git -C "$R" commit -qm srp
-}
 
 # ---------------------------------------------------------------------------
 # build_be — a fully-valid BACKEND feature repo on branch feat/bar, committed

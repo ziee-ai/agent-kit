@@ -95,4 +95,5 @@ See `app.config.example` for the full key list.
 ```bash
 bash lifecycle/selftest.sh            # lifecycle-check phase gates (9 scenarios)
 bash lifecycle/selftest-hardening.sh  # A1-A10 + merge-gate + preflight + de-ziee-ify (46 scenarios)
+bash lifecycle/selftest-hook.sh       # pre-push hook: epic root + feature root + fail-closed (10 assertions)
 ```

@@ -18,16 +18,18 @@ for (const a of process.argv.slice(2)) {
   else ARGV.push(a);
 }
 const VALUE_FLAGS = ['--phase', '--epic', '--repo'];
+const BOOL_FLAGS = ['--wip'];
 for (let i = 0; i < ARGV.length; i++) {
   const tok = ARGV[i];
   if (!tok.startsWith('--')) {
-    console.error(`epic-check: FATAL: unexpected positional argument \`${tok}\`\n  usage: epic-check.mjs --phase <0-4> --epic <slug> --repo <root>`);
+    console.error(`epic-check: FATAL: unexpected positional argument \`${tok}\`\n  usage: epic-check.mjs (--phase <0-4> | --wip) --epic <slug> --repo <root>`);
     process.exit(2);
   }
-  if (!VALUE_FLAGS.includes(tok)) {
-    console.error(`epic-check: FATAL: unknown flag \`${tok}\`\n  valid: ${VALUE_FLAGS.join(', ')}\n  usage: epic-check.mjs --phase <0-4> --epic <slug> --repo <root>`);
+  if (!VALUE_FLAGS.includes(tok) && !BOOL_FLAGS.includes(tok)) {
+    console.error(`epic-check: FATAL: unknown flag \`${tok}\`\n  valid: ${VALUE_FLAGS.join(', ')}${BOOL_FLAGS.length ? ', ' + BOOL_FLAGS.join(', ') : ''}\n  usage: epic-check.mjs (--phase <0-4> | --wip) --epic <slug> --repo <root>`);
     process.exit(2);
   }
+  if (BOOL_FLAGS.includes(tok)) continue;
   const v = ARGV[i + 1];
   if (v === undefined || v.startsWith('--')) {
     console.error(`epic-check: FATAL: \`${tok}\` requires a value`);
@@ -39,8 +41,16 @@ const arg = (f) => { const i = ARGV.indexOf(f); return i >= 0 ? ARGV[i + 1] : nu
 const phase = parseInt(arg('--phase') ?? '-1', 10);
 const epic = arg('--epic');
 const repo = arg('--repo') ?? process.cwd();
-if (!epic || phase < 0 || phase > 4) {
-  console.error('usage: epic-check.mjs --phase <0-4> --epic <slug> --repo <root>');
+const wantWip = ARGV.includes('--wip');
+if (wantWip && arg('--phase') !== null) {
+  console.error('epic-check: FATAL: --wip and --phase are mutually exclusive (--wip computes the in-progress phase itself)');
+  process.exit(2);
+}
+if (!epic || (!wantWip && (phase < 0 || phase > 4))) {
+  const usage = wantWip
+    ? 'usage: epic-check.mjs --wip --epic <slug> --repo <root>'
+    : 'usage: epic-check.mjs --phase <0-4> --epic <slug> --repo <root>';
+  console.error(usage);
   process.exit(2);
 }
 const base = join(repo, '.lifecycle', epic);
@@ -146,7 +156,51 @@ const leafSet = () => {
   return Object.entries(it).filter(([, x]) => x.cons.length === 0).map(([d]) => d);
 };
 
-if (phase >= 0) {
+// ---- --wip: the MID-ROUND PUSH GATE (mirrors lifecycle-check --wip) ---------
+// The pre-push hook runs this on an epic root. Same rule as the feature gate:
+// the phases a branch has COMPLETED must be green, and the ONE it is currently
+// working is exempt. Completion is read from the NEXT phase's artifact (the same
+// "presence is progress; gaps are quality" frontier lifecycle-check uses):
+//   · P0 (GRAPH.md) is in progress until some item plan exists;
+//   · P1 (leaf plans) is in progress until a dependent plan declares ≥1 CONS
+//     (i.e. P2 has started) — so a mid-P1 push does not yet demand every plan
+//     be complete, exactly like a mid-P1 feature push;
+//   · P2 (dependent plans) is in progress until RECONCILE.md exists;
+//   · P3 (reconcile) is in progress until the freeze line exists. Its GAPs are
+//     the author's worklist, so the "which X does not provide" check is P3
+//     content (the Phase-2 gate per the skill allows GAPs).
+//   · A complete epic (frozen) has no phase left in progress: every phase is
+//     demanded, exactly like --all on a complete feature.
+// A phase with artifacts ABOVE a hole (graph-less plans; a RECONCILE with no
+// item plans) is a misdirected tree, not an in-progress one: no phase is exempt
+// and the missing lower artifact fails its own phase (fail closed).
+let gatePhase = phase;
+let wipState = null;
+if (wantWip) {
+  const has = (p) => { try { return statSync(join(base, p)).isFile(); } catch { return false; } };
+  const p0 = has('GRAPH.md');
+  const p1 = itemDirs().length > 0;
+  let p2 = false;
+  if (p1) for (const x of Object.values(it)) if (x.cons.length > 0) { p2 = true; break; }
+  const p3 = has('RECONCILE.md');
+  const p4 = /\*\*Frozen:\*\*/i.test(read('RECONCILE.md') ?? '');
+  const present = [p0, p1, p2, p3, p4];
+  if (!present.some(Boolean)) {
+    // GRADING NOTHING IS NOT A PASS (same rule as lifecycle-check): the tree is
+    // an epic ROOT (the hook detected it) but holds no epic artifact at all.
+    console.error(`epic-check: FAIL (--wip) — ${base} contains no epic artifacts (no GRAPH.md, no item plan, no RECONCILE.md); nothing was graded, so this run proves nothing.`);
+    process.exit(1);
+  }
+  let k = 0; while (k < 5 && present[k]) k++;
+  wipState = {
+    complete: k === 5,
+    malformed: present.slice(k + 1).some(Boolean),
+    exempt: !present.slice(k + 1).some(Boolean) && k < 5 ? k - 1 : null, // the in-progress phase
+  };
+  gatePhase = wipState.complete || wipState.malformed ? 4 : k - 2;
+}
+
+if (gatePhase >= 0) {
   if (!gr) { /* already flagged */ }
   else {
     if (!gr.isDag) g('GRAPH.md: does not assert a DAG (or names a cycle) — resolve the cycle');
@@ -154,7 +208,7 @@ if (phase >= 0) {
     if (!gr.hasTopo) g('GRAPH.md: no topological order');
   }
 }
-if (phase >= 1) {
+if (gatePhase >= 1) {
   if (itemDirs().length === 0) g('no <item>/PLAN.md files found');
   for (const [d, x] of Object.entries(it)) {
     if (x.prov.length === 0) g(`${d}/PLAN.md: "## Provides" has no PROV-${d}-N lines (an item must declare ≥1 contract it exposes)`);
@@ -163,7 +217,7 @@ if (phase >= 1) {
     // leaves must not consume an in-epic item — already true by def (cons empty); fine
   }
 }
-if (phase >= 2) {
+if (gatePhase >= 2) {
   const subProv = new Set(gr?.subProv ?? []); // external/substrate PROVs declared in GRAPH.md
   for (const [d, x] of Object.entries(it)) {
     for (const c of x.cons) {
@@ -171,7 +225,7 @@ if (phase >= 2) {
       const isExternal = !inEpic && subProv.has(c.expects); // a cross-epic substrate contract, pinned in GRAPH
       if (!inEpic && !isExternal) {
         g(`${d}/PLAN.md: ${c.id} names provider "${c.from}" which is neither an in-epic item nor an external substrate PROV declared in GRAPH.md — pin the cross-epic interface as a PROV-<EXT> in GRAPH's substrate section (it must NOT be left unpinned in ASSUMPTIONS.md)`);
-      } else if (inEpic && !it[c.from].prov.includes(c.expects)) {
+      } else if (inEpic && !it[c.from].prov.includes(c.expects) && gatePhase >= 3) {
         g(`${d}/PLAN.md: ${c.id} expects ${c.expects} which ${c.from} does not (yet) provide — a GAP to resolve in Phase 3`);
       }
     }
@@ -182,7 +236,7 @@ if (phase >= 2) {
     for (const d of deps) if (it[d] && it[d].cons.length === 0) g(`${d}: GRAPH shows it depends on something but its PLAN.md "## Consumes" has no CONS lines`);
   }
 }
-if (phase >= 3) {
+if (gatePhase >= 3) {
   const recon = read('RECONCILE.md');
   if (recon == null) g('RECONCILE.md missing (Phase 3)');
   else {
@@ -198,7 +252,7 @@ if (phase >= 3) {
     for (const m of openVerdicts) g(`RECONCILE.md: CONS-${m[1]} ↔ PROV-${m[2]} verdict is ${m[3]} — resolve to MATCH before freeze`);
   }
 }
-if (phase >= 4) {
+if (gatePhase >= 4) {
   const recon = read('RECONCILE.md') ?? '';
   if (!/\*\*Frozen:\*\*/i.test(recon)) g('RECONCILE.md: missing "**Frozen:** ..." freeze line (Phase 4)');
   // every downstream-bound PROV must be named by an [acceptance] test in its item's PLAN
@@ -216,6 +270,18 @@ if (phase >= 4) {
 }
 
 const tier = 'epic-lifecycle';
+if (wantWip) {
+  console.log(`epic-check  epic=${epic}  wip  items=${itemDirs().length}`);
+  if (gaps.length === 0) {
+    if (wipState.complete) console.log('  ✓ complete — every phase demanded (phases 0..4 green)');
+    else if (wipState.exempt === 0) console.log('  ✓ phase 0 in progress (exempt)');
+    else if (wipState.exempt != null) console.log(`  ✓ phases 0..${wipState.exempt - 1} complete, phase ${wipState.exempt} in progress (exempt)`);
+    process.exit(0);
+  }
+  console.log(`  ✗ wip FAIL — a completed phase has gaps${wipState.exempt != null ? ` (phase ${wipState.exempt} in progress is exempt)` : ''}`);
+  for (const m of gaps) console.log(`      - ${m}`);
+  process.exit(1);
+}
 console.log(`epic-check  epic=${epic}  phase=${phase}  items=${itemDirs().length}`);
 if (gaps.length === 0) {
   console.log(`  ✓ phase ${phase} OK`);

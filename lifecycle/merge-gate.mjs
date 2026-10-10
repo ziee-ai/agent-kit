@@ -28,7 +28,7 @@
 // child_process.
 
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, cpSync, rmSync, readdirSync, readFileSync, statSync, symlinkSync, realpathSync, lstatSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, cpSync, rmSync, readdirSync, readFileSync, statSync, symlinkSync, realpathSync, lstatSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -913,9 +913,28 @@ function gateC7() {
   }
   if (r.status !== 0) {
     const out = (r.stdout || '') + (r.stderr || '');
+    // Keep the WHOLE output: the 14-line tail is npm/just's exit chatter and never names
+    // the failing test, so a load-flake and a real red were indistinguishable and every
+    // C7 failure cost a blind re-run (measured: ~1h each, several per day). The log goes
+    // to the OS tmpdir, not into staging, so it survives a gate without --keep-staging.
+    let logNote = '';
+    try {
+      const safe = String(branch || 'branch').replace(/[^A-Za-z0-9._-]+/g, '_');
+      const logPath = join(tmpdir(), `merge-gate-C7-${safe}-${new Date().toISOString().replace(/[:.]/g, '-')}.log`);
+      writeFileSync(logPath, out);
+      logNote = `\nFull output: ${logPath}`;
+    } catch (e) {
+      logNote = `\n(could not save the full output: ${e.message})`;
+    }
+    // The lines that NAME what failed (test runners, linters, compilers), first 30.
+    const named = out.split(/\n/)
+      .filter((l) => /(^|\s)(FAIL|✗|×|✖)\s|failed|panicked|error\[|^error:|Error:/.test(l) && !/^npm error (path|workspace|location|code)/.test(l))
+      .slice(0, 30);
     record('C7', 'repo-check', 'FAIL',
-      `${CHECK_CMD} FAILED on the merged tree (exit ${r.status}). This is the gate set the app itself defines — a lint, a doc-reference check or a typecheck that C1/C3 do not run. Tail:\n`
-      + out.split(/\n/).filter((l) => l.trim()).slice(-14).join('\n'));
+      `${CHECK_CMD} FAILED on the merged tree (exit ${r.status}). This is the gate set the app itself defines — a lint, a doc-reference check or a typecheck that C1/C3 do not run.`
+      + (named.length ? `\nWhat failed (first ${named.length} naming lines):\n${named.join('\n')}` : '')
+      + `\nTail:\n` + out.split(/\n/).filter((l) => l.trim()).slice(-14).join('\n')
+      + logNote);
     return;
   }
   record('C7', 'repo-check', 'PASS', `${CHECK_CMD} green on the merged tree`);

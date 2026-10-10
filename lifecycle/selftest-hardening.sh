@@ -2252,5 +2252,23 @@ assert_exit_cmd 1 "epic-check: an unknown flag is fatal" -- node "$EPIC_CHECK" -
 assert_exit_cmd 1 "epic-check: a bare positional is fatal" -- node "$EPIC_CHECK" --phase 0 --epic e --repo "$R" C9
 assert_exit_cmd 1 "epic-check CONTROL: a missing epic still fails on its own merits" -- node "$EPIC_CHECK" --phase 0 --epic e --repo "$R"
 
+# --- merge-gate C7: a failing app check NAMES what failed and saves the full output.
+# The old 14-line tail was npm/just exit chatter; it never named the failing test, so a
+# load flake and a real red were indistinguishable and each cost a blind ~1h re-gate.
+R="$(new_repo)"; CLEANUP+=("$R"); mkdir -p "$R/.claude"
+printf 'MERGE_CHECK_CMD=./fail.sh\n' > "$R/.claude/app.config"
+printf '#!/bin/sh\necho " FAIL  src/a.test.ts > the named test"\nfor i in $(seq 20); do echo "npm error chatter $i"; done\nexit 1\n' > "$R/fail.sh"; chmod +x "$R/fail.sh"
+git -C "$R" add -A && git -C "$R" commit -qm base-c7
+git -C "$R" checkout -q -b feat/c7
+echo change > "$R/f.txt"; git -C "$R" add -A && git -C "$R" commit -qm work-c7
+C7OUT="$(node "$MG" feat/c7 --repo "$R" --base main --no-fetch 2>&1)"
+C7LOG="$(printf '%s' "$C7OUT" | sed -n 's/^Full output: //p' | head -1)"
+if printf '%s' "$C7OUT" | grep -q "the named test" && [ -n "$C7LOG" ] && [ -f "$C7LOG" ] && grep -q "npm error chatter 20" "$C7LOG"; then
+  PASS=$((PASS+1)); printf '  \033[32mok  \033[0m %s\n' "merge-gate C7: a failing check names the failing test and saves the full output"
+  rm -f "$C7LOG"
+else
+  FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "merge-gate C7: failure output does not name the test or the full log is missing"
+fi
+
 echo "== $PASS passed, $FAIL failed =="
 [ "$FAIL" -eq 0 ]

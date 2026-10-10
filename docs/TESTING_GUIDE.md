@@ -8,6 +8,13 @@
 
 ---
 
+> **TARGETED TESTS ONLY — NEVER THE FULL SUITE (owner rule, 2026-10-09).** Building,
+> fixing or auditing a feature runs ONLY the tests of that feature and of the code it
+> touches (its own TEST-IDs, the touched modules' unit tests, its e2e specs, `tsc` and
+> the lints the touched files trip). Never `just check` / `just test` /
+> `just gate-merge` / the whole `npm run check` chain / the whole vitest, integration
+> or e2e tier — in any phase. **Only the merge gate runs the full suite.**
+
 ## 1. The four tiers
 
 Every app names its tiers in a `docs/TESTING.md` and gives each one a `just`

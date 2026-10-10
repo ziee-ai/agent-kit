@@ -113,14 +113,14 @@ cat > "$FD/TEST_RESULTS.md" <<'EOF'
 - **TEST-2**: PASS
 EOF
 git -C "$FE" add -A && git -C "$FE" commit -qm results-missing-fe-lines
-assert_exit 1 "FE phase 8: missing 'npm run check (ui): PASS' is REFUSED" -- --phase 8 --repo "$FE" --dir "$FD" --base main
+assert_exit 1 "FE phase 8: missing 'targeted (ui): PASS' line is REFUSED" -- --phase 8 --repo "$FE" --dir "$FD" --base main
 
 # --- variant C2: npm-run-check present but the e2e spec did not pass -> FAIL
 cat > "$FD/TEST_RESULTS.md" <<'EOF'
 # TEST_RESULTS — foo
 - **TEST-1**: PASS
 - **TEST-2**: FAIL
-npm run check (ui): PASS
+targeted (ui): PASS — tsc, vitest src/modules/foo
 EOF
 git -C "$FE" add -A && git -C "$FE" commit -qm results-e2e-fail
 assert_exit 1 "FE phase 8: a failing e2e spec is REFUSED" -- --phase 8 --repo "$FE" --dir "$FD" --base main
@@ -130,12 +130,11 @@ cat > "$FD/TEST_RESULTS.md" <<'EOF'
 # TEST_RESULTS — foo
 - **TEST-1**: PASS
 - **TEST-2**: PASS
-npm run check (ui): PASS
-gate:ui (ui): PASS
+targeted (ui): PASS — tsc, vitest src/modules/foo, e2e tests/e2e/foo
 EOF
 git -C "$FE" add -A && git -C "$FE" commit -qm results-complete
 add_srp "$FE" "$FD"
-assert_exit 0 "FE phase 8: npm-run-check + e2e PASS lines accepted" -- --phase 8 --repo "$FE" --dir "$FD" --base main
+assert_exit 0 "FE phase 8: a TARGETED line + e2e PASS lines accepted (no full suite, no gate:ui)" -- --phase 8 --repo "$FE" --dir "$FD" --base main
 assert_exit 0 "FE --all: complete frontend lifecycle is green" -- --all --repo "$FE" --dir "$FD" --base main
 
 # ---------------------------------------------------------------------------

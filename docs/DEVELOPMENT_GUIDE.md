@@ -69,11 +69,20 @@ Postgres, Vite dev — so the apps run side by side. Record the table in the app
 
 ## 3. The daily loop
 
+> **TARGETED TESTS ONLY — NEVER THE FULL SUITE (owner rule, 2026-10-09).** Building,
+> fixing or auditing a feature runs ONLY the tests of that feature and of the code it
+> touches (its own TEST-IDs, the touched modules' unit tests, its e2e specs, `tsc` and
+> the lints the touched files trip). Never `just check` / `just test` /
+> `just gate-merge` / the whole `npm run check` chain / the whole vitest, integration
+> or e2e tier — in any phase. **Only the merge gate runs the full suite.**
+
+
 | task | shape |
 |---|---|
 | run the backend | `CONFIG_FILE=config/dev.yaml cargo run` from `src-app/server` (or the app's `just dev-server`) |
 | run the UI | `npm run dev` in `src-app/ui`; `/api` is proxied to the backend port |
-| static check | the app's `just check` — the whole Rust workspace **including test crates** + the UI `npm run check` chain |
+| static check (feature work) | **targeted only**: `cargo check -p <crate>` / `cargo test <filter>` for what you touched, `tsc` + the touched modules' vitest + the feature's e2e specs. Never the full suite while building — see the rule below |
+| full static + test suite | the app's `just check` / `just gate-merge` — run by the **merge gate only**, once per merge |
 | regenerate the API contract | the app's `just openapi-regen` — see §4 |
 | tests | the four tiers in `TESTING_GUIDE.md` §1 |
 

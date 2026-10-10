@@ -442,6 +442,14 @@ const RE_DRIFT = /^-\s*\*\*(DRIFT-[A-Za-z0-9._-]+)\*\*.*?verdict\s*:\s*(plan-win
 const RE_RESULT = /\*\*(TEST-[A-Za-z0-9._-]+)\*\*\s*:?\s*.*?\b(PASS|FAIL|SKIP)\b/i;
 // Frontend gate line: `npm run check (ui): PASS` / `npm run check (desktop/ui): PASS`
 const RE_UI_CHECK = /npm run check\s*\(\s*([A-Za-z0-9._/\- ]+?)\s*\)\s*:?\s*.*?\b(PASS|FAIL)\b/i;
+// TARGETED TESTS ONLY (owner rule 2026-10-09): a lifecycle proves ITS OWN feature and
+// the code it touched — never the full suite. The full suite (`just check`, the
+// whole `npm run check` chain, every unit/integration/e2e test) belongs to the
+// MERGE GATE alone (merge-gate.mjs C7). So phase 8's frontend evidence is a
+// `targeted (<ws>): PASS — <the commands run>` line: tsc for the workspace plus the
+// vitest files / e2e specs / lints that cover the touched files. A legacy
+// `npm run check (<ws>): PASS` line is still accepted, but it is never REQUIRED.
+const RE_TARGETED = /targeted\s*\(\s*([A-Za-z0-9._/\- ]+?)\s*\)\s*:?\s*.*?\b(PASS|FAIL)\b/i;
 
 function parsePlanItems() {
   const t = read('PLAN.md');
@@ -578,7 +586,7 @@ function priorTestCovers() {
 // The comparative A7 form ("gate:ui (ui): branch N vs base M") carries no PASS
 // token and deliberately does NOT satisfy this — a standing-gate test needs the
 // gate actually green, not merely "no worse than base".
-const RE_STANDING_GATE_PASS = /(?:npm run check|gate:ui)\s*\(\s*[A-Za-z0-9._/\- ]+?\s*\)\s*:?\s*.*?\bPASS\b/i;
+const RE_STANDING_GATE_PASS = /(?:npm run check|gate:ui|targeted)\s*\(\s*[A-Za-z0-9._/\- ]+?\s*\)\s*:?\s*.*?\bPASS\b/i;
 function standingGatePassPresent(text) {
   for (const ln of String(text || '').split(/\r?\n/)) if (RE_STANDING_GATE_PASS.test(ln)) return true;
   return false;
@@ -2399,7 +2407,7 @@ function checkA12SelfRevert() {
   const lines = t.split(/\r?\n/);
   const start = lines.findIndex((l) => /^#{2,}\s*SELF-?REVERT PROOF\b/i.test(l));
   if (start < 0) {
-    g.push('A12: TEST_RESULTS.md has no `## SELF-REVERT PROOF` section — the change is not proven load-bearing. Revert the WHOLE fix commit (`git checkout <fix>^ -- $(git diff-tree --no-commit-id --name-only -r <fix>)`), re-run the gated suite, and record which test went RED. If NOTHING reddens, the change has no enforcement: fix that before phase 8 — it is not deferrable to a follow-up.');
+    g.push('A12: TEST_RESULTS.md has no `## SELF-REVERT PROOF` section — the change is not proven load-bearing. Revert the WHOLE fix commit (`git checkout <fix>^ -- $(git diff-tree --no-commit-id --name-only -r <fix>)`), re-run the TARGETED tests for that change (never the full suite), and record which test went RED. If NOTHING reddens, the change has no enforcement: fix that before phase 8 — it is not deferrable to a follow-up.');
     return g;
   }
   const body = [];
@@ -2542,16 +2550,18 @@ function phase8() {
   if (feWs.size > 0) {
     const checked = new Map();
     for (const ln of t.split(/\r?\n/)) {
-      const m = RE_UI_CHECK.exec(ln);
+      const m = RE_TARGETED.exec(ln) || RE_UI_CHECK.exec(ln);
       if (m) checked.set(m[1].trim().toLowerCase(), m[2].toUpperCase());
     }
     for (const w of feWs) {
       const v = checked.get(w.toLowerCase());
-      if (!v) g.push(`TEST_RESULTS.md: frontend workspace "${w}" was touched but no "npm run check (${w}): PASS" line is present (tsc + biome guardrails + lint:colors/settings-field + check:kit-manifest/testid-registry/design-spec/gallery-coverage/state-matrix). A6: the gallery + gate:ui + runtime-health IS the browser-verify harness — "I can't verify in a browser" is NOT a valid gap; run it against the mock-API gallery build.`);
-      else if (v !== 'PASS') g.push(`TEST_RESULTS.md: "npm run check (${w})" is ${v}, not PASS.`);
+      if (!v) g.push(`TEST_RESULTS.md: frontend workspace "${w}" was touched but no "targeted (${w}): PASS — <commands>" line is present. Record the TARGETED checks you ran for the files this branch touched — tsc for the workspace, the vitest files and e2e specs that cover them, and the lints those files trip. Do NOT run the full suite (\`npm run check\`, \`just check\`, every vitest/e2e): only the merge gate runs everything.`);
+      else if (v !== 'PASS') g.push(`TEST_RESULTS.md: "targeted (${w})" is ${v}, not PASS.`);
     }
-    // A7: boot/runtime canary — baseline-controlled (branch no worse than base).
-    const canary = parseCanaryLines(t);
+    // A7: boot/runtime canary — OPT-IN since 2026-10-09 (LIFECYCLE_REQUIRE_A7=1 in
+    // .claude/app.config). It runs the whole gallery/runtime sweep, i.e. a full
+    // suite; the merge gate is where full sweeps belong. Off by default.
+    const canary = APP.LIFECYCLE_REQUIRE_A7 === '1' ? parseCanaryLines(t) : null;
     // Only PASTED OUTPUT can contradict a recorded result. Narrative prose about
     // earlier red runs cannot — and treating it as contradiction PUNISHES HONEST
     // DISCLOSURE: an author who hides four failed attempts passes, one who
@@ -2568,7 +2578,7 @@ function phase8() {
       }
       return undefined;
     })();
-    for (const w of feWs) {
+    for (const w of canary ? feWs : []) {
       const v = canary.get(w.toLowerCase());
       if (!v) {
         g.push(`A7: TEST_RESULTS.md: no boot/runtime canary line for "${w}" — record either "gate:ui (${w}): PASS" or the baseline-controlled form "gate:ui (${w}): branch <N> vs base <M>" (branch must be no worse than base). Run runtime-health boot + console-error + ErrorBoundary against the REAL prod build, BEFORE the specs; a green e2e can still ship a non-booting app or a root crash on an un-exercised path.`);

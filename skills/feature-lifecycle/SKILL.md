@@ -12,6 +12,13 @@ description: >
 
 # Feature Lifecycle
 
+> **TARGETED TESTS ONLY — NEVER THE FULL SUITE (owner rule, 2026-10-09).** Building,
+> fixing or auditing a feature runs ONLY the tests of that feature and of the code it
+> touches (its own TEST-IDs, the touched modules' unit tests, its e2e specs, `tsc` and
+> the lints the touched files trip). Never `just check` / `just test` /
+> `just gate-merge` / the whole `npm run check` chain / the whole vitest, integration
+> or e2e tier — in any phase. **Only the merge gate runs the full suite.**
+
 A phase state machine. **You may not enter phase N+1 until the validator passes
 phase N:**
 
@@ -207,7 +214,8 @@ Match these line formats precisely or the gate will not pass.
   The commit must resolve, be an ancestor of `HEAD`, and **not** already be in
   the base ref — it has to be work this branch did.
 - **Frontend gate line** (`TEST_RESULTS.md`, REQUIRED once the diff touches a UI
-  workspace) — `npm run check (ui): PASS` — one line per touched workspace; the
+  workspace) — `targeted (ui): PASS — <the targeted commands run>` — one line per
+  touched workspace (a legacy `npm run check (ui): PASS` is accepted, never required); the
   label is `ui` (→ `src-app/ui`) or `desktop/ui` (→ `src-app/desktop/ui`)
 - **Human-feedback entry** (`HUMAN_FEEDBACK.md`) —
   `- **FB-1** [status: resolved] — <verbatim feedback> → <resolution> [generalizable: yes — <rule>]`
@@ -950,8 +958,19 @@ Gate: `--phase 7` (checks the final round is 0).
 
 ## Phase 8 — Gated test run (conditional on the touched areas)
 
-ONLY NOW run tests, scoped to what you built ([[feedback_test_scope]]). This is
-the **single** full run of the enumerated set — phase 7 iterations run scoped
+> **TARGETED TESTS ONLY — NEVER THE FULL SUITE (owner rule, 2026-10-09).** A
+> lifecycle proves ITS OWN feature and the code it touched. It never runs
+> `just check`, `just test`, `just gate-merge`, the whole `npm run check` chain,
+> the whole vitest tier, an unfiltered integration suite or the whole e2e tier —
+> not in phase 3, 5, 7 or 8, not "before reporting", not after a fix round.
+> **Only the merge gate (`merge-gate.mjs`, C7) runs the full suite**, once per
+> merge; a regression elsewhere surfaces there and is fixed then. Running full
+> suites per feature (an hour each on a loaded box, repeated every round) wasted
+> hundreds of hours before this rule.
+
+ONLY NOW run tests, scoped to what you built ([[feedback_test_scope]]): the
+enumerated TEST-IDs plus the existing tests of the files the diff touches. This
+is the **single** run of the enumerated set — phase 7 iterations run scoped
 subsets, and their results stand; a prior PASS is not voided by a later
 unrelated change. **Which
 gates apply is computed from `git diff main...HEAD`** (generated
@@ -964,51 +983,37 @@ chains.
 ```bash
 # integration (source the env file first — real LLM keys live there)
 source src-app/server/tests/.env.test
-cargo test --test integration_tests <module>:: -- --test-threads=1 \
+cargo test --test integration_tests <module>::<the feature's tests> -- --test-threads=1 \
   2>&1 | tee /data/pbya/ziee/tmp/lifecycle-logs/<feature>-int.log
 ```
 
 **If the diff touches a frontend workspace** (`src-app/ui/**` and/or
-`src-app/desktop/ui/**`), ALL of the following are required, per touched
-workspace:
+`src-app/desktop/ui/**`), run — per touched workspace — ONLY:
 
-1. **`npm run check` — the one gate command, run in EACH touched workspace.** It
-   chains the whole static frontend contract: `tsc` + the biome guardrails +
-   `lint:colors` + `lint:settings-field` + `check:kit-manifest` +
-   `check:testid-registry` + `check:design-spec` + `check:gallery-coverage` +
-   `check:state-matrix`. Don't run these individually — run the one command and
-   record its result:
-   ```bash
-   cd src-app/ui && npm run check          # and src-app/desktop/ui if touched
-   ```
-   Write a `npm run check (ui): PASS` line (and `npm run check (desktop/ui): PASS`)
-   in `TEST_RESULTS.md` — the gate requires one per touched workspace.
-2. **New conditional render states need gallery coverage.** Any new
-   loading/empty/error/variant state your diff introduces must have a gallery
-   entry (or an explicit allowlist reason). This is enforced by the
-   `check:state-matrix` gate *inside* `npm run check` above — budget for it: if
-   you added a state, add its gallery cell or the gate (and thus phase 8) fails.
-3. **UI evaluator gate** (per CLAUDE.md's "UI Build Gate"): zero console
-   errors / uncaught exceptions / failed requests / AA-contrast failures on the
-   touched gallery surfaces, and the visual-regression baseline matches. Run the
-   gallery runtime + gate scripts:
-   ```bash
-   cd src-app/ui && npm run gate:ui                     # runtime-health + Layer A/axe + tsc/lint
-   VISUAL_SNAPSHOTS=1 npm run gate:ui                   # + Layer B pixel regression vs baseline
-   ```
-4. **e2e specs for the user-visible flows** you enumerated as `tier: e2e` in
-   phase 3 (TESTS.md) — run them and record each TEST-ID:
+1. **`tsc` for the workspace** (`npx tsc --noEmit`, plus the tests tsconfig if
+   you touched tests) and **the lints the touched files trip** (e.g.
+   `npx biome check <touched paths>`, `npm run lint:colors`,
+   `npm run check:testid-registry` if you added testids,
+   `npm run check:boot-cost` if you changed what a route loads at boot).
+2. **The vitest files that cover the touched code** —
+   `npx vitest run <the touched modules' directories / test files>`.
+3. **The e2e specs you enumerated as `tier: e2e` in phase 3** (TESTS.md), plus
+   any existing spec that drives the touched surface:
    ```bash
    cd src-app/ui && npx playwright test tests/e2e/<file> --workers=1
    ```
-   This includes any `[negative-perm]` **restricted-user** spec (A10): run it
-   and record its TEST-ID as PASS — the gate requires the negative-permission
-   e2e to pass, not just the happy-path one.
+   This includes any `[negative-perm]` **restricted-user** spec (A10).
+
+Record ONE line per touched workspace naming what you ran:
+`targeted (ui): PASS — tsc, biome <paths>, vitest <paths>, e2e <specs>`. Do NOT
+run the whole `npm run check` chain, `gate:ui`'s full sweep, or every spec — the
+merge gate does that. (The gallery/runtime canary A7 is opt-in per app via
+`LIFECYCLE_REQUIRE_A7=1`.)
 
 Write `TEST_RESULTS.md` with a `- **TEST-N**: PASS` line for **every** TEST-ID
-from Phase 3 (plus the `npm run check (<ws>): PASS` line(s) above for a UI diff).
+from Phase 3 (plus the `targeted (<ws>): PASS — …` line(s) above for a UI diff).
 The gate fails if any phase-3 test is missing/not PASS, if a touched workspace has
-no passing `npm run check` line, or if any enumerated `tier: e2e` spec is not
+no passing `targeted` line, or if any enumerated `tier: e2e` spec is not
 PASS. Never `#[ignore]` (or `.skip`) to go green — only genuine
 platform-incompatibility is a legit skip ([[feedback_no_ignore_unless_platform]]).
 

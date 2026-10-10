@@ -904,7 +904,9 @@ git -C "$R" commit -qam add-negperm-mig
 add_srp "$R" "$D"
 lc 0 "A10: the migration grant WITH a restricted-user e2e passes (phase 8)" --phase 8 --repo "$R" --dir "$D" --base main
 
-# --- A7: a UI diff whose results omit the boot/runtime canary -> phase 8 FAIL
+# --- A7: OPT-IN since 2026-10-09 (targeted tests only; full sweeps are the merge
+# gate's). Without LIFECYCLE_REQUIRE_A7=1 a missing canary is fine; with it the
+# canary is required and a present one passes.
 R="$(new_repo)"; CLEANUP+=("$R")
 git -C "$R" checkout -q -b feat/ui
 mkdir -p "$R/src-app/ui/src/modules/foo" "$R/.lifecycle/foo"
@@ -964,10 +966,13 @@ npm run check (ui): PASS
 EOF
 git -C "$R" add -A && git -C "$R" commit -qm feat-ui-no-canary
 add_srp "$R" "$D"
-lc 1 "A7: UI results missing the boot/runtime canary line is REFUSED" --phase 8 --repo "$R" --dir "$D" --base main
+lc 0 "A7 off by default: UI results without a canary line pass" --phase 8 --repo "$R" --dir "$D" --base main
+mkdir -p "$R/.claude" && printf 'LIFECYCLE_REQUIRE_A7=1\n' >> "$R/.claude/app.config"
+git -C "$R" add -A && git -C "$R" commit -qm opt-in-a7
+lc 1 "A7 opted in: UI results missing the boot/runtime canary line is REFUSED" --phase 8 --repo "$R" --dir "$D" --base main
 printf 'gate:ui (ui): PASS\n' >> "$D/TEST_RESULTS.md"
 git -C "$R" commit -qam add-canary
-lc 0 "A7: UI results WITH gate:ui canary passes" --phase 8 --repo "$R" --dir "$D" --base main
+lc 0 "A7 opted in: UI results WITH gate:ui canary passes" --phase 8 --repo "$R" --dir "$D" --base main
 
 # --- R2-5: an e2e route-mock pointing at a route not in openapi.json -> FAIL;
 #     fixing it to a live route -> PASS. (Needs an openapi.json to check against.)
@@ -1723,6 +1728,8 @@ EOF
 EOF
   { printf '# TEST_RESULTS — foo\n- **TEST-1**: PASS\n- **TEST-2**: PASS\nnpm run check (ui): PASS\n'
     for l in "$@"; do printf '%s\n' "$l"; done; } > "$D/TEST_RESULTS.md"
+  # These cases test A7 itself, which is OPT-IN since 2026-10-09.
+  mkdir -p "$R/.claude" && printf 'LIFECYCLE_REQUIRE_A7=1\n' >> "$R/.claude/app.config"
   git -C "$R" add -A && git -C "$R" commit -qm feat-ui7
   add_srp "$R" "$D"
   echo "$R"

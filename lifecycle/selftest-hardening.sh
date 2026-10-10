@@ -292,6 +292,10 @@ p7 "late ramp then decay converges (ask-user)"         0 0 15 1 0
 p7 "non-decaying profile is REFUSED (activity-rail)"   1 0 2 17 16 20 12 14 15 8 10 7 8 6 8 5 15 21
 p7 "non-decaying is caught EARLY, at round 5"          1 0 2 17 16 20
 p7 "a legitimate late ramp is NOT aborted at round 2"  1 0 15
+# Owner ruling 2026-10-09 — at most 4 audit rounds: round 4 with findings ENDS the
+# loop (pass); round 3 with findings does not (the discriminating control).
+p7 "round cap: round 4 with findings open ENDS the loop" 0 10 6 4 2
+p7 "round cap: round 3 with findings still loops"        1 10 6 4
 
 # ---------------------------------------------------------------------------
 # --- T1: capture-recapture termination (an ESTIMATE, not an observation) ---

@@ -816,7 +816,10 @@ unbounded. It produced a real 17-round run here. Every defect-estimation model
 assumes a **decreasing** detection profile, so a flat or rising profile falsifies
 the model rather than meaning "converging slowly".
 
-The loop ends in one of six ways:
+The loop ends in one of six ways. **Audit rounds are capped at 4** (owner ruling): round 1
+uses at least two angles; every later round re-audits ONLY the previous round's fix diff
+with the same angles — never rotate to fresh angles, which is what turned one menu feature's
+loop into 8.5 hours.
 
 | | condition | outcome |
 |---|---|---|
@@ -825,7 +828,7 @@ The loop ends in one of six ways:
 | **Converged** | a round yields 0 **and** the profile decayed | done |
 | **ABORT** | profile flat/rising at round ≥5 (final round ≥ median of the prior) | **re-scope — do NOT run another round** |
 | **GUARD-SUB** | ≥60% of a round's findings target ONE test/guard file (round ≥2) | **stop + escalate — replace the guard** |
-| **Cap** | 6 rounds with findings still open | escalate to a human |
+| **Cap** | round **4** reached (owner ruling 2026-10-09: *at most 4 audit rounds*) | done — fix round 4's findings in-round, **no round 5** |
 | — | otherwise | continue |
 
 ### T1 — terminate on the ESTIMATE, not on the observation
@@ -1034,7 +1037,7 @@ so budget for them — they are not optional polish:
   fields, each with a value **on its own line**:
   ```
   - **stopped at**: phase 7
-  - **reason**: fix-round cap reached with findings open
+  - **reason**: ABORT — the finding profile stopped decaying at round 5
   - **unresolved**: F1 (mechanism unpinned), F3-F6 deferred to #561
   - **next**: human triage — F1 blocks merge
   ```

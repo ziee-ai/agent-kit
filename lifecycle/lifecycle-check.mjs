@@ -2039,9 +2039,16 @@ function checkGuardSubstitution() {
 // rising profile falsifies the model rather than meaning "converging slowly".
 //
 // Outcomes: converged (0 + a decaying profile) · ABORT (non-decaying → re-scope,
-// do NOT keep looping) · CAP (escalate to a human) · still-looping.
+// do NOT keep looping) · CAP (the loop ENDS: fix the final round's findings in-round,
+// no further audit round) · still-looping.
+//
+// The cap is an OWNER RULING (2026-10-09): "at most 4 audit round". It was 6-and-
+// escalate; the measured cost of rounds 5+ (one menu feature spent ~8.5 h in a
+// rotating-angle loop after 2.5 h of build) is what the ruling answers. At the cap the
+// loop is DONE, not escalated: the final round's confirmed findings are fixed and
+// resolved in the ledger like any other round's, and no round 5 audit runs.
 const FIX_LOOP_ABORT_MIN_ROUND = 5;  // never abort before this: findings can legitimately ramp late (one feature went 0 -> 15 at round 2)
-const FIX_LOOP_ROUND_CAP = 6;
+const FIX_LOOP_ROUND_CAP = 4;
 function phase7() {
   const g = [];
   const notes = [];
@@ -2159,7 +2166,7 @@ function phase7() {
   if (abortState) {
     g.push(`${last.file}: fix loop is NOT CONVERGING and must be ABORTED, not continued — profile (${known.join(', ')}) is flat or rising after ${r} rounds, which falsifies the assumption every defect-estimation model rests on. Do not run another round. Re-scope instead: record the reason the artifact was not ready for audit (commonly a hand-written static-analysis guard standing in for a behavioural test — its evasion space is unbounded, so 0 is unreachable), replace it, and restart the loop against the new artifact.`);
   } else if (r >= FIX_LOOP_ROUND_CAP) {
-    g.push(`${last.file}: fix loop hit the ${FIX_LOOP_ROUND_CAP}-round cap with ${fr} finding(s) still open (profile ${known.join(', ')}) — escalate to a human rather than iterating. Past this point the marginal yield is dominated by reviewer false positives.`);
+    notes.push(`ROUND CAP — the audit loop ENDS at round ${FIX_LOOP_ROUND_CAP} (owner ruling): ${fr} finding(s) in ${last.file} (profile ${known.join(', ')}). Fix them in-round and record their \`resolution\` in the ledger; do NOT run another audit round.`);
   } else {
     g.push(`${last.file}: fix loop not converged — ${fr} new confirmed finding(s) in the final round`);
   }

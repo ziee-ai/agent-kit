@@ -928,7 +928,8 @@ function gateC7() {
     }
     // The lines that NAME what failed (test runners, linters, compilers), first 30.
     const named = out.split(/\n/)
-      .filter((l) => /(^|\s)(FAIL|✗|×|✖)\s|failed|panicked|error\[|^error:|Error:/.test(l) && !/^npm error (path|workspace|location|code)/.test(l))
+      .filter((l) => /^\s*(FAIL|✗|×|✖|not ok)(\s|$)|\bFAILED\b|panicked at|^error(\[|:)|^\s*Error: /.test(l)
+        && !/\.\.\. ok$|^npm error (path|workspace|location|code)|\b0 failed\b/.test(l))
       .slice(0, 30);
     record('C7', 'repo-check', 'FAIL',
       `${CHECK_CMD} FAILED on the merged tree (exit ${r.status}). This is the gate set the app itself defines — a lint, a doc-reference check or a typecheck that C1/C3 do not run.`

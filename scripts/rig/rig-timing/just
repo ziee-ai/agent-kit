@@ -1,0 +1,3 @@
+#!/bin/bash
+. "$(dirname "${BASH_SOURCE[0]}")/_timed.sh"
+timed_run "${RIG_REAL_JUST:-$(real_tool just)}" just "$@"; exit $?

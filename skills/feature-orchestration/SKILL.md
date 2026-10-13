@@ -186,10 +186,9 @@ candidate tip (quiet for ~60 s)
   scenario that **fails on the old script and passes on the new one**. Deploy between gates only, by temp file + `mv`
   (a running bash script must never be edited in place).
 
-Reference implementation: the dental app's `ops/rig/` (loop `auto-merge.sh`, pregate, failure parser, alone-rerunner,
-recheck flake pass, timing shims, the two sandbox harnesses) and `docs/MERGE-GATE.md`. This kit ships the portable
-pieces: `scripts/run-steps.mjs` (keep-going step runner) and `scripts/rig/rerun-failures.sh` + `rerun-test.sh` (the
-flake-rule runner and its harness).
+Implementation: this kit's `scripts/rig/` (see its `README.md`: loop `auto-merge.sh`, pregate, failure parser,
+alone-rerunner, recheck flake pass, timing shims, the two sandbox harnesses; every app-specific command is a `RIG_*`
+config variable) plus `scripts/run-steps.mjs` (keep-going step runner).
 
 ### Repo conventions the gate depends on
 

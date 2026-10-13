@@ -11,7 +11,7 @@
 # Config (env): RIG_WORKTREE — the persistent worktree the items run in (required); RIG_WORKTREE_HELPER — a script defining
 # rig_worktree_at <sha> <logdir> that puts $W at <sha> with deps installed (default: a plain detached checkout + clean);
 # RIG_RUN_WRAPPER — a prefix taking the command as ONE argument, e.g. "sg docker -c" (default "bash -c").
-# Reference: the dental app's ops/rig/ (its wrapper adds host thread caps and a docker group).
+# Part of the kit's merge rig (README.md here); a consumer's wrapper typically adds host thread caps and a docker group.
 SHA=${1:?sha}; F=${2:?FAILURES.json}; OUT=${3:?outdir}; mkdir -p "$OUT"
 W=${RIG_WORKTREE:?set RIG_WORKTREE to the rig worktree}; WRAP=${RIG_RUN_WRAPPER:-bash -c}
 if [ -z "$RIG_RERUN_NO_CHECKOUT" ]; then   # seam: rerun-test.sh

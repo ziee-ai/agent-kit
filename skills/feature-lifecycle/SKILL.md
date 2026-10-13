@@ -608,7 +608,7 @@ Dependents wait on a provider's code, not on its audit. So a node that other nod
 done** — static checks green (types, lint, clippy, the app's static legs) and the item's OWN tests green — by writing
 `PHASE6-READY <short sha>` and joining the current integration batch. Phases 6–9 continue on the same branch and land
 later as a fix. A phase-6 finding of severity `security` / `data-loss` / `authz` holds the batch's gate until fixed;
-anything else rides the normal fix path. *Measured (dental, 2026-10-11/12):* dependents started a day or more earlier,
+anything else rides the normal fix path. *Measured (a consumer app, 2026-10-11/12):* dependents started a day or more earlier,
 and on a ~25-level critical path each level was costing 1–2.5 h of pure waiting.
 
 ### Merge the integration branch only at the hand-off points

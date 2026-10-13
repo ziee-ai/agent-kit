@@ -135,7 +135,7 @@ ENOENT crash, the manual protocol above is equivalent).
 ## Landing: gate v2 (a batch reaches main through ONE full gate)
 
 The full gate takes hours, and a gate that stops at its first red and is re-run after every fix costs one full cycle
-per failure. Three owner rules (dental, 2026-10-12) replace that:
+per failure. Three rules (set by a consumer app's owner, 2026-10-12, after measuring this) replace that:
 
 1. **Never run the full suite twice.** A batch gets the full gate at most once. When it fails, re-run each failure
    alone; a flake counts as a pass; a real failure is fixed and then **only the failed items** are re-run.
@@ -166,7 +166,7 @@ candidate tip (quiet for ~60 s)
 
 - **Flake rule:** a failure is a flake only if it passes **3 of 3** runs alone on the same sha. 2/3 is real. A real
   failure that passed at least once alone is **intermittent** and is recorded with `"tries": 3`, so its recheck needs
-  3/3 again — a one-try recheck would pass a 2-in-3 failure two times in three. *Measured (dental c240):* an auth-store
+  3/3 again — a one-try recheck would pass a 2-in-3 failure two times in three. *Measured:* an auth-store
   test went pass/pass/fail alone; the one-try recheck would have merged it unexamined.
 - **Keep-going commands.** `just` dependency lists and `npm` `&&` chains stop at the first red step, so the gate's
   check/test commands must be keep-going variants: a step runner that runs every leg and exits non-zero if any failed
@@ -174,6 +174,13 @@ candidate tip (quiet for ~60 s)
   report (cwd, command, rc, seconds) so the rig can re-run exactly the failed steps. *Measured:* the old gate hid a
   batch's integration reds and warning regressions behind its first red leg; keep-going surfaced all 11 failures of a
   batch in one pass.
+- **The fix's impacted tests get the flake rule too.** A red in the recheck's delta (the fix commits' impacted tests) is
+  named and re-run alone 3× before it enters REAL-FAILS. *Measured:* two auth e2e timeouts in a full-tier delta went
+  straight to REAL-FAILS and were green 3/3 alone.
+- **Nothing is dropped silently.** An entry a recheck cannot re-run (`unparsed`, `structural`) holds the recheck until a
+  human fixes and removes it — except a compile error, which the tip's green pregate clears (its static legs compile
+  every target). The failure parser ignores a compile error that is not in the committed code: mutation batteries plant
+  code and compile it on purpose (compare each error's shown source line with the gated sha).
 - **Name every failure.** Parse the gate's captured output (test runners' failure lines, per-step reports) into
   re-runnable items, each with its own cwd and command. Strip the gate's staging-path prefix before naming a file,
   including a persistent rig worktree's. A failure that cannot be named (a compile error) is real and needs a human.
@@ -207,7 +214,7 @@ config variable) plus `scripts/run-steps.mjs` (keep-going step runner).
 - **Relaunch early stops mechanically.** A run that exited without a finish line (`feature-lifecycle`, *The finish
   line*) is relaunched by a tick, not noticed by a human. Read the finish line on the branch's first-parent history.
 - **Side runs never take build slots.** Pre-plans and reviews use their own worktree prefix.
-- *Measured (dental, five builds):* about half of the wall time was runs not alive; model generation was 51–78% of
+- *Measured (five builds in a consumer app):* about half of the wall time was runs not alive; model generation was 51–78% of
   the working time; the tests and builds themselves were 10–20%. Idle time and landing waits were the biggest levers, not test speed.
 
 ## Stale branches

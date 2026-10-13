@@ -3,7 +3,7 @@
 // first fail, nor any process should stop at first failed, we need to gather all failed, then fix all at once").
 //
 // A `just` dependency list and an `a && b && c` npm chain both stop at the first red step, so a gate run surfaced ONE
-// failure per ~3 h cycle (measured in the dental app: one batch needed five fix branches). This runner keeps going, prints one SUMMARY, exits 1 when any
+// failure per ~3 h cycle (measured: one batch needed five fix branches). This runner keeps going, prints one SUMMARY, exits 1 when any
 // step failed, and (when RUN_STEPS_REPORT_DIR is set — the merge rig sets it) writes <dir>/<name>.json with every step's
 // cwd, command, rc and seconds, so the rig can re-run exactly the failed steps.
 //

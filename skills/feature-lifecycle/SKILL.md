@@ -602,6 +602,22 @@ a divergence from an invariant is a `plan-wins` re-implement, never a quiet acce
 
 Gate: `--phase 5` (checks the final round is 0).
 
+### Land at phase 5 (an epic node with dependents)
+
+Dependents wait on a provider's code, not on its audit. So a node that other nodes build on **lands as soon as phase 5 is
+done** — static checks green (types, lint, clippy, the app's static legs) and the item's OWN tests green — by writing
+`PHASE6-READY <short sha>` and joining the current integration batch. Phases 6–9 continue on the same branch and land
+later as a fix. A phase-6 finding of severity `security` / `data-loss` / `authz` holds the batch's gate until fixed;
+anything else rides the normal fix path. *Measured (dental, 2026-10-11/12):* dependents started a day or more earlier,
+and on a ~25-level critical path each level was costing 1–2.5 h of pure waiting.
+
+### Merge the integration branch only at the hand-off points
+
+A build merges the moving integration/combine branch **right before `PHASE6-READY` and right before `LAND-READY`** —
+never repeatedly during phase 5 (unless it is blocked on a provider change that exists only in the newer integration
+branch). Regenerate every generated file after each merge. *Measured:* builds merged the moving combine 3–4× each
+during phase 5, and each merge cost a regen + conflict round for nothing.
+
 ## Phase 6 — Blind multi-angle audit
 
 **Two angles, not ten — and they must differ in KIND.** The old rule (≥10 distinct
@@ -631,6 +647,13 @@ of severity `security` / `data-loss` / `authz`. Record `corroborated_by`,
 `oracle_confirmed` and `severity` per ledger row. Everything else stays in the
 ledger as a triage candidate — it does not enter the fix loop and does not keep it
 alive. Accumulating every angle's raw output is what made the loop unbounded.
+
+**A cheap first pass, one expensive confirm.** When the expensive reviewer slot is scarce, run the two blind angles on
+a local/cheap model first (each angle writes its rows to `LEDGER.jsonl` + a `REPORT.md`), then spend ONE expensive
+reviewer on *confirming or rejecting* that report — not on re-reviewing the diff from scratch. The first-pass reviewer
+is **read-only**: a detached worktree, no branch, and a brief that forbids commits and pushes. Findings go to the
+ledger; fixes go to the item's own fix branch. *Measured:* a first-pass reviewer that was allowed a branch "fixed"
+what it found and pushed five commits onto the build branch.
 
 **`AUDIT_COVERAGE.tsv` is gone.** It was generated from a file-group map, proved
 only that the audit named the files, and caught nothing. `LEDGER.jsonl` is the
@@ -1369,6 +1392,27 @@ node .claude/lifecycle/lifecycle-check.mjs --all --repo <worktree-root> --dir <f
 git add -A && git commit && git push        # pre-push hook runs --wip
 ```
 
+### The finish line — how a run says it is done
+
+Headless runs end their turn early; a relauncher must tell "finished" from "stopped". A run states completion with ONE
+line in its STATUS ledger, written LAST (after any report), that STARTS with the token and carries the real short sha of
+a commit on this branch:
+
+```
+PHASE4-READY 1a2b3c4d5    (a pre-plan: phases 1–4 done)
+PHASE6-READY 1a2b3c4d5    (phase 5 done — land now)
+LAND-READY   1a2b3c4d5    (all phases done)
+FIX-READY    1a2b3c4d5    (a fix round done)
+BLOCKED <reason>
+```
+
+A relauncher parses it **anywhere** in the newest ledger (token at line start, a leading `-`/`*` allowed), resolves the
+sha by its prefix, and requires it on the branch's **first-parent** line — a finish line inherited by merging another
+branch does not count. A run that exited without one is an early stop and is relaunched (cap the relaunches per item
+per day). Liveness is "a process of the run's backend has the worktree as cwd", and only completion sentinels newer
+than the last launch count. *Measured:* runs that stopped early with commits were read as finished and sat idle for
+26–37 h — about half of three builds' wall time.
+
 **The pre-push hook runs `--wip`, not `--all`.** `--wip` gates the phases the branch
 has COMPLETED and lets the one it is currently working be in progress, so a mid-round
 push passes without a bypass. It still fails a regression in a completed phase, still
@@ -1483,3 +1527,7 @@ Add `--keep-staging` to push the validated merge straight from the staging
 worktree; `--skip-heavy` to run only the fast deterministic gates (C2/C4/P2/C5)
 when iterating. This codifies — and replaces — the by-hand
 staging-merge/`cargo clean`/regen-both-workspaces discipline.
+
+How a whole batch reaches main — pregate, the full gate **at most once**, every failure re-run alone 3× (flakes vs
+real), and a recheck of only the real failures after the fix — is the landing loop in the `feature-orchestration`
+skill (*Landing: gate v2*).

@@ -16,6 +16,10 @@ It holds:
 - **`scripts/install-agent-hooks.sh`** — installs the `pre-push` hook that
   enforces `lifecycle-check --wip` on lifecycle branches (completed phases must be green;
   the phase in progress is exempt). `--all` is the pre-merge gate.
+- **`scripts/run-steps.mjs`** — the keep-going step runner a merge gate's check/test commands use (every step runs to
+  the end; one SUMMARY; a per-step JSON report), and **`scripts/rig/`** — the portable flake-rule runner
+  (`rerun-failures.sh`: each failure alone 3×; intermittent failures need 3/3 again on recheck) with its sandbox harness.
+  The landing loop they serve is *Landing: gate v2* in `skills/feature-orchestration/SKILL.md`.
 - **`docs/`** — the framework docs (`FRAMEWORK.md` is the `@import` target;
   `DESIGN_SYSTEM.md`, `CODING_GUIDELINES.md`, + the architecture docs).
 

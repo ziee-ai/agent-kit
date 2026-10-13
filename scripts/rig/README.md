@@ -45,6 +45,7 @@ candidate tip (no new commits for RIG_QUIET_SECS)
 | `rig-restart.sh` | restart only the rig process (to load new code) while it holds |
 | `rig-test.sh` | sandbox harness for the loop (no app needed) |
 | `rerun-test.sh` | sandbox harness for `rerun-failures.sh` |
+| `recheck-flake-test.sh` | regression check: the recheck flake pass re-runs each item's real command (6- and 5-column verdict rows) |
 
 Things an app may add on its side (not shipped here): a phase-6 / audit dispatcher, a pre-plan dispatcher, build idle/step timing
 reports, a drift check between its deployed copy and its source, and brief templates.
@@ -192,6 +193,7 @@ Start it detached: `RIG_STATE=/srv/rig setsid nohup scripts/rig/auto-merge.sh >>
 ```bash
 bash scripts/rig/rig-test.sh "$PWD/scripts/rig/auto-merge.sh"   # S0–S12: every decision path; RIG-TEST-FAILED=0
 bash scripts/rig/rerun-test.sh scripts/rig/rerun-failures.sh     # the flake rule incl. intermittent tries; 0 failed
+bash scripts/rig/recheck-flake-test.sh scripts/rig/recheck-flake.py  # the flake pass reads the real command; 0 failed
 ```
 
 `rig-test.sh` needs no app: it builds a throwaway bare origin + clone in a mktemp dir (removed on exit; `RIG_TEST_KEEP=1` keeps it),

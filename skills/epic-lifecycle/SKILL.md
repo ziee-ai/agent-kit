@@ -455,7 +455,7 @@ assumed-built rule as Phase 2), and stop at `PHASE4-READY <sha>`. When its provi
 merge the newest integration branch, regenerate, and **re-check every seam row against the providers' real code**. A
 `PROV` that landed differently from its frozen text is an escalation (scoped re-reconciliation, rule 3 above), never a
 silent adaptation. Pre-plan runs are side runs: name their worktrees so they never take a build slot. *Measured
-(dental):* 73 of 84 pre-plans reached `PHASE4-READY` while their providers were still in the build queue.
+(a consumer app):* 73 of 84 pre-plans reached `PHASE4-READY` while their providers were still in the build queue.
 
 ### Build stacked on the integration branch, not on main
 

@@ -113,14 +113,14 @@ cat > "$FD/TEST_RESULTS.md" <<'EOF'
 - **TEST-2**: PASS
 EOF
 git -C "$FE" add -A && git -C "$FE" commit -qm results-missing-fe-lines
-assert_exit 1 "FE phase 8: missing 'npm run check (ui): PASS' is REFUSED" -- --phase 8 --repo "$FE" --dir "$FD" --base main
+assert_exit 1 "FE phase 8: missing 'targeted (ui): PASS' line is REFUSED" -- --phase 8 --repo "$FE" --dir "$FD" --base main
 
 # --- variant C2: npm-run-check present but the e2e spec did not pass -> FAIL
 cat > "$FD/TEST_RESULTS.md" <<'EOF'
 # TEST_RESULTS — foo
 - **TEST-1**: PASS
 - **TEST-2**: FAIL
-npm run check (ui): PASS
+targeted (ui): PASS — tsc, vitest src/modules/foo
 EOF
 git -C "$FE" add -A && git -C "$FE" commit -qm results-e2e-fail
 assert_exit 1 "FE phase 8: a failing e2e spec is REFUSED" -- --phase 8 --repo "$FE" --dir "$FD" --base main
@@ -130,11 +130,11 @@ cat > "$FD/TEST_RESULTS.md" <<'EOF'
 # TEST_RESULTS — foo
 - **TEST-1**: PASS
 - **TEST-2**: PASS
-npm run check (ui): PASS
-gate:ui (ui): PASS
+targeted (ui): PASS — tsc, vitest src/modules/foo, e2e tests/e2e/foo
 EOF
 git -C "$FE" add -A && git -C "$FE" commit -qm results-complete
-assert_exit 0 "FE phase 8: npm-run-check + e2e PASS lines accepted" -- --phase 8 --repo "$FE" --dir "$FD" --base main
+add_srp "$FE" "$FD"
+assert_exit 0 "FE phase 8: a TARGETED line + e2e PASS lines accepted (no full suite, no gate:ui)" -- --phase 8 --repo "$FE" --dir "$FD" --base main
 assert_exit 0 "FE --all: complete frontend lifecycle is green" -- --all --repo "$FE" --dir "$FD" --base main
 
 # ---------------------------------------------------------------------------
@@ -188,6 +188,7 @@ cat > "$BD/TEST_RESULTS.md" <<'EOF'
 - **TEST-1**: PASS
 EOF
 git -C "$BE" add -A && git -C "$BE" commit -qm feat-bar
+add_srp "$BE" "$BD"
 assert_exit 0 "BE phase 3: backend-only + regen-client plan needs NO e2e" -- --phase 3 --repo "$BE" --dir "$BD" --base main
 assert_exit 0 "BE phase 8: backend-only results need NO npm-run-check line" -- --phase 8 --repo "$BE" --dir "$BD" --base main
 assert_exit 0 "BE --all: backend-only lifecycle is green" -- --all --repo "$BE" --dir "$BD" --base main
@@ -265,6 +266,7 @@ mod tests {
 }
 EOF
 git -C "$UE" add -A && git -C "$UE" commit -qm earn-test-1
+add_srp "$UE" "$BZ"
 assert_exit 0 "A11: the SAME PASS is accepted once the branch cites it in a test" -- --phase 8 --repo "$UE" --dir "$BZ" --base main
 
 # ---------------------------------------------------------------------------
@@ -664,6 +666,7 @@ git -C "$WP" add -A && git -C "$WP" commit -qm complete-but-failing
 assert_exit 1 "--wip: a COMPLETE feature still demands every phase (phase 8 FAIL is not waved through)" -- --wip --repo "$WP" --dir "$WD" --base main
 printf '# TEST_RESULTS — bar\n- **TEST-1**: PASS\n' > "$WD/TEST_RESULTS.md"
 git -C "$WP" add -A && git -C "$WP" commit -qm complete-green
+add_srp "$WP" "$WD"
 assert_exit 0 "--wip CONTROL: a complete, green feature passes" -- --wip --repo "$WP" --dir "$WD" --base main
 assert_exit 0 "--all CONTROL: the same complete, green feature passes --all unchanged" -- --all --repo "$WP" --dir "$WD" --base main
 

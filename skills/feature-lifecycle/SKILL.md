@@ -12,6 +12,13 @@ description: >
 
 # Feature Lifecycle
 
+> **TARGETED TESTS ONLY — NEVER THE FULL SUITE (owner rule, 2026-10-09).** Building,
+> fixing or auditing a feature runs ONLY the tests of that feature and of the code it
+> touches (its own TEST-IDs, the touched modules' unit tests, its e2e specs, `tsc` and
+> the lints the touched files trip). Never `just check` / `just test` /
+> `just gate-merge` / the whole `npm run check` chain / the whole vitest, integration
+> or e2e tier — in any phase. **Only the merge gate runs the full suite.**
+
 A phase state machine. **You may not enter phase N+1 until the validator passes
 phase N:**
 
@@ -207,7 +214,8 @@ Match these line formats precisely or the gate will not pass.
   The commit must resolve, be an ancestor of `HEAD`, and **not** already be in
   the base ref — it has to be work this branch did.
 - **Frontend gate line** (`TEST_RESULTS.md`, REQUIRED once the diff touches a UI
-  workspace) — `npm run check (ui): PASS` — one line per touched workspace; the
+  workspace) — `targeted (ui): PASS — <the targeted commands run>` — one line per
+  touched workspace (a legacy `npm run check (ui): PASS` is accepted, never required); the
   label is `ui` (→ `src-app/ui`) or `desktop/ui` (→ `src-app/desktop/ui`)
 - **Human-feedback entry** (`HUMAN_FEEDBACK.md`) —
   `- **FB-1** [status: resolved] — <verbatim feedback> → <resolution> [generalizable: yes — <rule>]`
@@ -605,6 +613,22 @@ a divergence from an invariant is a `plan-wins` re-implement, never a quiet acce
 
 Gate: `--phase 5` (checks the final round is 0).
 
+### Land at phase 5 (an epic node with dependents)
+
+Dependents wait on a provider's code, not on its audit. So a node that other nodes build on **lands as soon as phase 5 is
+done** — static checks green (types, lint, clippy, the app's static legs) and the item's OWN tests green — by writing
+`PHASE6-READY <short sha>` and joining the current integration batch. Phases 6–9 continue on the same branch and land
+later as a fix. A phase-6 finding of severity `security` / `data-loss` / `authz` holds the batch's gate until fixed;
+anything else rides the normal fix path. *Measured (a consumer app, 2026-10-11/12):* dependents started a day or more earlier,
+and on a ~25-level critical path each level was costing 1–2.5 h of pure waiting.
+
+### Merge the integration branch only at the hand-off points
+
+A build merges the moving integration/combine branch **right before `PHASE6-READY` and right before `LAND-READY`** —
+never repeatedly during phase 5 (unless it is blocked on a provider change that exists only in the newer integration
+branch). Regenerate every generated file after each merge. *Measured:* builds merged the moving combine 3–4× each
+during phase 5, and each merge cost a regen + conflict round for nothing.
+
 ## Phase 6 — Blind multi-angle audit
 
 **Two angles, not ten — and they must differ in KIND.** The old rule (≥10 distinct
@@ -634,6 +658,13 @@ of severity `security` / `data-loss` / `authz`. Record `corroborated_by`,
 `oracle_confirmed` and `severity` per ledger row. Everything else stays in the
 ledger as a triage candidate — it does not enter the fix loop and does not keep it
 alive. Accumulating every angle's raw output is what made the loop unbounded.
+
+**A cheap first pass, one expensive confirm.** When the expensive reviewer slot is scarce, run the two blind angles on
+a local/cheap model first (each angle writes its rows to `LEDGER.jsonl` + a `REPORT.md`), then spend ONE expensive
+reviewer on *confirming or rejecting* that report — not on re-reviewing the diff from scratch. The first-pass reviewer
+is **read-only**: a detached worktree, no branch, and a brief that forbids commits and pushes. Findings go to the
+ledger; fixes go to the item's own fix branch. *Measured:* a first-pass reviewer that was allowed a branch "fixed"
+what it found and pushed five commits onto the build branch.
 
 **`AUDIT_COVERAGE.tsv` is gone.** It was generated from a file-group map, proved
 only that the audit named the files, and caught nothing. `LEDGER.jsonl` is the
@@ -819,7 +850,10 @@ unbounded. It produced a real 17-round run here. Every defect-estimation model
 assumes a **decreasing** detection profile, so a flat or rising profile falsifies
 the model rather than meaning "converging slowly".
 
-The loop ends in one of six ways:
+The loop ends in one of six ways. **Audit rounds are capped at 4** (owner ruling): round 1
+uses at least two angles; every later round re-audits ONLY the previous round's fix diff
+with the same angles — never rotate to fresh angles, which is what turned one menu feature's
+loop into 8.5 hours.
 
 | | condition | outcome |
 |---|---|---|
@@ -828,7 +862,7 @@ The loop ends in one of six ways:
 | **Converged** | a round yields 0 **and** the profile decayed | done |
 | **ABORT** | profile flat/rising at round ≥5 (final round ≥ median of the prior) | **re-scope — do NOT run another round** |
 | **GUARD-SUB** | ≥60% of a round's findings target ONE test/guard file (round ≥2) | **stop + escalate — replace the guard** |
-| **Cap** | 6 rounds with findings still open | escalate to a human |
+| **Cap** | round **4** reached (owner ruling 2026-10-09: *at most 4 audit rounds*) | done — fix round 4's findings in-round, **no round 5** |
 | — | otherwise | continue |
 
 ### T1 — terminate on the ESTIMATE, not on the observation
@@ -961,8 +995,19 @@ Gate: `--phase 7` (checks the final round is 0).
 
 ## Phase 8 — Gated test run (conditional on the touched areas)
 
-ONLY NOW run tests, scoped to what you built ([[feedback_test_scope]]). This is
-the **single** full run of the enumerated set — phase 7 iterations run scoped
+> **TARGETED TESTS ONLY — NEVER THE FULL SUITE (owner rule, 2026-10-09).** A
+> lifecycle proves ITS OWN feature and the code it touched. It never runs
+> `just check`, `just test`, `just gate-merge`, the whole `npm run check` chain,
+> the whole vitest tier, an unfiltered integration suite or the whole e2e tier —
+> not in phase 3, 5, 7 or 8, not "before reporting", not after a fix round.
+> **Only the merge gate (`merge-gate.mjs`, C7) runs the full suite**, once per
+> merge; a regression elsewhere surfaces there and is fixed then. Running full
+> suites per feature (an hour each on a loaded box, repeated every round) wasted
+> hundreds of hours before this rule.
+
+ONLY NOW run tests, scoped to what you built ([[feedback_test_scope]]): the
+enumerated TEST-IDs plus the existing tests of the files the diff touches. This
+is the **single** run of the enumerated set — phase 7 iterations run scoped
 subsets, and their results stand; a prior PASS is not voided by a later
 unrelated change. **Which
 gates apply is computed from `git diff main...HEAD`** (generated
@@ -975,51 +1020,37 @@ chains.
 ```bash
 # integration (source the env file first — real LLM keys live there)
 source src-app/server/tests/.env.test
-cargo test --test integration_tests <module>:: -- --test-threads=1 \
+cargo test --test integration_tests <module>::<the feature's tests> -- --test-threads=1 \
   2>&1 | tee /data/pbya/ziee/tmp/lifecycle-logs/<feature>-int.log
 ```
 
 **If the diff touches a frontend workspace** (`src-app/ui/**` and/or
-`src-app/desktop/ui/**`), ALL of the following are required, per touched
-workspace:
+`src-app/desktop/ui/**`), run — per touched workspace — ONLY:
 
-1. **`npm run check` — the one gate command, run in EACH touched workspace.** It
-   chains the whole static frontend contract: `tsc` + the biome guardrails +
-   `lint:colors` + `lint:settings-field` + `check:kit-manifest` +
-   `check:testid-registry` + `check:design-spec` + `check:gallery-coverage` +
-   `check:state-matrix`. Don't run these individually — run the one command and
-   record its result:
-   ```bash
-   cd src-app/ui && npm run check          # and src-app/desktop/ui if touched
-   ```
-   Write a `npm run check (ui): PASS` line (and `npm run check (desktop/ui): PASS`)
-   in `TEST_RESULTS.md` — the gate requires one per touched workspace.
-2. **New conditional render states need gallery coverage.** Any new
-   loading/empty/error/variant state your diff introduces must have a gallery
-   entry (or an explicit allowlist reason). This is enforced by the
-   `check:state-matrix` gate *inside* `npm run check` above — budget for it: if
-   you added a state, add its gallery cell or the gate (and thus phase 8) fails.
-3. **UI evaluator gate** (per CLAUDE.md's "UI Build Gate"): zero console
-   errors / uncaught exceptions / failed requests / AA-contrast failures on the
-   touched gallery surfaces, and the visual-regression baseline matches. Run the
-   gallery runtime + gate scripts:
-   ```bash
-   cd src-app/ui && npm run gate:ui                     # runtime-health + Layer A/axe + tsc/lint
-   VISUAL_SNAPSHOTS=1 npm run gate:ui                   # + Layer B pixel regression vs baseline
-   ```
-4. **e2e specs for the user-visible flows** you enumerated as `tier: e2e` in
-   phase 3 (TESTS.md) — run them and record each TEST-ID:
+1. **`tsc` for the workspace** (`npx tsc --noEmit`, plus the tests tsconfig if
+   you touched tests) and **the lints the touched files trip** (e.g.
+   `npx biome check <touched paths>`, `npm run lint:colors`,
+   `npm run check:testid-registry` if you added testids,
+   `npm run check:boot-cost` if you changed what a route loads at boot).
+2. **The vitest files that cover the touched code** —
+   `npx vitest run <the touched modules' directories / test files>`.
+3. **The e2e specs you enumerated as `tier: e2e` in phase 3** (TESTS.md), plus
+   any existing spec that drives the touched surface:
    ```bash
    cd src-app/ui && npx playwright test tests/e2e/<file> --workers=1
    ```
-   This includes any `[negative-perm]` **restricted-user** spec (A10): run it
-   and record its TEST-ID as PASS — the gate requires the negative-permission
-   e2e to pass, not just the happy-path one.
+   This includes any `[negative-perm]` **restricted-user** spec (A10).
+
+Record ONE line per touched workspace naming what you ran:
+`targeted (ui): PASS — tsc, biome <paths>, vitest <paths>, e2e <specs>`. Do NOT
+run the whole `npm run check` chain, `gate:ui`'s full sweep, or every spec — the
+merge gate does that. (The gallery/runtime canary A7 is opt-in per app via
+`LIFECYCLE_REQUIRE_A7=1`.)
 
 Write `TEST_RESULTS.md` with a `- **TEST-N**: PASS` line for **every** TEST-ID
-from Phase 3 (plus the `npm run check (<ws>): PASS` line(s) above for a UI diff).
+from Phase 3 (plus the `targeted (<ws>): PASS — …` line(s) above for a UI diff).
 The gate fails if any phase-3 test is missing/not PASS, if a touched workspace has
-no passing `npm run check` line, or if any enumerated `tier: e2e` spec is not
+no passing `targeted` line, or if any enumerated `tier: e2e` spec is not
 PASS. Never `#[ignore]` (or `.skip`) to go green — only genuine
 platform-incompatibility is a legit skip ([[feedback_no_ignore_unless_platform]]).
 
@@ -1040,7 +1071,7 @@ so budget for them — they are not optional polish:
   fields, each with a value **on its own line**:
   ```
   - **stopped at**: phase 7
-  - **reason**: fix-round cap reached with findings open
+  - **reason**: ABORT — the finding profile stopped decaying at round 5
   - **unresolved**: F1 (mechanism unpinned), F3-F6 deferred to #561
   - **next**: human triage — F1 blocks merge
   ```
@@ -1372,6 +1403,27 @@ node .claude/lifecycle/lifecycle-check.mjs --all --repo <worktree-root> --dir <f
 git add -A && git commit && git push        # pre-push hook runs --wip
 ```
 
+### The finish line — how a run says it is done
+
+Headless runs end their turn early; a relauncher must tell "finished" from "stopped". A run states completion with ONE
+line in its STATUS ledger, written LAST (after any report), that STARTS with the token and carries the real short sha of
+a commit on this branch:
+
+```
+PHASE4-READY 1a2b3c4d5    (a pre-plan: phases 1–4 done)
+PHASE6-READY 1a2b3c4d5    (phase 5 done — land now)
+LAND-READY   1a2b3c4d5    (all phases done)
+FIX-READY    1a2b3c4d5    (a fix round done)
+BLOCKED <reason>
+```
+
+A relauncher parses it **anywhere** in the newest ledger (token at line start, a leading `-`/`*` allowed), resolves the
+sha by its prefix, and requires it on the branch's **first-parent** line — a finish line inherited by merging another
+branch does not count. A run that exited without one is an early stop and is relaunched (cap the relaunches per item
+per day). Liveness is "a process of the run's backend has the worktree as cwd", and only completion sentinels newer
+than the last launch count. *Measured:* runs that stopped early with commits were read as finished and sat idle for
+26–37 h — about half of three builds' wall time.
+
 **The pre-push hook runs `--wip`, not `--all`.** `--wip` gates the phases the branch
 has COMPLETED and lets the one it is currently working be in progress, so a mid-round
 push passes without a bypass. It still fails a regression in a completed phase, still
@@ -1486,3 +1538,7 @@ Add `--keep-staging` to push the validated merge straight from the staging
 worktree; `--skip-heavy` to run only the fast deterministic gates (C2/C4/P2/C5)
 when iterating. This codifies — and replaces — the by-hand
 staging-merge/`cargo clean`/regen-both-workspaces discipline.
+
+How a whole batch reaches main — pregate, the full gate **at most once**, every failure re-run alone 3× (flakes vs
+real), and a recheck of only the real failures after the fix — is the landing loop in the `feature-orchestration`
+skill (*Landing: gate v2*).

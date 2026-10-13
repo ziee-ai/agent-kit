@@ -103,6 +103,7 @@ MERGE_GENERATED=src-app/ui/openapi/openapi.json src-app/ui/src/api-client/types.
 CFGEOF
 }
 
+
 # ---------------------------------------------------------------------------
 # build_be — a fully-valid BACKEND feature repo on branch feat/bar, committed
 # clean. Echoes the repo root. The single source file is
@@ -142,6 +143,7 @@ EOF
 - **TEST-1**: PASS
 EOF
   git -C "$R" add -A && git -C "$R" commit -qm feat-bar
+  add_srp "$R" "$D"
   echo "$R"
 }
 
@@ -263,6 +265,7 @@ npm run check (ui): PASS
 gate:ui (ui): PASS
 EOF
   git -C "$R" add -A && git -C "$R" commit -qm feat-perm
+  add_srp "$R" "$D"
   echo "$R"
 }
 
@@ -289,6 +292,10 @@ p7 "late ramp then decay converges (ask-user)"         0 0 15 1 0
 p7 "non-decaying profile is REFUSED (activity-rail)"   1 0 2 17 16 20 12 14 15 8 10 7 8 6 8 5 15 21
 p7 "non-decaying is caught EARLY, at round 5"          1 0 2 17 16 20
 p7 "a legitimate late ramp is NOT aborted at round 2"  1 0 15
+# Owner ruling 2026-10-09 — at most 4 audit rounds: round 4 with findings ENDS the
+# loop (pass); round 3 with findings does not (the discriminating control).
+p7 "round cap: round 4 with findings open ENDS the loop" 0 10 6 4 2
+p7 "round cap: round 3 with findings still loops"        1 10 6 4
 
 # ---------------------------------------------------------------------------
 # --- T1: capture-recapture termination (an ESTIMATE, not an observation) ---
@@ -898,6 +905,7 @@ npm run check (ui): PASS
 gate:ui (ui): PASS
 EOF
 git -C "$R" commit -qam add-negperm-mig
+add_srp "$R" "$D"
 lc 0 "A10: the migration grant WITH a restricted-user e2e passes (phase 8)" --phase 8 --repo "$R" --dir "$D" --base main
 
 # --- A10 plan-forecast vs diff (agent-kit#16): a backend-only item whose plan
@@ -963,7 +971,9 @@ printf '\n## SELF-REVERT PROOF\n- **commit**: %s\n- **reddened**: TEST-1 FAIL (r
 git -C "$R" commit -qam self-revert-proof
 lc 0 "A10: a comment in permissions.rs citing \`service::manage\` does not count as introducing it (phase 8)" --phase 8 --repo "$R" --dir "$D" --base main
 
-# --- A7: a UI diff whose results omit the boot/runtime canary -> phase 8 FAIL
+# --- A7: OPT-IN since 2026-10-09 (targeted tests only; full sweeps are the merge
+# gate's). Without LIFECYCLE_REQUIRE_A7=1 a missing canary is fine; with it the
+# canary is required and a present one passes.
 R="$(new_repo)"; CLEANUP+=("$R")
 git -C "$R" checkout -q -b feat/ui
 mkdir -p "$R/src-app/ui/src/modules/foo" "$R/.lifecycle/foo"
@@ -1022,10 +1032,14 @@ cat > "$D/TEST_RESULTS.md" <<'EOF'
 npm run check (ui): PASS
 EOF
 git -C "$R" add -A && git -C "$R" commit -qm feat-ui-no-canary
-lc 1 "A7: UI results missing the boot/runtime canary line is REFUSED" --phase 8 --repo "$R" --dir "$D" --base main
+add_srp "$R" "$D"
+lc 0 "A7 off by default: UI results without a canary line pass" --phase 8 --repo "$R" --dir "$D" --base main
+mkdir -p "$R/.claude" && printf 'LIFECYCLE_REQUIRE_A7=1\n' >> "$R/.claude/app.config"
+git -C "$R" add -A && git -C "$R" commit -qm opt-in-a7
+lc 1 "A7 opted in: UI results missing the boot/runtime canary line is REFUSED" --phase 8 --repo "$R" --dir "$D" --base main
 printf 'gate:ui (ui): PASS\n' >> "$D/TEST_RESULTS.md"
 git -C "$R" commit -qam add-canary
-lc 0 "A7: UI results WITH gate:ui canary passes" --phase 8 --repo "$R" --dir "$D" --base main
+lc 0 "A7 opted in: UI results WITH gate:ui canary passes" --phase 8 --repo "$R" --dir "$D" --base main
 
 # --- R2-5: an e2e route-mock pointing at a route not in openapi.json -> FAIL;
 #     fixing it to a live route -> PASS. (Needs an openapi.json to check against.)
@@ -1066,6 +1080,7 @@ npm run check (ui): PASS
 gate:ui (ui): PASS
 EOF
 git -C "$R" add -A && git -C "$R" commit -qm feat-mock-ghost
+add_srp "$R" "$D"
 lc 1 "R2-5: e2e mock of an unknown /api/ route is REFUSED" --phase 8 --repo "$R" --dir "$D" --base main
 # fix the mock to a live route
 sed 's#\*\*/api/ghosts#**/api/things#' "$R/src-app/ui/tests/e2e/foo/foo.spec.ts" > "$R/tmp.ts" && mv "$R/tmp.ts" "$R/src-app/ui/tests/e2e/foo/foo.spec.ts"
@@ -1656,6 +1671,7 @@ npm run check (webapp): PASS
 gate:ui (webapp): PASS
 EOF
 git -C "$R" add -A && git -C "$R" commit -qm webmock
+add_srp "$R" "$D"
 # WITHOUT app.config: ziee-default OPENAPI_SPECS (src-app/…) absent ⇒ R2-5 SKIPs
 # AND webapp/ is not a known FE workspace ⇒ FE npm-check gate SKIPs ⇒ exit 0
 # (the ghost mock is NOT flagged — the ziee paths simply don't exist here).
@@ -1715,6 +1731,7 @@ cat > "$D/TEST_RESULTS.md" <<'EOF'
 - **TEST-2**: PASS
 EOF
 git -C "$R" add -A && git -C "$R" commit -qm webfe
+add_srp "$R" "$D"
 # WITHOUT app.config: webapp/ is NOT a recognized FE workspace (ziee default map
 # is src-app/…) ⇒ the touch reads as non-frontend ⇒ no `npm run check` line is
 # required ⇒ exit 0 (the FE gate is app.config-driven, not baked to src-app).
@@ -1734,6 +1751,7 @@ npm run check (webapp): PASS
 gate:ui (webapp): PASS
 EOF
 git -C "$R" commit -qam webfe-results-complete
+add_srp "$R" "$D"
 lc 0 "lifecycle-check: webapp FE workspace satisfied by 'npm run check (webapp): PASS'" --phase 8 --repo "$R" --dir "$D" --base main
 
 # ---------------------------------------------------------------------------
@@ -1860,7 +1878,10 @@ EOF
 EOF
   { printf '# TEST_RESULTS — foo\n- **TEST-1**: PASS\n- **TEST-2**: PASS\nnpm run check (ui): PASS\n'
     for l in "$@"; do printf '%s\n' "$l"; done; } > "$D/TEST_RESULTS.md"
+  # These cases test A7 itself, which is OPT-IN since 2026-10-09.
+  mkdir -p "$R/.claude" && printf 'LIFECYCLE_REQUIRE_A7=1\n' >> "$R/.claude/app.config"
   git -C "$R" add -A && git -C "$R" commit -qm feat-ui7
+  add_srp "$R" "$D"
   echo "$R"
 }
 
@@ -1949,6 +1970,70 @@ cat >> "$D/TEST_RESULTS.md" <<'EOF'
 EOF
 git -C "$R" commit -qam negperm-prose
 lc 0 "A10: the positive control is recognized from the asserts prose (no tag required)" --phase 8 --repo "$R" --dir "$D" --base main
+
+# --- A14 (b): a version collision with an OPEN sibling, and the ancestor exclusion ---
+#
+# The sibling list is built with `--no-merged <integration target>`, which answers a
+# different question than the one A14 asks. "Not merged into the epic tip" does NOT mean
+# "not in this branch's history": an integration HEAD that just merged five feature
+# branches is, by construction, the one place where every one of them is simultaneously
+# an ancestor of HEAD and unmerged into the tip. Each then collides with ITSELF.
+# (MEASURED, ziee-ai/agent-kit#14: 3 of 5 hits on one run, 6 of 9 on another — every one
+# a phantom the run had to hand-waive, which is how a gate teaches people to bypass it.)
+#
+# Built as a MATCHED PAIR so the exclusion cannot be a blanket mute: the ancestor sibling
+# must go quiet while a genuinely-divergent sibling with the same version still fires.
+build_a14() { # $1 = "ancestor" | "divergent"  -> echoes repo root
+  local R mode="$1"; R="$(build_be)"
+  local M=src-app/server/src/modules/bar/manifest.yaml
+  # A sibling branch off main that declares version 1.2.0 for the same package.
+  git -C "$R" checkout -q -b sib main
+  mkdir -p "$R/src-app/server/src/modules/bar"
+  printf 'name: bar\nversion: 1.2.0\n' > "$R/$M"
+  echo "pub fn sib() {}" > "$R/src-app/server/src/modules/bar/sib.rs"
+  git -C "$R" add -A && git -C "$R" commit -qm sib-1.2.0
+  # Publish it as a remote ref. It is deliberately NOT merged into main, so it is an
+  # "open sibling" from the tip's point of view in both arms of the pair.
+  git -C "$R" update-ref refs/remotes/origin/sib "$(git -C "$R" rev-parse sib)"
+  git -C "$R" checkout -q feat/bar
+  printf 'name: bar\nversion: 1.2.0\n' > "$R/$M"
+  git -C "$R" add -A && git -C "$R" commit -qm feat-manifest-1.2.0
+  # The ONLY difference between the arms: whether the sibling is in our history.
+  [ "$mode" = ancestor ] && git -C "$R" merge -q --no-edit sib -m "merge sib"
+  echo "$R"
+}
+
+# Negative control FIRST — if this does not fire, the pair proves nothing about the
+# exclusion, only that A14 is silent in general.
+R="$(build_a14 divergent)"; D="$R/.lifecycle/bar"
+lc 1 "A14: an OPEN sibling claiming the same version is REFUSED" --phase 8 --repo "$R" --dir "$D" --base main
+lc_says "origin/sib" "A14: the refusal NAMES the colliding ref (not a generic version gripe)" \
+  --phase 8 --repo "$R" --dir "$D" --base main
+
+# The fix: a sibling already merged INTO HEAD is our own claim, not a competitor.
+R="$(build_a14 ancestor)"; D="$R/.lifecycle/bar"
+lc 0 "A14: a sibling that is an ANCESTOR of HEAD is not a competing claimant" --phase 8 --repo "$R" --dir "$D" --base main
+
+# LOAD-BEARING PROOF. A gate change that passes its own test may simply be inert: the
+# clean arm above would also pass if A14 never fired at all, or if the fixture never
+# reached the collision branch. So delete the one line the fix adds, on a COPY of the
+# checker, and require the clean arm to REDDEN. If it stays green the exclusion is not
+# what made it pass and this test is decoration.
+# (This project has shipped a "fix" whose test passed identically with the fix reverted;
+# the rule earned from it is that a change must be observed to be necessary, not just
+# sufficient.)
+A14_SRC="$CHECK"; A14_TMP="$(mktemp -d)"; CLEANUP+=("$A14_TMP")
+grep -v "merge-base', '--is-ancestor', s, 'HEAD'" "$A14_SRC" > "$A14_TMP/lifecycle-check.mjs"
+if cmp -s "$A14_SRC" "$A14_TMP/lifecycle-check.mjs"; then
+  FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "A14: mutation harness could not find the ancestor line to remove (test is vacuous)"
+else
+  if node "$A14_TMP/lifecycle-check.mjs" --phase 8 --repo "$R" --dir "$D" --base main >/dev/null 2>&1; then
+    FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "A14: clean arm STILL passes with the ancestor exclusion removed — the fix is not load-bearing"
+  else
+    PASS=$((PASS+1)); printf '  \033[32mok  \033[0m %s\n' "A14: removing the ancestor exclusion REDDENS the clean arm (fix is load-bearing)"
+  fi
+fi
+
 echo "-- Part G: staleness-check.mjs (stale state that answers CONFIDENTLY WRONG) --"
 # ---------------------------------------------------------------------------
 # Every check below is proven BOTH ways: it fires on a genuinely stale fixture and
@@ -2260,6 +2345,7 @@ printf '# TEST_RESULTS — item1\n- **TEST-1**: PASS\n' > "$IVD/TEST_RESULTS.md"
 printf '# GRAPH\nITEM-1 -> ITEM-2\n' > "$IV/.lifecycle/epic-x/GRAPH.md"
 printf '# PLAN — item2 (not started)\n' > "$IV/.lifecycle/epic-x/ITEM-2/PLAN.md"
 git -C "$IV" add -A && git -C "$IV" commit -qm item1-complete
+add_srp "$IV" "$IVD"
 
 # CONTROL — pointed at the real feature dir, the same tree is green.
 lc 0 "invocation: CONTROL — the correctly-directed run passes" --all --repo "$IV" --dir "$IVD" --base main
@@ -2311,6 +2397,24 @@ EPIC_CHECK="$HERE/epic-check.mjs"
 assert_exit_cmd 1 "epic-check: an unknown flag is fatal" -- node "$EPIC_CHECK" --phase 0 --epic e --repo "$R" --feature C9
 assert_exit_cmd 1 "epic-check: a bare positional is fatal" -- node "$EPIC_CHECK" --phase 0 --epic e --repo "$R" C9
 assert_exit_cmd 1 "epic-check CONTROL: a missing epic still fails on its own merits" -- node "$EPIC_CHECK" --phase 0 --epic e --repo "$R"
+
+# --- merge-gate C7: a failing app check NAMES what failed and saves the full output.
+# The old 14-line tail was npm/just exit chatter; it never named the failing test, so a
+# load flake and a real red were indistinguishable and each cost a blind ~1h re-gate.
+R="$(new_repo)"; CLEANUP+=("$R"); mkdir -p "$R/.claude"
+printf 'MERGE_CHECK_CMD=./fail.sh\n' > "$R/.claude/app.config"
+printf '#!/bin/sh\necho " FAIL  src/a.test.ts > the named test"\nfor i in $(seq 20); do echo "npm error chatter $i"; done\nexit 1\n' > "$R/fail.sh"; chmod +x "$R/fail.sh"
+git -C "$R" add -A && git -C "$R" commit -qm base-c7
+git -C "$R" checkout -q -b feat/c7
+echo change > "$R/f.txt"; git -C "$R" add -A && git -C "$R" commit -qm work-c7
+C7OUT="$(node "$MG" feat/c7 --repo "$R" --base main --no-fetch 2>&1)"
+C7LOG="$(printf '%s' "$C7OUT" | sed -n 's/^Full output: //p' | head -1)"
+if printf '%s' "$C7OUT" | grep -q "the named test" && [ -n "$C7LOG" ] && [ -f "$C7LOG" ] && grep -q "npm error chatter 20" "$C7LOG"; then
+  PASS=$((PASS+1)); printf '  \033[32mok  \033[0m %s\n' "merge-gate C7: a failing check names the failing test and saves the full output"
+  rm -f "$C7LOG"
+else
+  FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "merge-gate C7: failure output does not name the test or the full log is missing"
+fi
 
 echo "== $PASS passed, $FAIL failed =="
 [ "$FAIL" -eq 0 ]

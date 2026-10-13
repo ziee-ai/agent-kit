@@ -442,6 +442,14 @@ const RE_DRIFT = /^-\s*\*\*(DRIFT-[A-Za-z0-9._-]+)\*\*.*?verdict\s*:\s*(plan-win
 const RE_RESULT = /\*\*(TEST-[A-Za-z0-9._-]+)\*\*\s*:?\s*.*?\b(PASS|FAIL|SKIP)\b/i;
 // Frontend gate line: `npm run check (ui): PASS` / `npm run check (desktop/ui): PASS`
 const RE_UI_CHECK = /npm run check\s*\(\s*([A-Za-z0-9._/\- ]+?)\s*\)\s*:?\s*.*?\b(PASS|FAIL)\b/i;
+// TARGETED TESTS ONLY (owner rule 2026-10-09): a lifecycle proves ITS OWN feature and
+// the code it touched — never the full suite. The full suite (`just check`, the
+// whole `npm run check` chain, every unit/integration/e2e test) belongs to the
+// MERGE GATE alone (merge-gate.mjs C7). So phase 8's frontend evidence is a
+// `targeted (<ws>): PASS — <the commands run>` line: tsc for the workspace plus the
+// vitest files / e2e specs / lints that cover the touched files. A legacy
+// `npm run check (<ws>): PASS` line is still accepted, but it is never REQUIRED.
+const RE_TARGETED = /targeted\s*\(\s*([A-Za-z0-9._/\- ]+?)\s*\)\s*:?\s*.*?\b(PASS|FAIL)\b/i;
 
 function parsePlanItems() {
   const t = read('PLAN.md');
@@ -578,7 +586,7 @@ function priorTestCovers() {
 // The comparative A7 form ("gate:ui (ui): branch N vs base M") carries no PASS
 // token and deliberately does NOT satisfy this — a standing-gate test needs the
 // gate actually green, not merely "no worse than base".
-const RE_STANDING_GATE_PASS = /(?:npm run check|gate:ui)\s*\(\s*[A-Za-z0-9._/\- ]+?\s*\)\s*:?\s*.*?\bPASS\b/i;
+const RE_STANDING_GATE_PASS = /(?:npm run check|gate:ui|targeted)\s*\(\s*[A-Za-z0-9._/\- ]+?\s*\)\s*:?\s*.*?\bPASS\b/i;
 function standingGatePassPresent(text) {
   for (const ln of String(text || '').split(/\r?\n/)) if (RE_STANDING_GATE_PASS.test(ln)) return true;
   return false;
@@ -2054,9 +2062,16 @@ function checkGuardSubstitution() {
 // rising profile falsifies the model rather than meaning "converging slowly".
 //
 // Outcomes: converged (0 + a decaying profile) · ABORT (non-decaying → re-scope,
-// do NOT keep looping) · CAP (escalate to a human) · still-looping.
+// do NOT keep looping) · CAP (the loop ENDS: fix the final round's findings in-round,
+// no further audit round) · still-looping.
+//
+// The cap is an OWNER RULING (2026-10-09): "at most 4 audit round". It was 6-and-
+// escalate; the measured cost of rounds 5+ (one menu feature spent ~8.5 h in a
+// rotating-angle loop after 2.5 h of build) is what the ruling answers. At the cap the
+// loop is DONE, not escalated: the final round's confirmed findings are fixed and
+// resolved in the ledger like any other round's, and no round 5 audit runs.
 const FIX_LOOP_ABORT_MIN_ROUND = 5;  // never abort before this: findings can legitimately ramp late (one feature went 0 -> 15 at round 2)
-const FIX_LOOP_ROUND_CAP = 6;
+const FIX_LOOP_ROUND_CAP = 4;
 function phase7() {
   const g = [];
   const notes = [];
@@ -2174,7 +2189,7 @@ function phase7() {
   if (abortState) {
     g.push(`${last.file}: fix loop is NOT CONVERGING and must be ABORTED, not continued — profile (${known.join(', ')}) is flat or rising after ${r} rounds, which falsifies the assumption every defect-estimation model rests on. Do not run another round. Re-scope instead: record the reason the artifact was not ready for audit (commonly a hand-written static-analysis guard standing in for a behavioural test — its evasion space is unbounded, so 0 is unreachable), replace it, and restart the loop against the new artifact.`);
   } else if (r >= FIX_LOOP_ROUND_CAP) {
-    g.push(`${last.file}: fix loop hit the ${FIX_LOOP_ROUND_CAP}-round cap with ${fr} finding(s) still open (profile ${known.join(', ')}) — escalate to a human rather than iterating. Past this point the marginal yield is dominated by reviewer false positives.`);
+    notes.push(`ROUND CAP — the audit loop ENDS at round ${FIX_LOOP_ROUND_CAP} (owner ruling): ${fr} finding(s) in ${last.file} (profile ${known.join(', ')}). Fix them in-round and record their \`resolution\` in the ledger; do NOT run another audit round.`);
   } else {
     g.push(`${last.file}: fix loop not converged — ${fr} new confirmed finding(s) in the final round`);
   }
@@ -2331,6 +2346,17 @@ function checkA14VersionSiblings() {
     for (const s of siblings) {
       if (s.endsWith('/HEAD')) continue;
       try { if (git(repo, 'rev-parse', s) === headSha) continue; } catch { continue; }
+      // A REF ALREADY IN THIS BRANCH'S HISTORY IS NOT A COMPETING CLAIMANT — its version
+      // claim IS ours. The sibling list is built with `--no-merged <integration target>`,
+      // which is the wrong reference point: a ref can be unmerged into the epic tip while
+      // already merged into the HEAD being graded (because HEAD merged it). It then
+      // "collides" with itself. (MEASURED, ziee-ai/agent-kit#14: grading an epic tip after
+      // merging five dsh/* branches, A14 fired five times and 3 of 5 were ancestors of
+      // HEAD; a later run reported 9 hits of which 6 were ancestors — every one a phantom
+      // the run then had to hand-waive.) Same error as counting already-merged refs in the
+      // artifact sweep, which this file already avoids; the reasoning simply was not
+      // carried across.
+      try { git(repo, 'merge-base', '--is-ancestor', s, 'HEAD'); continue; } catch { /* genuinely not in our history */ }
       const sv = declaredVersionAt(s, path);
       if (sv && sv === mine) {
         // WAIVABLE, per-ref, with a REASON — because "unmerged" is not the same as
@@ -2411,7 +2437,7 @@ function checkA12SelfRevert() {
   const lines = t.split(/\r?\n/);
   const start = lines.findIndex((l) => /^#{2,}\s*SELF-?REVERT PROOF\b/i.test(l));
   if (start < 0) {
-    g.push('A12: TEST_RESULTS.md has no `## SELF-REVERT PROOF` section — the change is not proven load-bearing. Revert the WHOLE fix commit (`git checkout <fix>^ -- $(git diff-tree --no-commit-id --name-only -r <fix>)`), re-run the gated suite, and record which test went RED. If NOTHING reddens, the change has no enforcement: fix that before phase 8 — it is not deferrable to a follow-up.');
+    g.push('A12: TEST_RESULTS.md has no `## SELF-REVERT PROOF` section — the change is not proven load-bearing. Revert the WHOLE fix commit (`git checkout <fix>^ -- $(git diff-tree --no-commit-id --name-only -r <fix>)`), re-run the TARGETED tests for that change (never the full suite), and record which test went RED. If NOTHING reddens, the change has no enforcement: fix that before phase 8 — it is not deferrable to a follow-up.');
     return g;
   }
   const body = [];
@@ -2554,16 +2580,18 @@ function phase8() {
   if (feWs.size > 0) {
     const checked = new Map();
     for (const ln of t.split(/\r?\n/)) {
-      const m = RE_UI_CHECK.exec(ln);
+      const m = RE_TARGETED.exec(ln) || RE_UI_CHECK.exec(ln);
       if (m) checked.set(m[1].trim().toLowerCase(), m[2].toUpperCase());
     }
     for (const w of feWs) {
       const v = checked.get(w.toLowerCase());
-      if (!v) g.push(`TEST_RESULTS.md: frontend workspace "${w}" was touched but no "npm run check (${w}): PASS" line is present (tsc + biome guardrails + lint:colors/settings-field + check:kit-manifest/testid-registry/design-spec/gallery-coverage/state-matrix). A6: the gallery + gate:ui + runtime-health IS the browser-verify harness — "I can't verify in a browser" is NOT a valid gap; run it against the mock-API gallery build.`);
-      else if (v !== 'PASS') g.push(`TEST_RESULTS.md: "npm run check (${w})" is ${v}, not PASS.`);
+      if (!v) g.push(`TEST_RESULTS.md: frontend workspace "${w}" was touched but no "targeted (${w}): PASS — <commands>" line is present. Record the TARGETED checks you ran for the files this branch touched — tsc for the workspace, the vitest files and e2e specs that cover them, and the lints those files trip. Do NOT run the full suite (\`npm run check\`, \`just check\`, every vitest/e2e): only the merge gate runs everything.`);
+      else if (v !== 'PASS') g.push(`TEST_RESULTS.md: "targeted (${w})" is ${v}, not PASS.`);
     }
-    // A7: boot/runtime canary — baseline-controlled (branch no worse than base).
-    const canary = parseCanaryLines(t);
+    // A7: boot/runtime canary — OPT-IN since 2026-10-09 (LIFECYCLE_REQUIRE_A7=1 in
+    // .claude/app.config). It runs the whole gallery/runtime sweep, i.e. a full
+    // suite; the merge gate is where full sweeps belong. Off by default.
+    const canary = APP.LIFECYCLE_REQUIRE_A7 === '1' ? parseCanaryLines(t) : null;
     // Only PASTED OUTPUT can contradict a recorded result. Narrative prose about
     // earlier red runs cannot — and treating it as contradiction PUNISHES HONEST
     // DISCLOSURE: an author who hides four failed attempts passes, one who
@@ -2580,7 +2608,7 @@ function phase8() {
       }
       return undefined;
     })();
-    for (const w of feWs) {
+    for (const w of canary ? feWs : []) {
       const v = canary.get(w.toLowerCase());
       if (!v) {
         g.push(`A7: TEST_RESULTS.md: no boot/runtime canary line for "${w}" — record either "gate:ui (${w}): PASS" or the baseline-controlled form "gate:ui (${w}): branch <N> vs base <M>" (branch must be no worse than base). Run runtime-health boot + console-error + ErrorBoundary against the REAL prod build, BEFORE the specs; a green e2e can still ship a non-booting app or a root crash on an un-exercised path.`);

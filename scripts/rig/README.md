@@ -124,6 +124,7 @@ reports), `RIG_TEST_LOG_DIR` (`<run>/test-affected`, where the parser looks for 
 | `RIG_REGEN_CMD` | unset (P3 skipped, loudly) | P3: regenerate every generated file in the worktree; the tree must stay clean |
 | `RIG_REGEN_IGNORE_RX` | `"?generated_at"?\|[Gg]enerated[ _]?(at\|on)?:` | P3: a diff whose only changed lines match is a timestamp, not stale content |
 | `RIG_STATIC_CMD` | unset (P4 skipped, loudly) | P4: every static check, keep-going; writes `{out}/SUMMARY` lines `<leg> rc=<n>` |
+| `RIG_UNIT_CMD` | unset (P5 skipped, loudly) | P5: the app's fast in-process unit tests (e.g. `cd src-app && cargo test -p app --lib --no-fail-fast`); they carry spec↔code drift pins and take about a minute |
 
 In `RIG_REGEN_CMD` / `RIG_STATIC_CMD`, `{wt}` is the rig worktree and `{out}` the check's output dir; both run in the worktree
 through `RIG_RUN_WRAPPER`. P2 also refuses a moved submodule pin unless `$RIG_STATE/PIN-OK` holds the sha (owner-approved).

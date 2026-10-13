@@ -457,7 +457,10 @@ merge the newest integration branch, regenerate, and **re-check every seam row a
 silent adaptation. Decide "the providers have landed" from the item's dependencies directly (each one merged, or
 landed on the integration branch) — never from a derived "ready to build" flag: the pre-plan's own branch usually makes
 status tooling call the item *building*, and a building item is never "ready", so the continue step silently never fires
-(*measured:* three pre-plans sat with every provider landed until this was found). Pre-plan runs are side runs: name their
+(*measured:* three pre-plans sat with every provider landed until this was found). **Continue early:** a provider does not have to land first — once its own build has written `PHASE6-READY` (its phase-5
+code is on its branch), the dependent continues by merging that provider branch at the finish-line sha, and re-checks the
+seams when the provider lands (the hand-off merge). Each dependency level then costs one phase-5 build, not a build plus the
+land hand-off; on a deep chain that is most of the critical path. Pre-plan runs are side runs: name their
 worktrees so they never take a build slot. *Measured
 (a consumer app):* 73 of 84 pre-plans reached `PHASE4-READY` while their providers were still in the build queue.
 

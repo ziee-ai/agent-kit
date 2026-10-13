@@ -8,6 +8,9 @@
 #   P2 hygiene      conflict markers, parentless commits, submodule pins == origin/main, shared JSON re-serialized
 #   P3 regen        $RIG_REGEN_CMD must leave the tree CLEAN (stale generated files) — skipped, loudly, when unset
 #   P4 static legs  $RIG_STATIC_CMD: every static check, keep-going (writes {out}/SUMMARY) — skipped, loudly, when unset
+#   P5 fast unit    $RIG_UNIT_CMD: the app's in-process unit tests (no servers, no browser; e.g. `cargo test --lib`) — they
+#                   include spec<->code drift pins and run in about a minute, where the full gate reaches them ~50 min in
+#                   (measured: a permission-matrix drift). Skipped, loudly, when unset.
 #
 # Runs in the persistent rig worktree (rig-worktree.sh) detached at <sha>; nothing is pushed. Config: env, then $RIG_STATE/rig.env;
 # see README.md. In RIG_REGEN_CMD / RIG_STATIC_CMD, {wt} = the rig worktree and {out} = this check's output dir.
@@ -73,6 +76,14 @@ if [ -n "${RIG_STATIC_CMD:-}" ]; then
   git checkout -q -f "$SHA" && git clean -fdq
 else echo "P4-static SKIPPED — RIG_STATIC_CMD not configured; no static legs ran" | tee -a "$OUT/SUMMARY"; fi
 echo "P4 done $(date +%T)" >> "$OUT/TIMES"
+
+# --- P5 fast in-process unit tests ---
+if [ -n "${RIG_UNIT_CMD:-}" ]; then
+  $WRAP "$(sub "$RIG_UNIT_CMD" "$OUT")" > "$OUT/P5-unit.log" 2>&1; r=$?
+  res P5-unit $r "$(grep -E '^test [^ ]+ \.\.\. FAILED|^\s*(FAIL|✗|not ok)\b' "$OUT/P5-unit.log" | head -5 | tr -s ' ' | tr '\n' ';')"
+  git checkout -q -f "$SHA" && git clean -fdq
+else echo "P5-unit SKIPPED — RIG_UNIT_CMD not configured; no unit tests ran in the pregate" | tee -a "$OUT/SUMMARY"; fi
+echo "P5 done $(date +%T)" >> "$OUT/TIMES"
 
 echo "PREGATE-FAILED=$fail" | tee -a "$OUT/SUMMARY"; echo "end $(date +%T)" >> "$OUT/TIMES"
 exit $fail

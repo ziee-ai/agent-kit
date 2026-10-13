@@ -454,7 +454,11 @@ A node that is frozen and blocked ONLY by providers that are still building does
 assumed-built rule as Phase 2), and stop at `PHASE4-READY <sha>`. When its providers land, continue it to phase 5:
 merge the newest integration branch, regenerate, and **re-check every seam row against the providers' real code**. A
 `PROV` that landed differently from its frozen text is an escalation (scoped re-reconciliation, rule 3 above), never a
-silent adaptation. Pre-plan runs are side runs: name their worktrees so they never take a build slot. *Measured
+silent adaptation. Decide "the providers have landed" from the item's dependencies directly (each one merged, or
+landed on the integration branch) — never from a derived "ready to build" flag: the pre-plan's own branch usually makes
+status tooling call the item *building*, and a building item is never "ready", so the continue step silently never fires
+(*measured:* three pre-plans sat with every provider landed until this was found). Pre-plan runs are side runs: name their
+worktrees so they never take a build slot. *Measured
 (a consumer app):* 73 of 84 pre-plans reached `PHASE4-READY` while their providers were still in the build queue.
 
 ### Build stacked on the integration branch, not on main

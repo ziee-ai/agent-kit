@@ -447,6 +447,28 @@ Hand off to `feature-orchestration` (or sequential `feature-lifecycle` runs) for
 the bottom-up build + merge. Budget the reconciliation + final-integration steps as
 REAL work (the CPM critique: the join node is a costed task, not free).
 
+### Pre-plan dependents while their providers build
+
+A node that is frozen and blocked ONLY by providers that are still building does not wait idle. Run its
+`feature-lifecycle` **phases 1–4 now**, against the providers' FROZEN `Provides` (need-driven design — the same
+assumed-built rule as Phase 2), and stop at `PHASE4-READY <sha>`. When its providers land, continue it to phase 5:
+merge the newest integration branch, regenerate, and **re-check every seam row against the providers' real code**. A
+`PROV` that landed differently from its frozen text is an escalation (scoped re-reconciliation, rule 3 above), never a
+silent adaptation. Pre-plan runs are side runs: name their worktrees so they never take a build slot. *Measured
+(dental):* 73 of 84 pre-plans reached `PHASE4-READY` while their providers were still in the build queue.
+
+### Build stacked on the integration branch, not on main
+
+A dependent can start once its providers are in a gated combine/integration branch — it does not need them on main.
+Cut it from the newest such branch and merge that branch again only at its hand-off points (see `feature-lifecycle`,
+*Merge the integration branch only at the hand-off points*).
+
+### Branch hygiene: a fresh branch gets a marker commit before its first push
+
+Tooling decides MERGED by ancestry (`git merge-base --is-ancestor <branch> main`), and a freshly cut branch with zero
+commits IS an ancestor of the branch it was cut from. Push it with a marker commit (e.g. the run's STATUS stub) first.
+*Measured:* two zero-commit pre-plan branches read as MERGED, and two dependents were falsely marked ready.
+
 **As each item merges, CLOSE its GitHub issue** (with the merge commit sha) and
 close the epic issue when the last child lands — see *Track every node as a GitHub
 issue* above. This is the step most easily forgotten in the build rush; the board
@@ -491,5 +513,7 @@ every downstream-bound `PROV` named by an `[acceptance]` test in its item's plan
   discovery.
 - **The contract is downstream-owned and executable.** An acceptance test the
   provider proves and cannot weaken — the anti-reward-hack.
+- **Never idle a dependency level.** Pre-plan dependents while providers build; land providers at phase 5; build
+  dependents on the integration branch. The critical path is the number of levels × the wait per level.
 - **Plans, not builds.** Phases 0–4 build nothing. "Assume built" = plan against
   the declared contract, recorded in `ASSUMPTIONS.md`.

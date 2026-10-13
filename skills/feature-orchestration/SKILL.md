@@ -138,6 +138,85 @@ C5 lifecycle-strip / P2 no-dropped-content. **Note:** `merge-gate` needs `just`
 in PATH for C3 — if absent it should skip, not crash (bug fixed; if you hit an
 ENOENT crash, the manual protocol above is equivalent).
 
+## Landing: gate v2 (a batch reaches main through ONE full gate)
+
+The full gate takes hours, and a gate that stops at its first red and is re-run after every fix costs one full cycle
+per failure. Three owner rules (dental, 2026-10-12) replace that:
+
+1. **Never run the full suite twice.** A batch gets the full gate at most once. When it fails, re-run each failure
+   alone; a flake counts as a pass; a real failure is fixed and then **only the failed items** are re-run.
+2. **Never stop at the first failure.** Every check and test runs to the end; all failures are gathered and fixed at once.
+3. **Catch what you can before the tests.** A cheap pregate runs first.
+
+The loop, per candidate tip of the integration branch:
+
+```
+candidate tip (quiet for ~60 s)
+ ├─ 1. PREGATE (minutes, keep-going; exit = number of red checks)
+ │     structural   merge-gate.mjs --skip-heavy (C4 stale, C2 migrations, staging merge, P2, C5)
+ │     hygiene      conflict markers · parentless commits · submodule pins == main · shared JSON re-serialized
+ │     regen-clean  the regen + API-schema regen leave the tree clean (timestamp-only diffs ignored)
+ │     static legs  every static check (types, lint, clippy, spec lints) to the end
+ │   red → HOLD with the whole list; the full gate never starts
+ ├─ 2. RECHECK (only when the tip descends from the recorded REAL-FAILS sha — i.e. it is the fix)
+ │     re-run ONLY the recorded real failures (1 try; an INTERMITTENT one needs 3/3 alone)
+ │     anything still red → broken into named tests → each alone 3× (flake rule)
+ │     + the fix commits' impacted tests (the app's test selector with --base <failed sha>)
+ │   green → MERGE, no second full gate · red → REAL-FAILS advances to this tip, HOLD
+ └─ 3. FULL GATE (at most once per batch), with keep-going check and test commands
+       green → MERGE
+       red   → name every failure → re-run each ALONE 3×
+                all 3/3 green (flakes) → MERGE (tip moved meanwhile? record an EMPTY REAL-FAILS so the next tip is a recheck)
+                any real → write REAL-FAILS (sha + items) + HOLD
+```
+
+- **Flake rule:** a failure is a flake only if it passes **3 of 3** runs alone on the same sha. 2/3 is real. A real
+  failure that passed at least once alone is **intermittent** and is recorded with `"tries": 3`, so its recheck needs
+  3/3 again — a one-try recheck would pass a 2-in-3 failure two times in three. *Measured (dental c240):* an auth-store
+  test went pass/pass/fail alone; the one-try recheck would have merged it unexamined.
+- **Keep-going commands.** `just` dependency lists and `npm` `&&` chains stop at the first red step, so the gate's
+  check/test commands must be keep-going variants: a step runner that runs every leg and exits non-zero if any failed
+  (`scripts/run-steps.mjs` here), `cargo test --no-fail-fast`, nextest `--no-fail-fast`. Each run writes a per-step
+  report (cwd, command, rc, seconds) so the rig can re-run exactly the failed steps. *Measured:* the old gate hid a
+  batch's integration reds and warning regressions behind its first red leg; keep-going surfaced all 11 failures of a
+  batch in one pass.
+- **Name every failure.** Parse the gate's captured output (test runners' failure lines, per-step reports) into
+  re-runnable items, each with its own cwd and command. Strip the gate's staging-path prefix before naming a file,
+  including a persistent rig worktree's. A failure that cannot be named (a compile error) is real and needs a human.
+- **Keep the evidence.** Each run leaves a directory: pregate summary, per-call timing (start, end, seconds, rc) for
+  every `just`/`cargo` call the gate made, the named failures, every rerun's verdict and log. A gate's passing output
+  is otherwise discarded, and without timing you cannot tell where the hours go.
+- **Staging cleanup** removes only the gate's own throwaway staging directories — never a persistent rig worktree.
+- **Changing the rig** goes through a sandbox harness that drives the real loop against a throwaway repo with fake
+  pregate/gate/rerun commands (every external step overridable by env for this), and every change ships with a
+  scenario that **fails on the old script and passes on the new one**. Deploy between gates only, by temp file + `mv`
+  (a running bash script must never be edited in place).
+
+Reference implementation: the dental app's `ops/rig/` (loop `auto-merge.sh`, pregate, failure parser, alone-rerunner,
+recheck flake pass, timing shims, the two sandbox harnesses) and `docs/MERGE-GATE.md`. This kit ships the portable
+pieces: `scripts/run-steps.mjs` (keep-going step runner) and `scripts/rig/rerun-failures.sh` + `rerun-test.sh` (the
+flake-rule runner and its harness).
+
+### Repo conventions the gate depends on
+
+- **Generated files never conflict.** Mark every proven-generated file `merge=regen` in `.gitattributes` with the
+  driver `git config merge.regen.driver true` (keep one side), and regenerate after every merge; the pregate refuses a
+  stale generated file. List a file only after proving it fully derived: blank it, regenerate, byte-identical apart from
+  timestamps. Never list a hand-maintained file.
+- **Tree-mutating test suites run serially** (`node --test --test-concurrency=1` for mutation batteries — concurrent
+  ones overwrite each other's mutations).
+- **Wrappers pass flags, never env,** to tools that nested processes also run (an exported `JUST_VERBOSE` from a timing
+  wrapper changed the output that a nested test asserted on).
+
+## Epic throughput — no idle levels, no idle runs
+
+- **Land providers at phase 5** and **pre-plan dependents** while providers build (`feature-lifecycle`, `epic-lifecycle`).
+- **Relaunch early stops mechanically.** A run that exited without a finish line (`feature-lifecycle`, *The finish
+  line*) is relaunched by a tick, not noticed by a human. Read the finish line on the branch's first-parent history.
+- **Side runs never take build slots.** Pre-plans and reviews use their own worktree prefix.
+- *Measured (dental, five builds):* about half of the wall time was runs not alive; model generation was 51–78% of
+  the working time; the tests and builds themselves were 10–20%. Idle time and landing waits were the biggest levers, not test speed.
+
 ## Stale branches
 As main moves, finished branches fall behind (this session saw one 116 behind).
 A stale branch WILL hit migration/regen collisions at merge. Have it **rebase on

@@ -169,6 +169,9 @@ for attempt in $(seq 1 "${RIG_MAX_ATTEMPTS:-200}"); do
     # The flake rule for the fix's impacted tests too: name the delta's failures, re-run each alone 3x; all 3/3 green = flakes.
     if [ $r2 != 0 ]; then
       : > "$RUN/mg-empty.log"; RIG_GATED_SHA=$HEAD_AT RIG_SRC_REPO=$RIG_REPO $FAILURES_CMD "$RUN/mg-empty.log" "$RUN/delta" > "$RUN/delta/failures.out" 2>&1
+      # a red delta that NAMES nothing is not "all flakes" (an empty re-run exits 0): record it UNPARSED so REAL-FAILS holds it
+      python3 -c "import json,os;p='$RUN/delta/FAILURES.json';d=json.load(open(p)) if os.path.exists(p) else {'structural':[],'items':[],'unparsed':[]}
+if not d['items'] and not d['unparsed'] and not d['structural']: d['unparsed'].append('the fix delta failed but no failure could be named'); json.dump(d,open(p,'w'),indent=2)"
       if [ -f "$RUN/delta/FAILURES.json" ] && $RERUN_CMD "$HEAD_AT" "$RUN/delta/FAILURES.json" "$RUN/delta/rerun" > "$RUN/delta/rerun.log" 2>&1; then
         r2=0; echo "$(date +%H:%M) fix-delta reds were flakes (every named failure green alone 3/3) — $(head -1 "$RUN/delta/failures.out")"
       fi

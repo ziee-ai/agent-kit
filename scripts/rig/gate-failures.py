@@ -84,7 +84,9 @@ def parse_tests(txt):
             sel = '--lib' if binary == 'lib' else f'--test {binary}'
             add('rust', m.group(1), CARGO_CWD, f'cargo test{PKG} {sel} -- --exact {m.group(1)} --test-threads=1'); found += 1; continue
         # cargo nextest: "FAIL [ 1.2s] (3/9) <crate>[::<binary>] <test>"
-        m = re.match(r'^\s+(?:FAIL|SIGSEGV|SIGABRT|TIMEOUT) \[[^\]]*\]\s+(?:\(\d+/\d+\)\s+)?([A-Za-z0-9_-]+)(?:::(\S+))?\s+(\S+)$', line)
+        # nextest final result: "FAIL [..] (n/N)" or, with --retries, "TRY 3 FAIL [..] ( 505/1993)". An intermediate retry shows
+        # "(─────────)" and is not a result. Measured: three "TRY 3 FAIL"s went unnamed and the run read as all-flakes.
+        m = re.match(r'^\s+(?:TRY \d+ )?(?:FAIL|SIGSEGV|SIGABRT|TIMEOUT) \[[^\]]*\]\s+(?:\(\s*\d+/\d+\)\s+)?([A-Za-z0-9_-]+)(?:::(\S+))?\s+(\S+)$', line)
         if m:
             sel = '--lib' if not m.group(2) else f'--test {m.group(2)}'
             add('rust', m.group(3), CARGO_CWD, f'cargo test -p {m.group(1)} {sel} -- --exact {m.group(3)} --test-threads=1'); found += 1; continue

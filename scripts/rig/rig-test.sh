@@ -52,7 +52,8 @@ EOF
 cat > $FK/delta <<EOF
 #!/bin/bash
 mkdir -p "\$3/test-affected"; rc=\$(cat $CTL/delta 2>/dev/null || echo 0)
-[ "\$rc" = 0 ] || printf '     Running tests/integration_tests.rs (x)\ntest fake::delta_test ... FAILED\n' > "\$3/test-affected/gate-rust-full-tier.log"
+if [ -f $CTL/delta_noname ]; then [ "\$rc" = 0 ] || printf 'error: test run failed (nothing nameable)\n' > "\$3/test-affected/gate-rust-nextest.log"
+else [ "\$rc" = 0 ] || printf '     Running tests/integration_tests.rs (x)\ntest fake::delta_test ... FAILED\n' > "\$3/test-affected/gate-rust-full-tier.log"; fi
 exit \$rc
 EOF
 chmod +x $FK/*
@@ -148,6 +149,13 @@ echo green > $CTL/rerun; H12b=$(commit s12b); run_rig_nodelta s12b
 grep -q 'DELTA SKIPPED' $SB/rig-s12b.log && ok "S12 unconfigured delta logged as SKIPPED" || bad "S12 delta skip not logged ($(tail -2 $SB/rig-s12b.log | tr '\n' ' '))"
 on_main $H12b && ok "S12 recheck merged" || bad "S12 recheck NOT merged"
 git -C $SB/primary log -1 --format=%B origin/main | grep -q 'SKIPPED' && ok "S12 merge message records the skipped delta" || bad "S12 merge message hides the skipped delta"
+# S14 (kit) a red fix delta whose output NAMES nothing is not "all flakes" -> held, REAL-FAILS carries it unparsed
+rm -f $ST/failed-sha $ST/REAL-FAILS.json; echo 0 > $CTL/delta; echo "0.5 0.5 0.5 1/1 1" > $CTL/loadavg
+echo fail > $CTL/gate; echo real > $CTL/rerun; H14=$(commit s14a); run_rig s14a
+echo green > $CTL/rerun; echo 1 > $CTL/delta; touch $CTL/delta_noname; echo flaky > $CTL/rerun_delta; H14b=$(commit s14b); run_rig s14b
+on_main $H14b && bad "S14 merged past an unnamed red delta" || ok "S14 unnamed red delta held"
+grep -q 'no failure could be named' $ST/REAL-FAILS.json 2>/dev/null && ok "S14 REAL-FAILS carries it unparsed" || bad "S14 not recorded unparsed"
+rm -f $CTL/delta_noname; echo 0 > $CTL/delta; echo real > $CTL/rerun_delta
 # S0 the required config fails fast with a clear message
 env -u RIG_REPO RIG_STATE=$SB/empty-state bash "$RIG" > $SB/rig-s0.log 2>&1; rc=$?
 [ $rc = 2 ] && grep -q 'RIG_REPO is required' $SB/rig-s0.log && ok "S0 missing RIG_REPO fails fast" || bad "S0 missing RIG_REPO: rc=$rc"

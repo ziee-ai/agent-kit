@@ -15,7 +15,8 @@ Config (env; every default is generic — see README.md):
   RIG_CARGO_CWD          repo-relative dir cargo runs in — default '.'
   RIG_CARGO_CHECK_CMD    re-run command for a failed C1 cargo-check stage — default 'cargo check [-p pkg] --all-targets'
   RIG_UI_CWD             repo-relative dir the JS test runners run in — default '.'
-  RIG_E2E_CMD            playwright re-run, {spec} = path:line — default 'npx playwright test {spec} --workers=1'
+  RIG_E2E_CMD            playwright re-run, {spec} = `path -g '<describe path + title>$'` (or path:line when the report line
+                         carries no title) — default 'npx playwright test {spec} --workers=1'
   RIG_VITEST_CMD         vitest re-run, {file} — default 'npx vitest run {file}'
   RIG_NODE_TEST_CMD      node:test re-run, {file} relative to its cwd — default 'node --test {file}'
   RIG_UI_NODE_TEST_CMD   node:test re-run for files under $RIG_UI_CWD/src/ — default: RIG_NODE_TEST_CMD
@@ -26,7 +27,7 @@ Config (env; every default is generic — see README.md):
   RIG_GATED_SHA, RIG_SRC_REPO   planted-compile-error filter (see the end of this file)
 Staging prefixes stripped by default: $RIG_WORKTREE, $RIG_REPO, children of $RIG_STAGING_DIRS, and any `.merge-gate-*` dir (the
 kit merge-gate's staging trees)."""
-import sys, os, re, json, glob, subprocess
+import sys, os, re, json, glob, subprocess, shlex
 
 mg, td = sys.argv[1], sys.argv[2]
 E = os.environ.get
@@ -91,10 +92,16 @@ def parse_tests(txt):
             sel = '--lib' if not m.group(2) else f'--test {m.group(2)}'
             add('rust', m.group(3), CARGO_CWD, f'cargo test -p {m.group(1)} {sel} -- --exact {m.group(3)} --test-threads=1'); found += 1; continue
         # playwright: "  1) [chromium] › tests/e2e/x.spec.ts:12:3 › title"
-        m = re.match(r'^\s+\d+\) \[[\w-]+\] › (\S+?\.spec\.[cm]?[jt]sx?):(\d+):\d+ ›', line)
+        m = re.match(r'^\s+\d+\) \[[\w-]+\] › (\S+?\.spec\.[cm]?[jt]sx?):(\d+):\d+ › ?(.*?)\s*$', line)
         if m:
             spec = from_cwd(rel(m.group(1)), UI_CWD) if under(rel(m.group(1)), UI_CWD) else rel(m.group(1))
-            add('e2e', f'{rel(m.group(1))}:{m.group(2)}', UI_CWD, E2E_CMD.replace('{spec}', f'{spec}:{m.group(2)}')); found += 1; continue
+            # Re-run by FILE + exact TITLE, not file:line: a fix that adds a line above the test (an import) shifts it, and the
+            # recheck's `file:line` then lists NO test. -g matches the describe path + title joined by spaces; escaped and
+            # end-anchored it selects that test only (and only the failed case of a parameterised one). The id stays file:line.
+            title = ' '.join(x.strip() for x in m.group(3).split(' › ') if x.strip())
+            title = re.sub(r'\s+\(\d+(?:\.\d+)?m?s\)$', '', title)
+            tgt = f'{spec} -g {shlex.quote(re.escape(title) + "$")}' if title else f'{spec}:{m.group(2)}'
+            add('e2e', f'{rel(m.group(1))}:{m.group(2)}', UI_CWD, E2E_CMD.replace('{spec}', tgt)); found += 1; continue
         # vitest: " FAIL  src/x.test.tsx > suite > name"
         m = re.match(r'^\s*FAIL\s+(\S+\.(?:test|spec)\.[cm]?[jt]sx?)\b', line)
         if m:

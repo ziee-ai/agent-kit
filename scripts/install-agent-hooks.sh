@@ -61,6 +61,15 @@ if [ -d "$TOP/.lifecycle" ]; then
     # stage's open round cannot fail this owner's push.
     SCOPE_ARGS=""
     [ -n "${LIFECYCLE_SCOPE:-}" ] && SCOPE_ARGS="--scope $LIFECYCLE_SCOPE"
+    # --base: set LIFECYCLE_BASE=<ref> when this branch stacks on an UNLANDED provider branch, so the gate grades
+    # this branch's own diff (base..HEAD) instead of charging the provider's carried code to it (default: origin/main).
+    # The ref must resolve and be an ancestor of HEAD, else the push is refused — a typo cannot silently widen or skip.
+    if [ -n "${LIFECYCLE_BASE:-}" ]; then
+      if ! git -C "$TOP" merge-base --is-ancestor "$LIFECYCLE_BASE" HEAD 2>/dev/null; then
+        echo "pre-push: LIFECYCLE_BASE=$LIFECYCLE_BASE does not resolve to an ancestor of HEAD — refusing" >&2; exit 1
+      fi
+      SCOPE_ARGS="$SCOPE_ARGS --base $LIFECYCLE_BASE"
+    fi
     # Run UNSCOPED first. This is the common case, and it keeps behaviour
     # byte-identical for every non-epic layout: same command, same output, same code.
     # shellcheck disable=SC2086

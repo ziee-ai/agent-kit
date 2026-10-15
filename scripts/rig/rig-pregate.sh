@@ -8,6 +8,7 @@
 #   P2 hygiene      conflict markers, parentless commits, submodule pins == origin/main, shared JSON re-serialized
 #   P3 regen        $RIG_REGEN_CMD must leave the tree CLEAN (stale generated files) — skipped, loudly, when unset
 #   P4 static legs  $RIG_STATIC_CMD: every static check, keep-going (writes {out}/SUMMARY) — skipped, loudly, when unset
+#                   ($OUT/static/STOP appears when HEAD moves past the gated sha — RIG_STATIC_CMD may honour it, see README)
 #   P5 fast unit    $RIG_UNIT_CMD: the app's in-process unit tests (no servers, no browser; e.g. `cargo test --lib`) — they
 #                   include spec<->code drift pins and run in about a minute, where the full gate reaches them ~50 min in
 #                   (measured: a permission-matrix drift). Skipped, loudly, when unset.
@@ -71,8 +72,18 @@ echo "P3 done $(date +%T)" >> "$OUT/TIMES"
 
 # --- P4 every static leg, keep-going ---
 if [ -n "${RIG_STATIC_CMD:-}" ]; then
-  mkdir -p "$OUT/static"; $WRAP "$(sub "$RIG_STATIC_CMD" "$OUT/static")" > "$OUT/P4-static.log" 2>&1; r=$?
-  res P4-static-legs $r "$(grep -E 'rc=[1-9]' "$OUT/static/SUMMARY" 2>/dev/null | awk '{print $1}' | tr '\n' ' ')"
+  # A superseded pregate stops early: when the repo's HEAD moves past $SHA (a fix landed while this ran), a background poll
+  # (RIG_PREGATE_STOP_POLL, default 30 s; 0 = off) writes $OUT/static/STOP. A static command that honours it skips its remaining
+  # legs and counts each as a failure, so the pregate fails fast (never green) and the rig reaches the new tip sooner.
+  mkdir -p "$OUT/static"; stopw=
+  if [ "${RIG_PREGATE_STOP_POLL:-30}" != 0 ]; then
+    full=$(git -C "$RIG_REPO" rev-parse "$SHA^{commit}" 2>/dev/null || echo "$SHA")
+    ( while sleep "${RIG_PREGATE_STOP_POLL:-30}"; do h=$(git -C "$RIG_REPO" rev-parse HEAD 2>/dev/null)
+        [ -n "$h" ] && [ "$h" != "$full" ] && { echo "superseded by ${h:0:9} at $(date +%T)" > "$OUT/static/STOP"; break; }; done ) & stopw=$!
+  fi
+  $WRAP "$(sub "$RIG_STATIC_CMD" "$OUT/static")" > "$OUT/P4-static.log" 2>&1; r=$?
+  [ -n "$stopw" ] && { kill "$stopw" 2>/dev/null; wait "$stopw" 2>/dev/null; }
+  res P4-static-legs $r "$(grep -E 'rc=[1-9]|SKIPPED-SUPERSEDED' "$OUT/static/SUMMARY" 2>/dev/null | awk '{print $1}' | tr '\n' ' ')"
   git checkout -q -f "$SHA" && git clean -fdq
 else echo "P4-static SKIPPED — RIG_STATIC_CMD not configured; no static legs ran" | tee -a "$OUT/SUMMARY"; fi
 echo "P4 done $(date +%T)" >> "$OUT/TIMES"

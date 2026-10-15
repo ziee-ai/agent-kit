@@ -46,6 +46,7 @@ candidate tip (no new commits for RIG_QUIET_SECS)
 | `rig-test.sh` | sandbox harness for the loop (no app needed) |
 | `rerun-test.sh` | sandbox harness for `rerun-failures.sh` |
 | `gate-failures-e2e-test.sh` | regression check: a playwright failure is re-run by file + exact title (`-g`), so a fix that shifts the test's line still re-runs it |
+| `pregate-early-stop-test.sh` | regression check: a pregate whose sha is superseded (HEAD moved) writes `$OUT/static/STOP`; one whose sha stays current never does |
 | `recheck-flake-test.sh` | regression check: the recheck flake pass re-runs each item's real command (6- and 5-column verdict rows) |
 
 Things an app may add on its side (not shipped here): a phase-6 / audit dispatcher, a pre-plan dispatcher, build idle/step timing
@@ -207,3 +208,11 @@ copy of `auto-merge.sh` to test a change before deploying it.
 2. Add a scenario for any new path and show it **fails on the old script and passes on the new one** (two-direction).
 3. **Deploy between gates only, by temp file + `mv`. A running bash script must never be edited in place** — bash reads the
    script as it executes, so an in-place write corrupts the running loop. Then `rig-restart.sh` and watch its first real run.
+
+## Early stop for a superseded pregate
+
+While P4 runs, `rig-pregate.sh` polls the repo's HEAD every `RIG_PREGATE_STOP_POLL` seconds (default 30; `0` disables it). When
+HEAD moves past the gated sha (a fix landed mid-pregate), it writes `$OUT/static/STOP`. `RIG_STATIC_CMD` receives `{out}` =
+`$OUT/static`; a static runner that checks for `{out}/STOP` before each leg can skip the remaining legs and record each as
+`<leg> SKIPPED-SUPERSEDED` (counted as a failure in P4's line, so the pregate is never green), and the rig moves to the new tip
+instead of finishing a pregate whose result is already moot. A runner that ignores the file just runs to completion, as before.

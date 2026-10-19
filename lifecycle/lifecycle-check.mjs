@@ -1556,7 +1556,11 @@ function phase3() {
       g.push(`TESTS.md: ${id} has no covering [acceptance] test — every design invariant must be an executable acceptance test. Add e.g. "- **TEST-N** (tier: e2e) [acceptance] [invariant: ${id}] file: \`...\` — asserts: <the invariant holds>".`);
   }
   for (const x of checkA5()) g.push(x); // A5 shrink-guard
-  for (const x of checkA10Enumeration()) g.push(x); // A10 restricted-user e2e must be enumerated
+  // At --all the feature is complete (its code diff exists), so the diff scan
+  // is authoritative even for the phase-3 artifact — a plan hit can only be a
+  // false positive then (the plan citing another node's atom). A standalone
+  // --phase 3 (before implementation) keeps the plan-text inference.
+  for (const x of checkA10Enumeration(wantAll ? introducesGatingPermByDiff : introducesGatingPerm)) g.push(x); // A10 restricted-user e2e must be enumerated
   return { present: true, gaps: g };
 }
 

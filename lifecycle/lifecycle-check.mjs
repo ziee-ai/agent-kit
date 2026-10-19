@@ -1315,14 +1315,23 @@ function planIntroducesGatingPerm() {
 function introducesGatingPerm() {
   return diffIntroducesGatingPerm() || planIntroducesGatingPerm();
 }
+// Once the code exists the diff scan is authoritative (see the comment above —
+// the plan inference exists only to substitute for code that has not been
+// written yet). At phase 8 / --all a plan hit can only be a false positive: a
+// plan citing ANOTHER module's (a sibling node's) permission atom, which this
+// diff does not mint.
+function introducesGatingPermByDiff() {
+  return diffIntroducesGatingPerm();
+}
 // The enumerated RESTRICTED-USER e2e specs (tier e2e + [negative-perm] tag).
 function negPermE2eTests(tests) {
   return (tests || []).filter((t) => t.tier === 'e2e' && t.negPerm);
 }
 // A10-enumeration: a gating perm is introduced but no restricted-user e2e is
-// enumerated in TESTS.md. Runs at phase 3 AND phase 8.
-function checkA10Enumeration() {
-  if (!introducesGatingPerm()) return [];
+// enumerated in TESTS.md. Runs at phase 3 (PLAN-text inference) and phase 8
+// (diff-authoritative, per the comment above).
+function checkA10Enumeration(permCheck = introducesGatingPerm) {
+  if (!permCheck()) return [];
   const tests = parseTests() || [];
   const neg = negPermE2eTests(tests);
   if (neg.length > 0) {
@@ -1340,8 +1349,8 @@ function checkA10Enumeration() {
   return [`A10: the diff introduces a user-facing permission (a X::use/::read/::manage defined in a modules/*/permissions.rs or granted in a migration) but TESTS.md enumerates no RESTRICTED-USER e2e spec — add a "(tier: e2e) [negative-perm]" test that logs in as a user LACKING the permission and asserts the feature's UI is ABSENT (walk slot → route → <Can> → usePermission), not just 403-on-use. Backend-deny (A9) + frontend-hidden (A10) are BOTH required for a new permission.${hint}`];
 }
 // A10-passing: at phase 8 the enumerated restricted-user e2e must PASS.
-function checkA10Passing(results) {
-  if (!introducesGatingPerm()) return [];
+function checkA10Passing(results, permCheck = introducesGatingPerm) {
+  if (!permCheck()) return [];
   const tests = parseTests() || [];
   const neg = negPermE2eTests(tests);
   if (neg.length === 0) return []; // enumeration gap already reported by checkA10Enumeration
@@ -2502,7 +2511,7 @@ function phase8() {
   for (const x of checkA4()) g.push(x);
   for (const x of checkA8()) g.push(x);
   for (const x of checkA9()) g.push(x);
-  for (const x of checkA10Enumeration()) g.push(x); // A10: restricted-user e2e must be enumerated
+  for (const x of checkA10Enumeration(introducesGatingPermByDiff)) g.push(x); // A10: restricted-user e2e must be enumerated
   for (const x of checkR2_5()) g.push(x);
   for (const x of checkA12SelfRevert()) g.push(x); // A12: the change must be load-bearing
   for (const x of checkA13StaleBase()) g.push(x);   // A13: measured against the tip you will merge into
@@ -2514,7 +2523,7 @@ function phase8() {
     const m = RE_RESULT.exec(ln);
     if (m) results.set(m[1], m[2].toUpperCase());
   }
-  for (const x of checkA10Passing(results)) g.push(x); // A10: restricted-user e2e must PASS
+  for (const x of checkA10Passing(results, introducesGatingPermByDiff)) g.push(x); // A10: restricted-user e2e must PASS
   for (const x of checkA11(results)) g.push(x); // A11: a PASS must be earned by THIS branch
   // Every [acceptance] test (a design-invariant proof) must PASS — not merely be
   // enumerated. Named explicitly so a dropped/soft invariant proof is unmissable

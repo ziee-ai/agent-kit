@@ -847,7 +847,12 @@ function dirtyWorkingTree() {
   try { out = git(repo, 'status', '--porcelain'); } catch { return []; }
   return out.split(/\r?\n/).map((s) => s.replace(/\r$/, '')).filter((l) => {
     if (!l.trim()) return false;
-    const path = l.slice(3);
+    // `l.slice(3)` assumes the two status columns survive; the git() wrapper
+    // .trim()s the captured output, so a LEADING entry loses its leading
+    // whitespace/columns and a submodule path starts at index 0 — parse the
+    // status prefix instead of slicing by offset.
+    const m = /^\s*(?:[MADRCU?!]{1,2})\s+(.+)$/.exec(l);
+    const path = m ? m[1] : l.slice(3);
     if (CLEAN_TREE_IGNORE.some((sub) => path.includes(sub))) return false; // noisy submodule(s), app.config-driven
     if (/\.log$/.test(path)) return false;                          // scratch logs
     return true;

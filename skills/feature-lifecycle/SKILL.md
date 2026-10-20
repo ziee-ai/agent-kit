@@ -1486,11 +1486,14 @@ every node branch in that epic was being pushed with `--no-verify`, by more than
 session, and the **pinned-guard integrity check — which was passing — was skipped on every
 one of those pushes.** Nobody intended that; it was collateral from one leg that could not
 run. A guard bypassed for a good reason is just as absent as one bypassed for a bad one.
+(Since agent-kit #537 the hook detects an epic root and runs the EPIC gate,
+`epic-check --wip`, instead of the feature gate, so an epic push is no longer refused
+for being an epic at all — and a `feat/<slug>` node branch with its own `.lifecycle/<slug>/`
+root is graded exactly like any other feature.)
 
 `--wip` exists so you should rarely be here at all: it passes an honest mid-round push and
 fails only a regression in a COMPLETED phase. If `--wip` fails, that is signal about your
-branch. If the gate is mis-scoped on an epic (`--dir` / `LIFECYCLE_SCOPE`), that is a
-tooling defect to report.
+branch.
 
 ## Notes
 

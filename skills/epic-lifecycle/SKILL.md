@@ -159,16 +159,20 @@ Under `.lifecycle/<epic>/` (committed on an `epic/<slug>` planning branch).
 (the graph, the reconciled contracts, the whole plan) are the deliverable; a
 machine move or a lost worktree wipes local-only work. Push `epic/<slug>` to origin
 as you go so the plan is durable and portable across machines — it is a WIP branch,
-NEVER merged to main. **Push it normally** (`git push -u origin epic/<slug>`); the
-pre-push hook runs `lifecycle-check --wip`, which passes an honest in-progress push.
-Same for each item's `feat/<slug>` build branch once building starts.
+NEVER merged to main. **Push it normally** (`git push -u origin epic/<slug>`): the
+pre-push hook DETECTS the epic root (branch `epic/<slug>` + `.lifecycle/<slug>/GRAPH.md`,
+or GRAPH.md/RECONCILE.md at the `.lifecycle` root) and runs **`epic-check --wip`** —
+the EPIC gate — instead of the feature gate. `--wip` mirrors the feature gate: the
+phases the epic has COMPLETED must be green, the one in progress is exempt, and a
+complete/frozen epic demands every phase. Same for each item's `feat/<slug>` build
+branch once building starts.
 
 **Do NOT bypass the hook with `--no-verify` if it refuses** — a bypass is the human's
 to grant, not yours, and it disables the ENTIRE hook (including checks that were
 passing), not just the leg that failed. Stop, report the verbatim hook output, file a
-tooling defect if that is what it is, and ask the human to push. On an epic this is
-most often a SCOPING problem — the gate auto-discovering the epic root instead of one
-node — so check `--dir` / `LIFECYCLE_SCOPE` before concluding anything else. See
+tooling defect if that is what it is, and ask the human to push. On an epic the
+pre-push hook no longer runs the feature gate against the epic root (agent-kit #537);
+if it still refuses, a COMPLETED epic phase genuinely has gaps — fix them. See
 *Never bypass a hook yourself* in the feature-lifecycle skill.
 
 - `GRAPH.md` — the dependency DAG, topological order, leaf set, assumed-available

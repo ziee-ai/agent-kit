@@ -57,6 +57,31 @@ test at plugins/a.test.ts:365:1
 === run-steps gate [2/2] FAIL rc=1 0.5s 12:00:13 :: node --test scripts/boom.test.mjs
 R
 fi
+if [ "\$mode" = npmtest ]; then
+  # the second measured live-ui defect (2026-10-24, run 1024-0455-ca05e20fd): the red step is `npm run test` — NO node file token in
+  # its report cmd, so the re-run comes from the TEMPLATE fallback — and node_tmpl gave the loader template only to files under
+  # src/. A .ts failure in plugins/ fell to plain `node --test`: three plugins/vite-plugin-idle-preload.test.ts re-runs failed
+  # ERR_MODULE_NOT_FOUND on an extensionless import and were recorded REAL (= a false real). The template's strip-types +
+  # TS-resolve loader flags must survive the fallback.
+  cat > "\$RIG_TIMING_DIR/gate.json" <<R
+{"name":"gate","results":[
+ {"step":1,"cwd":"$SB/primary/src-app/ui","cmd":"npm run test","rc":1}
+]}
+R
+  cat > "\$RIG_TIMING_DIR/just-1-gate-merge.log" <<R
+=== run-steps gate [1/1] START 12:00:00 :: npm run test
+✔ ok other (1ms)
+ℹ tests 2
+ℹ pass 1
+ℹ fail 1
+✖ failing tests:
+
+test at plugins/vite-plugin-idle-preload.test.ts:74:5
+✖ TEST-3 the REAL tree: the emitted map covers every manifest entry (non-vacuity floor) (10169.017482ms)
+  Error: x
+=== run-steps gate [1/1] FAIL rc=1 12.3s 12:00:12 :: npm run test
+R
+fi
 echo "  ✗ C9     repo-test            FAIL — fake red"; echo "merge-gate: FAIL"; exit 1
 EOF
 cat > $FK/rerun <<EOF
@@ -196,6 +221,25 @@ echo green > $CTL/rerun; echo 1 > $CTL/delta; touch $CTL/delta_noname; echo flak
 on_main $H14b && bad "S14 merged past an unnamed red delta" || ok "S14 unnamed red delta held"
 grep -q 'no failure could be named' $ST/REAL-FAILS.json 2>/dev/null && ok "S14 REAL-FAILS carries it unparsed" || bad "S14 not recorded unparsed"
 rm -f $CTL/delta_noname; echo 0 > $CTL/delta; echo real > $CTL/rerun_delta
+# S15 (kit) the npm-run-test TEMPLATE fallback: a red run-steps step whose report cmd is `npm run test` (NO node file token) must
+# fall back to the RIG_*_CMD templates — and a .ts test OUTSIDE src/ (plugins/) must take RIG_UI_NODE_TEST_CMD, whose strip-types
+# + TS-resolve loader flags are load-bearing (measured 2026-10-24: three plain `node --test` re-runs of
+# plugins/vite-plugin-idle-preload.test.ts failed ERR_MODULE_NOT_FOUND and were recorded REAL = FALSE real).
+rm -f $ST/failed-sha $ST/REAL-FAILS.json; echo 0 > $CTL/delta
+echo npmtest > $CTL/gate; echo real > $CTL/rerun; H15=$(commit s15)
+env "${RIG_ENV[@]}" RIG_DELTA_CMD=$FK/delta RIG_UI_CWD=src-app/ui \
+  RIG_UI_NODE_TEST_CMD='node --test --experimental-strip-types --import ./scripts/ts-resolve.mjs {file}' \
+  bash "$RIG" > $SB/rig-s15.log 2>&1
+R15=$(ls -1dt $ST/runs/* | head -1)   # ONLY this run's FAILURES.json — the S13 fixture's own cmd carries the same flags
+grep -q '"kind": "node"' $R15/FAILURES.json && grep -q 'plugins/vite-plugin-idle-preload.test.ts' $R15/FAILURES.json \
+  && ok "S15 the npm-run-test fallback names the plugins/*.ts failure" || bad "S15 plugins failure not named by the fallback"
+grep -q -- '--experimental-strip-types --import ./scripts/ts-resolve.mjs' $R15/FAILURES.json \
+  && ok "S15 the fallback re-run carries the UI template's strip-types + TS-resolve loader" || bad "S15 fallback re-run lost the template flags"
+grep -q -- '--experimental-strip-types --import ./scripts/ts-resolve.mjs --test-name-pattern=' $R15/FAILURES.json \
+  && ok "S15 the template fallback keeps the per-test --test-name-pattern" || bad "S15 fallback lost the name pattern"
+grep -q '"cwd": "src-app/ui"' $R15/FAILURES.json && ok "S15 the fallback re-run stays in the step's cwd" || bad "S15 fallback re-run cwd lost"
+on_main $H15 && bad "S15 merged past a red npm run test step" || ok "S15 not merged"
+echo 0 > $CTL/gate
 # S0 the required config fails fast with a clear message
 env -u RIG_REPO RIG_STATE=$SB/empty-state bash "$RIG" > $SB/rig-s0.log 2>&1; rc=$?
 [ $rc = 2 ] && grep -q 'RIG_REPO is required' $SB/rig-s0.log && ok "S0 missing RIG_REPO fails fast" || bad "S0 missing RIG_REPO: rc=$rc"

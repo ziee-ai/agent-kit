@@ -133,8 +133,12 @@ def node_target(p):
     if UI_CWD == '.': return p, '.'
     if under(p, UI_CWD): return from_cwd(p, UI_CWD), UI_CWD
     return p, UI_CWD
+TS_TEST_RX = re.compile(r'\.(?:ts|mts|cts|tsx)$')
 def node_tmpl(p):
-    """the RIG_*_CMD template for a UI-relative node:test path (the src/ rule, as before)."""
+    """the RIG_*_CMD template for a UI-relative node:test path: the src/ rule, plus ANY TypeScript test file — a .ts test in
+    plugins/ or scripts/ needs the same strip-types + TS-resolve loader `npm run test` passes (measured 2026-10-24: three
+    plugins/vite-plugin-idle-preload.test.ts re-runs got plain `node --test` and failed ERR_MODULE_NOT_FOUND = a false REAL)."""
+    if TS_TEST_RX.search(p): return UI_NODE_CMD
     if UI_CWD != '.': return UI_NODE_CMD if under(p, UI_CWD + '/src') else NODE_CMD
     return UI_NODE_CMD if under(p, 'src') else NODE_CMD
 def step_node_cwd_cmd(p, name, step):

@@ -30,6 +30,33 @@ if [ -f $CTL/gate_move ]; then rm -f $CTL/gate_move; (cd $SB/primary && echo mov
 if [ "\$mode" = ok ]; then echo "  ✓ C9     repo-test            PASS — fake"; echo "merge-gate: OK"; exit 0; fi
 mkdir -p "\$RIG_TIMING_DIR/test-affected"
 printf '     Running tests/integration_tests.rs (x)\ntest fake::flaky_or_real_test ... FAILED\n' > "\$RIG_TIMING_DIR/test-affected/gate-rust-full-tier.log"
+if [ "\$mode" = node ]; then
+  # the measured defect's exact shape: one parsed cargo failure + a red 'node --test' step whose failures appear only as node:test's
+  # 'x' lines (never parsed before, so the step vanished behind the parsed failure) + a second red step whose failure can never be
+  # named (it must be held UNPARSED, never silently dropped because another step produced items).
+  cat > "\$RIG_TIMING_DIR/gate.json" <<R
+{"name":"gate","results":[
+ {"step":1,"cwd":"$SB/primary/src-app/ui","cmd":"node --test --experimental-strip-types --import ./scripts/ts-resolve.mjs plugins/a.test.ts plugins/b.test.ts","rc":1},
+ {"step":2,"cwd":"$SB/primary/src-app/ui","cmd":"node --test scripts/boom.test.mjs","rc":1}
+]}
+R
+  cat > "\$RIG_TIMING_DIR/just-1-gate-merge.log" <<R
+=== run-steps gate [1/2] START 12:00:00 :: node --test --experimental-strip-types --import ./scripts/ts-resolve.mjs plugins/a.test.ts plugins/b.test.ts
+✔ ok test (1ms)
+ℹ tests 2
+ℹ pass 1
+ℹ fail 1
+✖ failing tests:
+
+test at plugins/a.test.ts:365:1
+✖ TEST-3 the REAL tree: the emitted map covers every manifest entry (non-vacuity floor) (10169.017482ms)
+  Error: x
+=== run-steps gate [1/2] FAIL rc=1 12.3s 12:00:12 :: node --test --experimental-strip-types --import ./scripts/ts-resolve.mjs plugins/a.test.ts plugins/b.test.ts
+=== run-steps gate [2/2] START 12:00:12 :: node --test scripts/boom.test.mjs
+✖ the whole file failed (1.5ms)
+=== run-steps gate [2/2] FAIL rc=1 0.5s 12:00:13 :: node --test scripts/boom.test.mjs
+R
+fi
 echo "  ✗ C9     repo-test            FAIL — fake red"; echo "merge-gate: FAIL"; exit 1
 EOF
 cat > $FK/rerun <<EOF
@@ -149,6 +176,19 @@ echo green > $CTL/rerun; H12b=$(commit s12b); run_rig_nodelta s12b
 grep -q 'DELTA SKIPPED' $SB/rig-s12b.log && ok "S12 unconfigured delta logged as SKIPPED" || bad "S12 delta skip not logged ($(tail -2 $SB/rig-s12b.log | tr '\n' ' '))"
 on_main $H12b && ok "S12 recheck merged" || bad "S12 recheck NOT merged"
 git -C $SB/primary log -1 --format=%B origin/main | grep -q 'SKIPPED' && ok "S12 merge message records the skipped delta" || bad "S12 merge message hides the skipped delta"
+# S13 (kit) node:test failures are NEVER dropped by another (parsed) failure: the red node --test step is named per test —
+# each with a re-run by file + --test-name-pattern built from the step's OWN report cmd/cwd — and a red test step whose failure
+# names nothing is held UNPARSED (the measured 2026-10-24 live-ui defect: 9 node reds vanished behind 2 parsed cargo reds).
+rm -f $ST/failed-sha $ST/REAL-FAILS.json; echo 0 > $CTL/delta
+echo node > $CTL/gate; echo real > $CTL/rerun; H13=$(commit s13); run_rig s13
+grep -q '"kind": "node"' $ST/runs/*/FAILURES.json && grep -q -- '--test-name-pattern=' $ST/runs/*/FAILURES.json \
+  && ok "S13 node:test failures named (kind node, --test-name-pattern re-runs)" || bad "S13 node failures dropped ($(head -1 $ST/runs/*/failures.out 2>/dev/null))"
+grep -q 'TEST-3 the REAL tree: the emitted map covers every manifest entry' $ST/runs/*/FAILURES.json && ok "S13 the named node test is the real one" || bad "S13 node failure mis-named"
+grep -q 'node --test --experimental-strip-types --import ./scripts/ts-resolve.mjs --test-name-pattern=' $ST/runs/*/FAILURES.json \
+  && ok "S13 the re-run keeps the step's own node command + cwd" || bad "S13 re-run lost the step's node flags"
+grep -q 'no individual failure could be named' $ST/REAL-FAILS.json 2>/dev/null && ok "S13 the unnameable red step held unparsed" || bad "S13 unnameable red step dropped"
+on_main $H13 && bad "S13 merged past an unparsed red step" || ok "S13 not merged"
+echo 0 > $CTL/gate
 # S14 (kit) a red fix delta whose output NAMES nothing is not "all flakes" -> held, REAL-FAILS carries it unparsed
 rm -f $ST/failed-sha $ST/REAL-FAILS.json; echo 0 > $CTL/delta; echo "0.5 0.5 0.5 1/1 1" > $CTL/loadavg
 echo fail > $CTL/gate; echo real > $CTL/rerun; H14=$(commit s14a); run_rig s14a

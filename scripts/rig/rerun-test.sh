@@ -34,4 +34,9 @@ grep -q $'^REAL\tt\tinter' $SB/r2/verdicts.tsv && [ $rc = 1 ] && ok "R2 intermit
 item inter "0"; echo 0 > $SB/inter.n
 fj inter:3 > $SB/f3.json; RERUN_TRIES=1 rf $SB/f3.json $SB/r3; rc=$?
 [ "$(runs inter)" = 3 ] && grep -q $'^GREEN\tt\tinter' $SB/r3/verdicts.tsv && [ $rc = 0 ] && ok "R3 fixed intermittent green 3/3 -> GREEN" || bad "R3 runs=$(runs inter) rc=$rc"
+# R4 the parser's new `node` kind (a file + --test-name-pattern re-run) gets the SAME alone-3x flake rule as vitest/cargo
+item flake "0"; rm -f $SB/flake.n; echo 0 > $SB/flake.n
+python3 -c "import json;json.dump({'structural':[],'unparsed':[],'items':[{'kind':'node','id':'plugins/a.test.ts:TEST-3 the REAL tree (x)','cwd':'.','cmd':'./flake'}]},open('$SB/f4.json','w'))"
+rf $SB/f4.json $SB/r4
+grep -q $'^FLAKY\tnode\tplugins/a.test.ts:TEST-3 the REAL tree (x)' $SB/r4/verdicts.tsv && [ "$(runs flake)" = 3 ] && ok "R4 node kind re-run alone 3x -> FLAKY (same rule)" || bad "R4 node kind verdict/runs ($(runs flake))"
 echo "rerun-test: $fails failed"; exit $fails

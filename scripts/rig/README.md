@@ -37,7 +37,7 @@ candidate tip (no new commits for RIG_QUIET_SECS)
 | `auto-merge.sh` | the loop above |
 | `rig-pregate.sh` | the pregate (`<sha> [<outdir>]`; writes `SUMMARY`, `TIMES`, per-check logs) |
 | `rig-worktree.sh` | sourced; `rig_worktree_at <sha> <logdir>` puts the ONE persistent rig worktree at a sha |
-| `gate-failures.py` | `<gate.log> <run-dir>` → `FAILURES.json` (structural / named items / unparsed). Parsers: cargo test, nextest, playwright, vitest, node:test, run-steps reports; ignores compile errors planted by mutation batteries (`RIG_GATED_SHA` + `RIG_SRC_REPO`) |
+| `gate-failures.py` | `<gate.log> <run-dir>` → `FAILURES.json` (structural / named items / unparsed). Parsers: cargo test, nextest, playwright, vitest, node:test — node:test failures are NAMED per test (`test at <file>` + `✖ <name>`, or TAP `not ok` + `location:`), each re-run by file + `--test-name-pattern=<escaped name>`; PER-STEP accounting: every failed run-steps test step must contribute ≥ 1 named item from its own output segment, else it lands in `unparsed` — a red test step is never silently dropped because another step's failures parsed. Ignores compile errors planted by mutation batteries (`RIG_GATED_SHA` + `RIG_SRC_REPO`) |
 | `rerun-failures.sh` | `<sha> <FAILURES.json> <outdir>` → each item alone `RERUN_TRIES` (default 3) times → `RERUN.json`, `verdicts.tsv`; exit 0 = all flakes |
 | `recheck-flake.py` | `<run-dir>` → still-red recheck steps broken into named tests (`recheck-flake/FAILURES.json`); exit 3 = a red step could not be named |
 | `gate-timing.py` | `<run-dir>` → `SUMMARY.md`: per-stage and per-recipe durations from the shims' records |
@@ -149,9 +149,9 @@ through `RIG_RUN_WRAPPER`. P2 also refuses a moved submodule pin unless `$RIG_ST
 | `RIG_UI_CWD` | `.` | repo-relative dir the JS runners run in |
 | `RIG_E2E_CMD` | `npx playwright test {spec} --workers=1` | `{spec}` = `path:line` (wrap it in your e2e lock if you have one) |
 | `RIG_VITEST_CMD` | `npx vitest run {file}` | |
-| `RIG_NODE_TEST_CMD` | `node --test {file}` | |
-| `RIG_UI_NODE_TEST_CMD` | `RIG_NODE_TEST_CMD` | for node tests under `$RIG_UI_CWD/src/` (e.g. with a TS loader) |
-| `RIG_TEST_STEP_RX` | test tiers (`test-unit`, `vitest run`, `cargo test`, …) | a failed run-steps step matching it is named test by test, never re-run whole |
+| `RIG_NODE_TEST_CMD` | `node --test {file}` | `{file}`; a named node:test failure also injects `--test-name-pattern=<regex-escaped title>` (before `{file}` — node stops parsing test-runner options at the first file, measured) |
+| `RIG_UI_NODE_TEST_CMD` | `RIG_NODE_TEST_CMD` | for node tests under `$RIG_UI_CWD/src/` (e.g. with a TS loader); may carry `{name}` where the pattern is substituted |
+| `RIG_TEST_STEP_RX` | test tiers (`test-unit`, `vitest run`, `cargo test`, `node --test`, …) | a failed run-steps step matching it is named test by test, never re-run whole |
 | `RIG_WRAPPER_STEPS` | empty | `cmd=report;…`: a wrapper step skipped when `<report>.json` lists its inner steps |
 | `RIG_STAGING_RX` | derived | regex of staging prefixes to strip from paths |
 | `RIG_STAGING_DIRS` | empty | `:`-separated dirs whose children are staging/worktree trees |
@@ -194,7 +194,7 @@ Start it detached: `RIG_STATE=/srv/rig setsid nohup scripts/rig/auto-merge.sh >>
 ## Testing and changing the rig
 
 ```bash
-bash scripts/rig/rig-test.sh "$PWD/scripts/rig/auto-merge.sh"   # S0–S12: every decision path; RIG-TEST-FAILED=0
+bash scripts/rig/rig-test.sh "$PWD/scripts/rig/auto-merge.sh"   # S0–S14: every decision path; RIG-TEST-FAILED=0
 bash scripts/rig/rerun-test.sh scripts/rig/rerun-failures.sh     # the flake rule incl. intermittent tries; 0 failed
 bash scripts/rig/gate-failures-e2e-test.sh                           # e2e re-run targets the title, not file:line; exit 0
 bash scripts/rig/recheck-flake-test.sh scripts/rig/recheck-flake.py  # the flake pass reads the real command; 0 failed
